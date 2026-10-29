@@ -79,7 +79,11 @@ pub fn check(case: &Case) -> Result<(), String> {
     let reenters = [&b"\x1b[?47h"[..], b"\x1b[?1047h", b"\x1b[?1049h"]
         .iter()
         .any(|m| case.after.windows(m.len()).any(|w| w == *m));
-    if !on_alternate && reenters {
+    // And the restore enters the alternate screen with 47 whatever mode
+    // the program used, so a redundant `?1049h` from a program already
+    // there saves, switches and clears in the client but does nothing in
+    // the model (noted in the M2c PR for design review).
+    if reenters {
         return Ok(());
     }
     // REP (`CSI n b`) repeats the last character printed, which no restore
@@ -101,18 +105,15 @@ pub fn check(case: &Case) -> Result<(), String> {
     )
 }
 
-/// Whether `bytes` hold a CSI ending in `b` (digits and `;` between).
+/// Whether `bytes` might hold a REP: a CSI with a `b` anywhere after it.
+/// Ghostty takes bytes that cannot be parameters inside a CSI, so this
+/// stays conservative.
 fn has_rep(bytes: &[u8]) -> bool {
-    bytes.windows(2).enumerate().any(|(i, w)| {
-        w == b"\x1b[" && {
-            let rest = &bytes[i + 2..];
-            let n = rest
-                .iter()
-                .take_while(|c| c.is_ascii_digit() || **c == b';')
-                .count();
-            rest.get(n) == Some(&b'b')
-        }
-    })
+    let csi = bytes
+        .windows(2)
+        .position(|w| w == b"\x1b[")
+        .or_else(|| bytes.iter().position(|&c| c == 0x9b));
+    csi.is_some_and(|i| bytes[i..].contains(&b'b'))
 }
 
 /// Known gaps in writing the live cursor, both reachable only by unusual
@@ -192,7 +193,40 @@ fn known(expected: &serde_json::Value, diff: &str) -> bool {
     // unstyled.
     let edge = expected["cols"].as_u64().unwrap_or(0);
     let margin = expected["scrolling_region"][3].as_u64().unwrap_or(0) + 1;
-    last_column_style_only(diff, edge) || last_column_style_only(diff, margin)
+    if last_column_style_only(diff, edge) || last_column_style_only(diff, margin) {
+        return true;
+    }
+    // With left and right margins (DECLRMM), lines inserted or deleted
+    // inside them around a wide character that did not fit leave styled
+    // blank cells the formatter does not write: same text, different
+    // styles on blanks.
+    // And a row with no text at all is written as nothing when its only
+    // styles are on such empty cells (the formatter writes a row only for
+    // text or a background-only cell).
+    // With grapheme clustering (2027), cells the program printed apart can
+    // cluster when the restore writes them in order (a prepend character
+    // before a wide one), which moves the styles of the cells involved.
+    let margins_or_clusters =
+        expected["modes"]["?69"] == true || expected["modes"]["?2027"] == true;
+    (margins_or_clusters && same_text(diff, false)) || same_text(diff, true)
+}
+
+/// Whether a row difference has the same text on both sides (and, with
+/// `blank`, no text at all).
+fn same_text(diff: &str, blank: bool) -> bool {
+    let Some((_, rest)) = diff.split_once(": ") else {
+        return false;
+    };
+    let Some((a, b)) = rest.split_once(" != ") else {
+        return false;
+    };
+    match (
+        serde_json::from_str::<serde_json::Value>(a),
+        serde_json::from_str::<serde_json::Value>(b),
+    ) {
+        (Ok(a), Ok(b)) => a[0] == b[0] && (!blank || a[0] == ""),
+        _ => false,
+    }
 }
 
 /// Whether a row difference (`... row N: [..] != [..]`) is only in the
@@ -312,6 +346,7 @@ mod tests {
             rows in 1u16..10,
             mode in mode(),
             graphemes in any::<bool>(),
+            client in proptest::option::of((2u16..30, 1u16..10)),
         ) {
             // 2027 only from the start: the restore writes it before any
             // content, so text printed before a program turned it on is
@@ -319,11 +354,53 @@ mod tests {
             let mut stream = if graphemes { b"\x1b[?2027h".to_vec() } else { Vec::new() };
             stream.extend(pieces.concat());
             let after = after.concat();
-            let case = Case { stream: &stream, split, model: (cols, rows), client: (cols, rows), mode, after: &after };
+            let case = Case {
+                stream: &stream,
+                split,
+                model: (cols, rows),
+                client: client.unwrap_or((cols, rows)),
+                mode,
+                after: &after,
+            };
             if let Err(e) = check(&case) {
                 prop_assert!(false, "{e}\ncase: {case:?}");
             }
         }
+    }
+
+    /// The fuzz target's seed corpus (fuzz/seed-restore.sh): every
+    /// fidelity fixture's stream, at a small size and at its own.
+    #[test]
+    fn fixture_streams_pass() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fidelity/fixtures");
+        let mut n = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path().join("stream.bin");
+            let Ok(stream) = std::fs::read(&path) else {
+                continue;
+            };
+            let stream = &stream[..stream.len().min(1 << 16)];
+            for (size, mode) in [
+                ((38, 22), Mode::Full),
+                ((80, 24), Mode::Screen),
+                ((80, 24), Mode::Full),
+            ] {
+                let case = Case {
+                    stream,
+                    split: stream.len() / 2,
+                    model: size,
+                    client: size,
+                    mode,
+                    after: b"",
+                };
+                if let Err(e) = check(&case) {
+                    panic!("{}: {e}", path.display());
+                }
+            }
+            n += 1;
+        }
+        assert!(n > 20, "found {n} fixtures in {}", dir.display());
     }
 
     #[test]

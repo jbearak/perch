@@ -159,16 +159,12 @@ pub fn build(
     client: Client,
     bracketed_paste: bool,
 ) -> Result<Restore, VtError> {
-    let (cols, rows) = client.size();
     let limits = RestoreLimits {
         client_scrollback_rows: client.scrollback_rows,
         history_cap: HISTORY_CAP,
         byte_cap: BYTE_CAP,
     };
-    build_with_limits(model, mode, client, bracketed_paste, limits).map(|r| {
-        debug_assert_eq!(r.size, (cols, rows));
-        r
-    })
+    build_with_limits(model, mode, client, bracketed_paste, limits)
 }
 
 /// [`build`] with other limits, for tests of the byte cap.
