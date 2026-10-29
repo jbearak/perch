@@ -1,0 +1,14 @@
+/target/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+node_modules/
+zig-out/
+zig-pkg/
+.zig-cache/
+editors/vscode/dist/
+editors/vscode/out/
+.vscode-test/
+*.vsix
+editors/vscode/bin/

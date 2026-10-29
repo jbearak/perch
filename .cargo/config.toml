@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
+[env]
+# The macOS that both halves of the binary target. crates/perch/build.rs passes
+# the same value to Zig and fails if this differs.
+MACOSX_DEPLOYMENT_TARGET = "11.0"

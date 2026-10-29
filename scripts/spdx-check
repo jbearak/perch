@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Fails unless every tracked source file declares GPL-3.0-only in an SPDX
+# header on its first line, or its second after a shebang. The one exception
+# is tracker.rs, a port of MIT code from Ghostty, whose header is
+# `GPL-3.0-only AND MIT`.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+status=0
+files=$(git ls-files --cached --others --exclude-standard)
+IFS='
+'
+for f in $files; do
+    [ -f "$f" ] || continue
+    case "$f" in
+        *.rs | *.zig | *.zon | *.ts | *.js | *.mjs | *.cjs) prefix='//' ;;
+        *.sh | *.toml | *.yml | *.yaml | scripts/*) prefix='#' ;;
+        *) continue ;;
+    esac
+    case "$f" in
+        Cargo.lock | */Cargo.lock) continue ;;
+    esac
+    license='GPL-3.0-only'
+    case "$f" in
+        crates/perch/src/tracker.rs) license='GPL-3.0-only AND MIT' ;;
+    esac
+    expected="$prefix SPDX-License-Identifier: $license"
+    first=$(sed -n 1p "$f")
+    case "$first" in
+        '#!'*) header=$(sed -n 2p "$f") ;;
+        *) header=$first ;;
+    esac
+    if [ "$header" != "$expected" ]; then
+        echo "$f: expected \"$expected\" as the first line" >&2
+        status=1
+    fi
+done
+[ $status -eq 0 ] && echo "spdx-check: ok"
+exit $status

@@ -1,0 +1,51 @@
+{
+  "name": "perch",
+  "displayName": "Perch",
+  "description": "Persistent terminal sessions that survive closed windows and dropped SSH connections.",
+  "version": "0.1.0",
+  "publisher": "jbearak",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jbearak/perch"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {},
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "lint": "eslint .",
+    "check-deps": "node scripts/check-deps.mjs",
+    "licenses": "node scripts/check-deps.mjs --write",
+    "pretest": "npm run build && tsc -p tsconfig.test.json",
+    "test": "node out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/mocha": "10.0.10",
+    "@types/node": "18.19.130",
+    "@types/vscode": "1.82.0",
+    "@vscode/test-electron": "3.1.0",
+    "esbuild": "0.28.2",
+    "eslint": "10.13.0",
+    "mocha": "10.8.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1"
+  },
+  "overrides": {
+    "serialize-javascript": "7.1.4"
+  }
+}

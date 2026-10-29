@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[package]
+name = "perch"
+description = "Persistent terminal sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "perch"
+path = "src/main.rs"
+
+[features]
+# Test-only hooks: fault injection, PERCH_TEST_TIME_SCALE and perch-vt's test
+# observer. Never on in release builds.
+test-hooks = []
+
+[dependencies]
+serde_json = "1"

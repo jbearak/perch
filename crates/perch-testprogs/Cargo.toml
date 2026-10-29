@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[package]
+name = "perch-testprogs"
+description = "Programs Perch's integration tests run inside sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+test-hooks = ["perch/test-hooks"]
+
+[dependencies]
+perch = { path = "../perch" }

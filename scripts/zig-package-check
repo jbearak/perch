@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Builds perch-vt the way crates/perch/build.rs does, with the shipped flags
+# and empty global and local package directories, then fails on any package
+# in the local package directory that perch-vt/zig-packages.toml does not
+# list. Extra arguments go to `zig build` (for example -Dtarget=...).
+#
+# Zig: $PERCH_ZIG if set, else `zig` on PATH. Needs the network.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+zig=${PERCH_ZIG:-zig}
+list="$root/perch-vt/zig-packages.toml"
+
+work=$(mktemp -d)
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
+mkdir "$work/global"
+
+cd "$work"
+ZIG_GLOBAL_CACHE_DIR="$work/global" ZIG_LOCAL_PKG_DIR=zig-pkg "$zig" build \
+    --build-file "$root/perch-vt/build.zig" \
+    --cache-dir "$work/cache" \
+    --prefix "$work/out" \
+    -Doptimize=ReleaseSafe -Dcpu=baseline -Dsimd=false -Dvt-features=-kitty-graphics \
+    "$@"
+
+status=0
+for pkg in $(ls zig-pkg); do
+    if grep -q "^hash = \"$pkg\"\$" "$list"; then
+        echo "listed:   $pkg"
+    else
+        echo "UNLISTED: $pkg (add it to perch-vt/zig-packages.toml, and to NOTICE if linked)" >&2
+        status=1
+    fi
+done
+for pkg in $(sed -n 's/^hash = "\(.*\)"$/\1/p' "$list"); do
+    [ -d "zig-pkg/$pkg" ] || echo "note: listed but not fetched on this host: $pkg"
+done
+[ $status -eq 0 ] && echo "zig-package-check: ok"
+exit $status

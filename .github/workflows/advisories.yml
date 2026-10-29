@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: Advisories
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny advisories (workspace)
+        run: cargo deny check advisories
+      - name: cargo deny advisories (fuzz)
+        run: cargo deny --manifest-path fuzz/Cargo.toml check advisories
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm audit (extension development packages)
+        working-directory: editors/vscode
+        run: npm audit --audit-level=moderate
