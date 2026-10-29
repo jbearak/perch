@@ -208,7 +208,8 @@ impl Queries {
         }
         self.misses.clear();
         for entry in self.entries.values_mut() {
-            if matches!(entry.model, Model::Awaiting { .. }) {
+            // A miss by the failed model must not count against the next.
+            if matches!(entry.model, Model::Awaiting { .. } | Model::Missed) {
                 entry.model = Model::Unavailable;
             }
         }

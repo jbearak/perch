@@ -18,8 +18,11 @@ use std::time::Duration;
 use crate::queries::{Kind, ReplyMatcher};
 use crate::transport::Transport;
 
-/// The most bytes the queue holds. Replies are always taken, even over it.
+/// The most bytes the queue holds. Replies are taken even over it.
 pub const QUEUE_CAP: usize = 1 << 20;
+/// The most replies queued. A program that keeps asking while it reads no
+/// input gets no more answers past this, so the queue stays bounded.
+pub const REPLY_MAX: usize = 4096;
 /// How long an incomplete escape sequence at the end of a client read is
 /// held while a forwarded query is outstanding.
 pub const REPLY_HOLD: Duration = Duration::from_millis(100);
@@ -93,9 +96,10 @@ impl Input {
         Ok(())
     }
 
-    /// Queues a reply ahead of every item not yet started.
+    /// Queues a reply ahead of every item not yet started, unless
+    /// [`REPLY_MAX`] replies are already waiting.
     pub fn push_reply(&mut self, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
+        if !bytes.is_empty() && self.replies.len() < REPLY_MAX {
             self.queued += bytes.len();
             self.replies.push_back(bytes);
         }
@@ -406,6 +410,15 @@ mod tests {
         assert_eq!(&out[..4], b"\x1b[0n");
         assert_eq!(out.len(), QUEUE_CAP + 4);
         assert_eq!(input.room(), QUEUE_CAP);
+    }
+
+    #[test]
+    fn replies_stop_at_the_reply_limit() {
+        let mut input = Input::new();
+        for _ in 0..REPLY_MAX + 10 {
+            input.push_reply(b"\x1b[0n".to_vec());
+        }
+        assert_eq!(input.queued(), REPLY_MAX * 4);
     }
 
     #[test]
