@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 5. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: agreed by Sonnet and Terra, revision 6. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -11,7 +11,7 @@ Perch has two parts.
 
 A session is one program (R, Stata, a shell, anything) running on a pseudo-terminal that Perch owns. Closing the editor window, losing the SSH connection or restarting the VS Code server does not end it, as long as the host's process policy lets a user process outlive its login (see [What can still end a session](#what-can-still-end-a-session)). Rebooting the host, or killing the supervisor process, does end it.
 
-Perch never writes anything into a session on its own. Bytes reach a session's input only from an attached terminal, from an explicit `send` by the user or an integrating extension, or as a reply to a status query the program itself sent while no terminal was attached (see [Terminal queries](#terminal-queries)). A real terminal would send the same reply.
+Perch never writes anything into a session on its own. Bytes reach a session's input only from an attached terminal, from an explicit `send` by the user or an integrating extension, or as a reply to a status query the program itself sent that no attached terminal received (see [Terminal queries](#terminal-queries)). A real terminal would send the same reply.
 
 ## Prior art and how Perch differs
 
@@ -186,6 +186,8 @@ Clients reach the supervisor over its Unix socket. Each frame is a 4-byte big-en
 | `annotate` | `set` map, `unset` list | `ok` |
 | `detach` | | `ok`; the attached client is told it was detached |
 
+**Sizes.** Wherever a size sets the model or the PTY (the creator's terminal at `perch new`, the `Attach` frame, later resize frames), rows and columns are clamped to 1 through 500. `Attached` returns the size in effect.
+
 **Attach mode** starts with an `Attach` frame from the client, JSON: `{"rows":..,"cols":..,"restore":"full"|"screen"|"none","scrollback":..,"ifDetached":bool,"env":{...}}`, where `env` holds the client's values of the linked variables. The supervisor answers `Attached`, or `Busy` if `ifDetached` was set and another client is live. After that the frames carry raw bytes (input, output) and small JSON (resize, detached, exited). `Attach` follows the additive-fields rule.
 
 **Timeouts.** Clients give each `info` call 500 ms. `list` queries sessions in parallel and shows one that does not answer in time as `unresponsive`, for example a supervisor stopped with SIGSTOP.
@@ -202,7 +204,7 @@ Clients reach the supervisor over its Unix socket. Each frame is a 4-byte big-en
 `send` exists so that editors can send code while no terminal is attached, and so that sends from Sight do not depend on which terminal has focus.
 
 - The supervisor keeps one FIFO input queue per session. Keystrokes from the attached client and `send` requests share it. A send's bytes are never interleaved with typed bytes.
-- Replies to terminal queries go ahead of queued items, but never into the middle of an item already partly written. That covers replies the supervisor writes itself and client input that the supervisor recognizes as the reply to an outstanding forwarded query (see [Terminal queries](#terminal-queries)). Otherwise a reply queued behind a large send would reach the program after the pasted text, and the program would read the paste as its reply.
+- Replies to terminal queries go ahead of queued items, but never into the middle of an item already partly written. That covers replies the supervisor writes itself and client input that the supervisor recognizes as the reply to an outstanding forwarded query (see [Terminal queries](#terminal-queries)). Otherwise a reply queued behind a large send would reach the program after the pasted text, and the program would read the paste as its reply. A reply can arrive split across two reads from the client. So while a forwarded query is outstanding, the supervisor holds back an incomplete escape sequence at the end of a client read until it completes or 100 ms pass, and then queues it whole: at the front if it is a reply, in order otherwise.
 - The queue holds at most 1 MiB. A send that does not fit gets `queue_full` and nothing is queued. The supervisor writes the queue to the PTY master without blocking, as fast as the kernel accepts it.
 - `queued` is the acknowledgement. Once a client has it, the bytes will be written in order unless the session ends first. If the connection drops before `queued` arrives, the outcome is unknown, and the client reports exactly that ("may not have been sent") and never resends. Raven's console socket has the same rule.
 - `submit: true` appends a carriage return, which is what pressing Enter sends.
@@ -244,7 +246,7 @@ A client can read slowly (xterm.js parses far slower than `cat` writes) or stop 
 - 3 stalls within 10 minutes means this client cannot keep up. The supervisor detaches it with the reason `too_slow`, and the client says so and offers to reattach.
 - `perch attach` reads frames from the socket only as fast as it can write them to its own terminal, and never buffers more than one frame. Otherwise flow control would move into the client's memory and the supervisor would never see the lag. It uses non-blocking I/O in both directions, so keystrokes (Ctrl-C above all) and resizes still reach the supervisor while its own output is blocked.
 
-**Delivering a restore.** A restore is built in full when it is due and sent as a sequence of output frames ahead of any live output. The 4 MiB cap applies to live output, not to the restore. While a restore is being delivered, the supervisor does not read the PTY, so the program waits as it would behind any slow terminal, and the stall rule applies: if the client stops accepting bytes for 5 seconds, the rest of the restore is dropped with the live frames and a resync follows. A restore's size is bounded. The screen is clamped to 500 by 500 cells, so even an alternate screen dumped on top of a primary one with a color change on every cell stays under about 25 MB. History in a full restore is capped at 4 MiB, keeping the most recent lines.
+**Delivering a restore.** A restore is built in full when it is due and sent as a sequence of output frames ahead of any live output. The 4 MiB cap applies to live output, not to the restore. While a restore is being delivered, the supervisor does not read the PTY, so the program waits as it would behind any slow terminal, and the stall rule applies: if the client stops accepting bytes for 5 seconds, the rest of the restore is dropped with the live frames and a resync follows. A restore's size is bounded. The screen is clamped to 500 by 500 cells, so even an alternate screen dumped on top of a primary one with a color change on every cell stays under about 30 MB. History in a full restore is capped at 4 MiB, keeping the most recent lines.
 
 ### Restore on attach
 
@@ -268,7 +270,7 @@ The mode and query parser (below) reads the same bytes in the same order. Each r
 
 **Snapshot boundary.** A restore is always taken where both parsers are at rest: the mode parser in its ground state and the UTF-8 decoder holding no partial character. If a restore is due while the program is in the middle of a sequence, the supervisor feeds the model only up to the end of that sequence, takes the snapshot there, and sends the rest of that read as live output after the restore. avt's `dump()` then has no unfinished-sequence tail, and nothing is sent twice.
 
-If the program stays in the middle of a sequence for 1 second with no further output, the supervisor takes the snapshot anyway, and that unfinished sequence belongs to the supervisor alone. The client never sees any part of it: Perch drops avt's dump tail whatever kind of sequence it is, and the mode parser swallows the rest of the sequence, up to its end, from that client's live output. The model still processes the sequence. If it turns out to be a query, the supervisor answers it, because the client never saw it. The UTF-8 decoder's partial bytes are handled the same way: the client never receives that character. The cost is that one sequence's effect (a color change, a title) is missing in the terminal until the program repeats it. That happens only when a program stops writing in the middle of an escape sequence, which is rare.
+If the program stays in the middle of a sequence for 1 second with no further output, or a restore has waited 5 seconds in total (a long image or clipboard sequence can stay unfinished that long), the supervisor takes the snapshot anyway, and that unfinished sequence belongs to the supervisor alone. It feeds avt a `CAN`, which returns avt's parser to ground, so `dump()` has no unfinished tail. The rest of the sequence, up to its end, is withheld from both avt and the client, and the UTF-8 decoder's partial character is dropped the same way. Perch's mode parser still reads the whole sequence. If it is a query, the supervisor answers it, because the client never saw it. The model and the terminal then agree, and the cost is that one sequence's effect (a color change, a title) is missing from both until the program repeats it. That happens only when a program stops writing in the middle of an escape sequence, or sends a very long one during an attach.
 
 **Three restore modes.** The client chooses one in its attach frame.
 
@@ -276,14 +278,14 @@ If the program stays in the middle of a sequence for 1 second with no further ou
 - `screen`: prologue, then screen, no history, and no erasing of the terminal's scrollback. The CLI's default, because `perch attach` typed into iTerm, Terminal.app or tmux must not wipe what the user already had there.
 - `none`: used for the first attach of `perch new`. The program has not started, so there is nothing to restore.
 
-A client that re-attaches in the same process, after "Press Enter to take it back", uses the mode it attached with, except that `none` becomes `screen`.
+A client that re-attaches in the same process, after "Press Enter to take it back", uses its `--restore` value: `perch attach` the mode it attached with, `perch new` its `--restore` option (default `screen`).
 
 A **resync** after a stall is a `screen` restore. Its contract is weaker: lines that scrolled off while output was being dropped are missing from the terminal's scrollback.
 
 **The prologue** puts any terminal into a known state. In order:
 
 1. `CAN` (0x18), which aborts an escape sequence or control string that a dropped frame left open. A partial UTF-8 character ends as a replacement character at the next byte. `OSC 8 ; ; ST` then closes any open hyperlink.
-2. If the client may be in the alternate screen, pop its kitty keyboard stack (`CSI < 99 u`), then leave the alternate screen (`ESC [?1049l`). Pop the main screen's kitty stack too. Kitty keeps a stack per screen.
+2. Pop the alternate screen's kitty keyboard stack (`CSI < 99 u`), leave the alternate screen (`ESC [?1049l`), then pop the main screen's stack. Kitty keeps a stack per screen. All three are harmless if the terminal is already on the main screen with empty stacks.
 3. DECSTR (`ESC [!p`), followed by explicit resets for terminals that implement DECSTR partly or not at all: `ESC [r`, `ESC [0m`, `ESC [4l`, `ESC [20l`, `ESC [?6l`, `ESC [?7h`, `ESC [?1l`, `ESC (B`, `ESC )B`, `SI`, `ESC [?25h`, `ESC >`, `CSI > 4 m` (modifyOtherKeys off), `l` for the private modes 9, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004 and 2026, and default tab stops (`ESC [3g`, then `ESC H` every 8 columns).
 4. Home the cursor and save it (`ESC [H ESC 7`), so the primary screen's saved-cursor slot holds the default that avt's dump assumes.
 
@@ -293,7 +295,7 @@ A **full restore**, after the prologue:
 
 1. Resizes the model and then the PTY to the client's size, clamped as above. If the size changed, the kernel delivers SIGWINCH and the program redraws as it would for any resize. If it did not change, Perch forces no redraw, because the model is already correct and forced redraws make some line editors print a second prompt.
 2. Clears the screen and the terminal's scrollback (`ESC [H ESC [2J ESC [3J`).
-3. Sends history as logical lines with SGR codes, joining soft-wrapped rows so the terminal wraps them at its own width. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width with wide characters counted as two columns, and that fits the queue cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
+3. Sends history as logical lines with SGR codes, joining soft-wrapped rows so the terminal wraps them at its own width. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width with wide characters counted as two columns, and that fits the 4 MiB history cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
 4. Homes the cursor and clears the screen (`ESC [H ESC [2J`), restores the primary screen's kitty stack, sends avt's `dump()`, then the rest of the modes only Perch tracks.
 5. Switches the client to live passthrough.
 
@@ -322,7 +324,7 @@ Programs ask the terminal questions by writing escape sequences and reading the 
 
 - Ownership passes to a client when the supervisor enqueues that client's restore. Snapshots are taken at a ground state, or else the unfinished sequence belongs to the supervisor (see [Restore on attach](#restore-on-attach)), so no query straddles the change. Every query the program wrote before that point is answered by the supervisor and is not in the restore, which is built from the model. Every query after that point reaches the client in its live output, and the real terminal answers.
 - With no client, or a lagging client, the supervisor answers each query as it parses it.
-- The supervisor keeps a list of queries forwarded to the live client and not yet answered. Each entry records the query's kind, its position in the client's output, and, for DSR 6, the cursor position at the moment of the query. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same `vte` parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
+- The supervisor keeps a list of queries forwarded to the live client and not yet answered. Each entry records the query's kind, its position in the client's output (the offset of its last byte), and, for DSR 6, the cursor position at the moment of the query. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same `vte` parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
 - When the supervisor drops output after a stall, outstanding queries whose position falls in dropped frames never reached the client. The supervisor answers them at once, using the recorded cursor position.
 - Before it detaches a client or lets another take over, the supervisor reads whatever that client has already sent, without blocking, and processes it as normal input. It then answers every query still outstanding, using the recorded positions, and from then on discards input from that client. A reply the old terminal sends later never reaches the program.
 - A query the live client leaves unanswered for 2 seconds is dropped from the list without an answer, as with a real terminal that does not support it.
@@ -621,6 +623,10 @@ This mirrors Raven's layout.
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 6
+
+Sonnet and Terra both agreed on revision 5. Their remaining small points: the 1-second fallback now returns avt's parser to ground with `CAN` and withholds the rest of the sequence from model and client alike, so no avt change is needed to drop a dump tail, and a 5-second cap bounds the wait. Split replies are held until complete. The 500 clamp applies wherever a size is set. `perch new` re-attaches with its own `--restore`. A query's position is its last byte. The history contract names the 4 MiB cap.
 
 ### Revision 5
 
