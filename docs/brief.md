@@ -53,13 +53,12 @@ These came out of discussion and are for the design to confirm or reject.
 
 ## Constraints
 
-- Any code studied or reused must be under a license compatible with GPL-3. MIT, BSD, ISC and Apache-2.0 qualify. GPL-2-only and source-available licenses such as Elastic do not. The original request said "GPT-3 compatible", read here as GPL-3. Confirm with the author.
+- Perch is licensed under GPLv3, and the `LICENSE` file holds the full text. Any code studied or reused must be under a license compatible with GPLv3. MIT, BSD, ISC and Apache-2.0 qualify. GPL-2-only and source-available licenses such as Elastic do not.
 - Do not study Positron. It is source-available but proprietary.
-- Perch's own license is undecided. Ask the author before adding a LICENSE file.
 - The extension must work on stock VSCodium and Open VSX as well as on Rhodium, a planned VS Code OSS fork.
 
 ## Open questions
 
-- Perch's license.
+- Whether Perch is GPL-3.0-only or GPL-3.0-or-later. This decides the SPDX identifier in `package.json` and `Cargo.toml` and any file headers.
 - Whether to list sessions on remote hosts a window is not connected to. The current recommendation is no, for v1.
 - Names and layout of the repo, for example a Rust crate for the host and a TypeScript extension.
