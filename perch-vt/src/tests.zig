@@ -849,6 +849,29 @@ test "joins: a row the formatter skips is never joined" {
     try testing.expectEqual(@as(u21, 'e'), cell.codepoint());
 }
 
+test "ISO protection mode is restored, so EL keeps protected cells" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    // ESC V (SPA) protects in ISO mode, where EL leaves protected cells.
+    // (Cells protected before the restore are not: the row formatter does
+    // not write protection.)
+    a.feed("cd\x1bV", 0);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.iso, primary(r.vt).protected_mode);
+    try testing.expect(primary(r.vt).cursor.protected);
+    feedBoth(a, r.vt, "xy\x1bW\r\x1b[K");
+    try expectSameActive(primary(a), primary(r.vt));
+    // DEC mode, cursor still protected.
+    const d = try newModel(10, 2);
+    defer d.destroy();
+    d.feed("\x1b[1\"qxy", 0);
+    const s = try restoreInto(d, .screen, unlimited);
+    defer s.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.dec, primary(s.vt).protected_mode);
+    try testing.expect(primary(s.vt).cursor.protected);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();

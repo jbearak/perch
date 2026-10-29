@@ -556,8 +556,8 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
     try w.writeAll("\x1b[0m");
 }
 
-/// Step 5.4: the live cursor's pen, hyperlink, protection and character
-/// sets, after the clean slate.
+/// Step 5.4: the live cursor's pen, hyperlink, protection (with the
+/// screen's protection mode) and character sets, after the clean slate.
 fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
     const cursor = &screen.cursor;
     try w.print("{f}", .{cursor.style.formatterVt()});
@@ -565,7 +565,16 @@ fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
         .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
         .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
     };
-    if (cursor.protected) try w.writeAll("\x1b[1\"q");
+    // The screen's most recent protection mode, which erases follow even
+    // once protection is off (ISO protects from EL and ED, DEC only from
+    // their selective forms), then the cursor's protection in it. Written
+    // last for the screen, since printing a protected edge cell above
+    // switched the mode to DEC.
+    switch (screen.protected_mode) {
+        .off => {},
+        .iso => try w.writeAll(if (cursor.protected) "\x1bV" else "\x1bV\x1bW"),
+        .dec => try w.writeAll(if (cursor.protected) "\x1b[1\"q" else "\x1b[1\"q\x1b[0\"q"),
+    }
     try writeCharsets(w, &screen.charset);
 }
 

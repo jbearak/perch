@@ -110,7 +110,10 @@ fn writeScreen(w: *Writer, s: *const Screen) Writer.Error!void {
     if (c.hyperlink) |link| {
         try writeString(w, link.uri);
     } else try w.writeAll("null");
-    try w.writeAll("},\"charset\":");
+    // Shell-integration state (OSC 133), which restores do not carry; Ghostty
+    // acts on it (ED 2 at a prompt scrolls instead of clearing).
+    try w.print("}},\"semantic_content\":\"{s}\"", .{@tagName(c.semantic_content)});
+    try w.print(",\"protected_mode\":\"{s}\",\"charset\":", .{@tagName(s.protected_mode)});
     try writeCharset(w, &s.charset);
 
     try w.writeAll(",\"saved_cursor\":");
