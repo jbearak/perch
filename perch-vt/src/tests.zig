@@ -364,6 +364,7 @@ test "history: trimmed by rows at the client's width and by bytes" {
         const r = try restoreInto(a, .full, limits);
         defer r.deinit();
         try testing.expectEqual(@as(usize, 7), historyRows(primary(r.vt)));
+        try testing.expectEqual(@as(usize, 7), try restore.historyKept(testing.allocator, &a.terminal, limits));
         try expectHistoryTail(primary(a), primary(r.vt));
         try expectSameScreen(primary(a), primary(r.vt));
     }
@@ -376,6 +377,7 @@ test "history: trimmed by rows at the client's width and by bytes" {
         defer r.deinit();
         const kept = historyRows(primary(r.vt));
         try testing.expect(kept > 0 and kept < total);
+        try testing.expectEqual(kept, try restore.historyKept(testing.allocator, &a.terminal, limits));
         const history_len = screenStart(r.bytes) - 2 * a.terminal.rows;
         try testing.expect(history_len <= 100);
         try expectHistoryTail(primary(a), primary(r.vt));

@@ -61,9 +61,25 @@ pub fn check(case: &Case) -> Result<(), String> {
         return Ok(());
     }
     let (cols, rows) = built.size;
-    let mut terminal = Model::new(cols, rows, SCROLLBACK, SCROLLBACK_BYTES).map_err(err)?;
+    // More scrollback than the client keeps, so this terminal's own pruning
+    // (by whole pages) cannot hide rows the restore left out.
+    let mut terminal = Model::new(cols, rows, 10_000, SCROLLBACK_BYTES).map_err(err)?;
     terminal.feed(&built.bytes, 0);
-    compare(&model, &terminal, case.mode, "after the restore", true)?;
+    let sent = match case.mode {
+        Mode::Full => model
+            .history_kept(SCROLLBACK, restore::HISTORY_CAP)
+            .map_err(err)? as u64,
+        Mode::Screen => 0,
+    };
+    let history_before = history_rows(&model)?;
+    compare(
+        &model,
+        &terminal,
+        case.mode,
+        "after the restore",
+        true,
+        sent,
+    )?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
 
     terminal.feed(feeder.held(), 0);
@@ -97,13 +113,26 @@ pub fn check(case: &Case) -> Result<(), String> {
     if model.mode(45, false) == Some(true) || model.mode(1045, false) == Some(true) {
         return Ok(());
     }
+    // Rows the output scrolled into history join those the restore sent.
+    let history_after = history_rows(&model)?;
+    let sent = (sent + history_after.saturating_sub(history_before)).min(history_after);
     compare(
         &model,
         &terminal,
         case.mode,
         "after more output",
         on_alternate,
+        sent,
     )
+}
+
+fn history_rows(model: &Model) -> Result<u64, String> {
+    let v: serde_json::Value =
+        serde_json::from_slice(&model.dump().map_err(|e| format!("dump: {e:?}"))?)
+            .map_err(|e| format!("dump: {e}"))?;
+    Ok(v["screens"]["primary"]["history_rows"]
+        .as_u64()
+        .unwrap_or(0))
 }
 
 /// Whether `bytes` might hold a REP: a CSI with a `b` anywhere after it.
@@ -155,12 +184,14 @@ fn compare(
     mode: Mode,
     when: &str,
     alternate: bool,
+    history_sent: u64,
 ) -> Result<(), String> {
     let dump = |m: &Model| -> Result<serde_json::Value, String> {
         serde_json::from_slice(&m.dump().map_err(|e| format!("dump: {e:?}"))?)
             .map_err(|e| format!("dump: {e}"))
     };
-    let expected = dump(model)?;
+    let mut expected = dump(model)?;
+    expected["history_sent"] = serde_json::json!(history_sent);
     let got = dump(terminal)?;
     let diffs: Vec<String> = restore::differences(&expected, &got, mode)
         .into_iter()

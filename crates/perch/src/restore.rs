@@ -273,7 +273,9 @@ pub fn partial(client: Client, bracketed_paste: bool) -> Restore {
 /// colors, title, working directory, cursor style, and each screen's
 /// cursor, pen, character sets, saved cursor, kitty stack and rows. An
 /// alternate screen counts only while it is active, and a `screen`
-/// restore is compared without history. Soft wrapping is compared on
+/// restore is compared without history. A full restore is compared on
+/// exactly the newest `history_sent` history rows when `expected` has that
+/// field (see `Model::history_kept`). Soft wrapping is compared on
 /// history rows only, except where the restore cannot rebuild it: at the
 /// boundary with the screen, and around blank cells.
 pub fn differences(
@@ -327,9 +329,15 @@ pub fn differences(
                     };
                     let (mut er, gr) = (take(es), take(gs));
                     // History limited by the client's scrollback or the
-                    // history cap: the newest rows.
-                    if gr.len() < er.len() && gr.len() >= rows {
-                        er.drain(..er.len() - gr.len());
+                    // history cap: exactly the newest `history_sent` rows,
+                    // when the caller says how many were sent.
+                    if name == "primary" && mode == Mode::Full {
+                        if let Some(sent) = expected["history_sent"].as_u64() {
+                            let keep = (sent as usize + rows).min(er.len());
+                            er.drain(..er.len() - keep);
+                        } else if gr.len() < er.len() && gr.len() >= rows {
+                            er.drain(..er.len() - gr.len());
+                        }
                     }
                     if er.len() != gr.len() {
                         out.push(format!("{name}: {} rows != {}", er.len(), gr.len()));
@@ -383,6 +391,7 @@ pub fn differences(
                     }
                 }
             }
+            "history_sent" => {}
             _ if *e != got[key] => out.push(format!("{key}: {e} != {}", got[key])),
             _ => {}
         }

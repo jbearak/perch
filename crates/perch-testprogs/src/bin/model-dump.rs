@@ -168,14 +168,15 @@ impl Run {
         };
         let paste = self.feeder.tracker().bracketed_paste();
         let withholding = self.feeder.in_long_sequence();
+        let history_cap = r["history_cap"]
+            .as_u64()
+            .map_or(restore::HISTORY_CAP, |n| n as usize);
         let built = if self.partial {
             restore::partial(client, paste)
         } else {
             let limits = RestoreLimits {
                 client_scrollback_rows: client.scrollback_rows,
-                history_cap: r["history_cap"]
-                    .as_u64()
-                    .map_or(restore::HISTORY_CAP, |n| n as usize),
+                history_cap,
                 byte_cap: r["byte_cap"]
                     .as_u64()
                     .map_or(restore::BYTE_CAP, |n| n as usize),
@@ -189,10 +190,30 @@ impl Run {
         std::fs::write(self.out.join(format!("restore-{index}.bin")), &client_bytes)
             .expect("write restore");
 
-        let expected = dump(&self.model);
+        let mut expected = dump(&self.model);
+        // The history rows the restore sends, from the client's scrollback
+        // and the history cap: the oracles check the client kept exactly
+        // these.
+        let history_sent = if mode == Mode::Full && built.nudge.is_none() {
+            self.model
+                .history_kept(client.scrollback_rows, history_cap)
+                .expect("history kept")
+        } else {
+            0
+        };
+        expected["history_sent"] = json!(history_sent);
         let (rc, rr) = built.size;
-        let new_client =
-            || Model::new(rc, rr, client.scrollback_rows, SCROLLBACK_BYTES).expect("model");
+        // More scrollback than the client keeps, so this terminal's own
+        // pruning (by whole pages) cannot hide rows the restore left out.
+        let new_client = || {
+            Model::new(
+                rc,
+                rr,
+                client.scrollback_rows.saturating_mul(2).max(10_000),
+                SCROLLBACK_BYTES,
+            )
+            .expect("model")
+        };
         let mut plain = new_client();
         let mut hostile = new_client();
         hostile.feed(HOSTILE, 0);
@@ -211,6 +232,7 @@ impl Run {
             "mode": if mode == Mode::Full { "full" } else { "screen" },
             "size": [rc, rr],
             "scrollback": client.scrollback_rows,
+            "history_sent": history_sent,
             "held": held.len(),
             "withheld": withholding,
             "partial": built.nudge.is_some(),
@@ -243,7 +265,9 @@ impl Run {
             .expect("write live");
         let entry = &mut self.restores[w.index];
         entry["live"] = json!(w.live.len());
-        entry["after"] = dump(&self.model);
+        let mut after = dump(&self.model);
+        after["history_sent"] = json!(history_after(&entry["expected"], &after));
+        entry["after"] = after;
         if w.compared {
             let expected = &entry["after"];
             let plain = restore::differences(expected, &dump(&w.plain), w.mode);
@@ -252,6 +276,18 @@ impl Run {
             entry["differences_after_hostile"] = json!(hostile);
         }
     }
+}
+
+/// The history rows a restored client holds after more output: those the
+/// restore sent, plus the rows that output scrolled into history.
+pub fn history_after(expected: &Value, after: &Value) -> u64 {
+    let rows = |v: &Value| {
+        v["screens"]["primary"]["history_rows"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    let sent = expected["history_sent"].as_u64().unwrap_or(0);
+    (sent + rows(after).saturating_sub(rows(expected))).min(rows(after))
 }
 
 fn run(script_path: &Path, out: &Path) {

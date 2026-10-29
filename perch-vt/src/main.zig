@@ -125,6 +125,18 @@ export fn perch_vt_restore(
     return @backingInt(Status.ok);
 }
 
+/// How many history rows a full restore would send now, at the model's
+/// current size: the newest that fit `client_scrollback_rows` and
+/// `history_cap`. For tests.
+export fn perch_vt_history_kept(h: *Handle, client_scrollback_rows: u32, history_cap: usize, out: *usize) c_int {
+    out.* = restore.historyKept(gpa, &model(h).terminal, .{
+        .client_scrollback_rows = client_scrollback_rows,
+        .history_cap = history_cap,
+        .byte_cap = 0,
+    }) catch return @backingInt(Status.out_of_memory);
+    return @backingInt(Status.ok);
+}
+
 /// The last `history_rows` rows of history and the active screen as text
 /// with SGR, for `tail.txt`.
 export fn perch_vt_tail(h: *Handle, history_rows: u32, out: *Bytes) c_int {

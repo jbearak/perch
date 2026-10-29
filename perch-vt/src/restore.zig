@@ -148,42 +148,12 @@ const Builder = struct {
     /// viewport so that clearing the screen next does not erase them.
     fn writeHistory(self: *Builder) (Error || Writer.Error)!void {
         const screen = self.t.screens.get(.primary).?;
+        const kept = try historyKept(self.alloc, self.t, self.limits);
+        if (kept == 0) return;
         const total = historyRows(screen);
-        const n = @min(total, self.limits.client_scrollback_rows);
-        if (n == 0) return;
-
-        // Measure each row (and the line break before it) to find the
-        // oldest row from which the rest fits the cap.
-        const content = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(content);
-        const sep = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(sep);
-        {
-            var rows: RowWriter = .{ .sep = "\r\n" };
-            var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
-            var i: usize = 0;
-            while (it.next()) |row| : (i += 1) {
-                var counter: Writer.Discarding = .init(&.{});
-                sep[i] = if (rows.prev) |prev| (if (joins(prev, row)) 0 else rows.sep.len) else 0;
-                try writeRowCells(&counter.writer, row);
-                content[i] = @intCast(counter.count);
-                rows.prev = row;
-            }
-            std.debug.assert(i == n);
-        }
-        var start = n;
-        var total_bytes: usize = 0;
-        while (start > 0) {
-            const i = start - 1;
-            const add = content[i] + if (i + 1 < n) sep[i + 1] else 0;
-            if (total_bytes + add > self.limits.history_cap) break;
-            total_bytes += add;
-            start = i;
-        }
-        if (start == n) return;
 
         var rows: RowWriter = .{ .sep = "\r\n" };
-        var it = historyPin(screen, total - n + start).rowIterator(.right_down, historyPin(screen, total - 1));
+        var it = historyPin(screen, total - kept).rowIterator(.right_down, historyPin(screen, total - 1));
         while (it.next()) |row| try rows.write(self.out(), row);
         try self.out().splatBytesAll("\r\n", self.t.rows);
     }
@@ -292,6 +262,47 @@ const Builder = struct {
         if (!t.modes.get(.wraparound)) try w.writeAll("\x1b[?7l");
     }
 };
+
+/// How many of the newest history rows a full restore of `t` (already at
+/// the client's size) sends: as many as fit the client's scrollback and
+/// the history cap, counting the line breaks and wrap primers between them.
+pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocator.Error!usize {
+    const screen = t.screens.get(.primary).?;
+    const total = historyRows(screen);
+    const n = @min(total, limits.client_scrollback_rows);
+    if (n == 0) return 0;
+
+    // Each row's own bytes, and the bytes written between it and the row
+    // before (a line break, or a wrap primer, or nothing).
+    const content = try alloc.alloc(usize, n);
+    defer alloc.free(content);
+    const between = try alloc.alloc(usize, n);
+    defer alloc.free(between);
+    var rows: RowWriter = .{ .sep = "\r\n" };
+    var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
+    var i: usize = 0;
+    while (it.next()) |row| : (i += 1) {
+        var own: Writer.Discarding = .init(&.{});
+        writeRowCells(&own.writer, row) catch unreachable;
+        var all: Writer.Discarding = .init(&.{});
+        rows.write(&all.writer, row) catch unreachable;
+        content[i] = @intCast(own.count);
+        between[i] = @as(usize, @intCast(all.count)) - content[i];
+    }
+    std.debug.assert(i == n);
+
+    // The oldest row from which the rest fits the cap.
+    var start = n;
+    var bytes: usize = 0;
+    while (start > 0) {
+        const j = start - 1;
+        const add = content[j] + if (j + 1 < n) between[j + 1] else 0;
+        if (bytes + add > limits.history_cap) break;
+        bytes += add;
+        start = j;
+    }
+    return n - start;
+}
 
 /// Writes rows one after another, joining a soft-wrapped row to the next
 /// when the terminal will wrap there by itself.
