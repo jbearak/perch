@@ -230,3 +230,18 @@ Rust crates are checked by `cargo deny` (see `deny.toml`), and the code linked i
 | yargs-unparser | 2.0.0 | MIT |
 | yocto-queue | 0.1.0 | MIT |
 <!-- end npm packages -->
+
+## Restore fidelity harness
+
+`tests/fidelity` runs restores into three versions of the headless xterm.js, each with its Unicode 11 addon, installed side by side under npm aliases. They are test-only and never shipped. They are pinned by `tests/fidelity/package-lock.json`, and `npm run check-deps` in that directory checks in CI that this table matches the lockfile and that every license is on the same allow-list as the extension's. Regenerate the table with `npm run licenses` there.
+
+<!-- begin fidelity packages -->
+| Package | Version | License |
+|---------|---------|---------|
+| @xterm/addon-unicode11 (as xterm-unicode11-5.5) | 0.8.0 | MIT |
+| @xterm/addon-unicode11 (as xterm-unicode11-6.0) | 0.9.0 | MIT |
+| @xterm/headless (as xterm-headless-5.5) | 5.5.0 | MIT |
+| @xterm/headless (as xterm-headless-6.0) | 6.0.0 | MIT |
+| xterm-addon-unicode11 (as xterm-unicode11-5.3) | 0.6.0 | MIT |
+| xterm-headless (as xterm-headless-5.3) | 5.3.0-beta.61 | MIT |
+<!-- end fidelity packages -->

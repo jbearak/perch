@@ -40,5 +40,13 @@
       "match": "normal line",
       "reason": "Ghostty and xterm.js decode invalid UTF-8 and UTF-8 encoded C1 differently; not covered by the contract"
     }
+  ],
+  "known_tmux": [
+    {
+      "restores": [
+        0
+      ],
+      "reason": "tmux decodes invalid UTF-8 and UTF-8 encoded C1 its own way"
+    }
   ]
 }

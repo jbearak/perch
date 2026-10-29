@@ -31,6 +31,7 @@
 
 Object.defineProperty(globalThis, 'navigator', { value: undefined, configurable: true });
 
+import { rmSync } from 'fs';
 import { createRequire } from 'module';
 import { fixtures, here, modelDump, options, steps } from './lib.mjs';
 
@@ -452,6 +453,7 @@ async function main() {
       for (const r of bad.slice(0, 12)) console.log(`       ${r.where}: ${r.difference.slice(0, 400)}`);
       if (bad.length > 12) console.log(`       ... ${bad.length - 12} more`);
     }
+    if (!opts.keep) rmSync(dumped.out, { recursive: true, force: true });
   }
   const known = new Map();
   for (const r of report) if (r.known) known.set(`${r.fixture}: ${r.known}`, (known.get(`${r.fixture}: ${r.known}`) ?? 0) + 1);

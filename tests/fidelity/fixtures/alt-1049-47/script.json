@@ -96,5 +96,14 @@
       "where": "restore 2 (xterm",
       "reason": "xterm.js clears its alternate buffer when the program leaves it; Ghostty keeps it, so re-entering with 47 shows the old contents in the model and the restore"
     }
+  ],
+  "known_tmux": [
+    {
+      "restores": [
+        1,
+        2
+      ],
+      "reason": "tmux keeps one saved cursor for both screens, so ESC 8 after the program leaves the alternate screen goes elsewhere in the original; Ghostty and xterm.js keep one per screen and agree with the restore"
+    }
   ]
 }

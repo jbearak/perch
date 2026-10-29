@@ -22,7 +22,7 @@ const ST = `${ESC}\\`;
 
 /// A fixture: `parts` are strings (UTF-8) or Buffers, fed in order; a
 /// `{ action }` part ends the bytes so far with a feed and adds the action.
-function fixture(name, { description, size = [80, 24], scrollback = 1000, known, parts }) {
+function fixture(name, { description, size = [80, 24], scrollback = 1000, known, knownTmux, parts }) {
   const chunks = [];
   const actions = [];
   let pending = 0;
@@ -46,6 +46,7 @@ function fixture(name, { description, size = [80, 24], scrollback = 1000, known,
   writeFileSync(join(dir, 'stream.bin'), Buffer.concat(chunks));
   const script = { description, generated_by: 'gen/synthetic.mjs', size, scrollback, stream: 'stream.bin', actions };
   if (known) script.known = known;
+  if (knownTmux) script.known_tmux = knownTmux;
   writeFileSync(join(dir, 'script.json'), `${JSON.stringify(script, null, 2)}\n`);
 }
 
@@ -166,6 +167,7 @@ fixture('progress-bar', {
 
 fixture('decstr', {
   description: 'DECSTR after modes, margins, pen and origin mode',
+  knownTmux: [{ restores: [0], reason: 'tmux does not implement DECSTR, so the pen, character set, margins and origin mode stay set in the original' }],
   parts: [
     'before\r\n',
     `${CSI}?6h${CSI}5;10r${CSI}?1h${CSI}4h${CSI}1;7m${ESC}(0${CSI}?25l`,
@@ -219,6 +221,7 @@ fixture('partial-sequences', {
 fixture('invalid-bytes', {
   description: 'invalid UTF-8, stray continuation bytes and C1 bytes at ground',
   parts: [Buffer.from('a\xffb\xc3(c\x80d\xe2\x82e\x9bf\xc2\x9b31mg\r\n', 'latin1'), restore({ assert: [{ name: 'model replaces invalid bytes', model_line: ['primary', 0, 'a\ufffdb\ufffd(c\ufffdd\ufffde\ufffdf31mg'] }] }), 'h\r\n'],
+  knownTmux: [{ restores: [0], reason: 'tmux decodes invalid UTF-8 and UTF-8 encoded C1 its own way' }],
   known: [{ match: 'normal line', reason: 'Ghostty and xterm.js decode invalid UTF-8 and UTF-8 encoded C1 differently; not covered by the contract' }],
 });
 
@@ -328,6 +331,12 @@ for (const enter of [47, 1047, 1049]) {
         restore({ size: [40, 8] }),
         { exit_alt: { mode: exit, then: '' } },
         `${ESC}8z`,
+      ],
+      knownTmux: [
+        {
+          restores: [1, 2],
+          reason: 'tmux keeps one saved cursor for both screens, so ESC 8 after the program leaves the alternate screen goes elsewhere in the original; Ghostty and xterm.js keep one per screen and agree with the restore',
+        },
       ],
       known: [
         { match: 'alternate', where: 'restore 1 after', reason: HIDDEN_ALT },

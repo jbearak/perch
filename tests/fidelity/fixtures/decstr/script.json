@@ -30,5 +30,13 @@
     {
       "feed": 6
     }
+  ],
+  "known_tmux": [
+    {
+      "restores": [
+        0
+      ],
+      "reason": "tmux does not implement DECSTR, so the pen, character set, margins and origin mode stay set in the original"
+    }
   ]
 }
