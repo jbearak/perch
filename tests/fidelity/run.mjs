@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The restore fidelity harness. For each committed fixture it runs
-// `model-dump` (the gate and perch-vt, as the supervisor will) and checks
+// `model-dump` (the supervisor's Feeder and perch-vt) and checks
 // every restore against these oracles, in three headless xterm.js versions:
 //
 // - xterm (same size): terminal A gets the program's output, B the restore.
