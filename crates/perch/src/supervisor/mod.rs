@@ -766,6 +766,7 @@ impl Supervisor {
         if self.model.restart_if_due(self.feeder.at_ground_point()) {
             self.apply_model_state();
         }
+        self.model.check_backlog();
         for step in self.feeder.push(chunk) {
             match step {
                 Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
@@ -785,6 +786,7 @@ impl Supervisor {
                 }
                 Step::Partial => {
                     log("a sequence over 16 MiB was fed to the model in pieces; it is partial");
+                    self.model.released_long_sequence();
                     if self.model.mark_partial() {
                         self.apply_model_state();
                     }

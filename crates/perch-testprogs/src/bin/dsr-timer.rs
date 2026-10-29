@@ -75,6 +75,17 @@ fn step(word: &str, timeout: Duration) -> Value {
                     write(&block[..k]);
                     left -= k;
                 }
+            } else if let Some(n) = word.strip_prefix("longcsi:") {
+                // A CSI left unfinished after `n` parameter digits.
+                let n: usize = n.parse().expect("longcsi size");
+                write(b"\x1b[");
+                let block = vec![b'1'; 64 * 1024];
+                let mut left = n;
+                while left > 0 {
+                    let k = left.min(block.len());
+                    write(&block[..k]);
+                    left -= k;
+                }
             } else if let Some(t) = word.strip_prefix("text:") {
                 write(format!("{t}\r\n").as_bytes());
             } else if let Some(code) = word.strip_prefix("exit:") {

@@ -227,6 +227,25 @@ fn check_failure(
     assert!(alive(pid, &start));
 }
 
+/// A CSI that grows past 16 MiB is fed through, so the same model stays
+/// and goes `partial` until RIS.
+#[test]
+fn an_oversized_csi_leaves_the_model_partial_until_ris() {
+    let rt = Rt::new();
+    let mut t = Timer::start(&rt, &[]);
+    let r = t.round("dsr6");
+    assert_eq!(reply(&r[0]), Some("\x1b[1;1R"));
+
+    t.round("longcsi:17000000");
+    wait_model(&rt, &t.id, "partial");
+
+    let r = t.round("ris text:x dsr6");
+    assert_eq!(reply(&r[2]), Some("\x1b[2;1R"));
+    assert_eq!(info(&rt, &t.id)["model"], "ok");
+    assert_eq!(test_model(&rt, &t.id, None)["generation"], 1);
+    assert!(!log(&rt, &t.id).contains("failed"), "{}", log(&rt, &t.id));
+}
+
 #[test]
 fn a_killed_model_is_replaced() {
     check_failure(

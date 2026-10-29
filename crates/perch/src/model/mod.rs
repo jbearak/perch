@@ -85,6 +85,11 @@ struct Link {
     /// Encoded messages not yet written, from `out_off`.
     out: Vec<u8>,
     out_off: usize,
+    /// Bytes written to the socket so far.
+    written: u64,
+    /// Where the bytes released at once for a sequence over 16 MiB end,
+    /// counted like `written`. The model is not behind for those.
+    burst_end: u64,
     decoder: Decoder,
     /// The snapshot asked for and its deadline.
     snapshot: Option<(u64, Instant)>,
@@ -94,6 +99,13 @@ struct Link {
 impl Link {
     fn backlog(&self) -> usize {
         self.out.len() - self.out_off
+    }
+
+    /// The backlog, less what is left of a released long sequence.
+    fn behind(&self) -> usize {
+        let burst =
+            usize::try_from(self.burst_end.saturating_sub(self.written)).unwrap_or(usize::MAX);
+        self.backlog().saturating_sub(burst)
     }
 }
 
@@ -154,6 +166,8 @@ impl Model {
                     sock,
                     out: Vec::new(),
                     out_off: 0,
+                    written: 0,
+                    burst_end: 0,
                     decoder: Decoder::new(),
                     snapshot: None,
                     next_memory_check: Instant::now() + clock::scaled(MEMORY_CHECK),
@@ -199,7 +213,25 @@ impl Model {
     pub fn send_frame(&mut self, n: u64, bytes: &[u8]) {
         let Some(link) = &mut self.link else { return };
         wire::encode_frame(&mut link.out, n, bytes);
-        if link.backlog() > BACKLOG_LIMIT {
+    }
+
+    /// The frames just queued are a sequence over 16 MiB, released at once.
+    /// A model that is keeping up needs time to get through them, so they
+    /// do not count as falling behind.
+    pub fn released_long_sequence(&mut self) {
+        if let Some(l) = &mut self.link {
+            l.burst_end = l.written + l.backlog() as u64;
+        }
+    }
+
+    /// Fails the model if it is more than [`BACKLOG_LIMIT`] behind. Called
+    /// once per read of program output, before its frames are queued.
+    pub fn check_backlog(&mut self) {
+        if self
+            .link
+            .as_ref()
+            .is_some_and(|l| l.behind() > BACKLOG_LIMIT)
+        {
             self.fail("it fell more than 16 MiB behind");
         }
     }
@@ -375,7 +407,10 @@ impl Model {
         while link.backlog() > 0 {
             match link.sock.write(&link.out[link.out_off..]) {
                 Ok(0) => break,
-                Ok(n) => link.out_off += n,
+                Ok(n) => {
+                    link.out_off += n;
+                    link.written += n as u64;
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => {
