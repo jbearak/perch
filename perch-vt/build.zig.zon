@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-only
+.{
+    .name = .perch_vt,
+    .version = "0.0.0",
+    .fingerprint = 0x3ffb51d872c3de48,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .ghostty = .{
+            .url = "git+https://github.com/ghostty-org/ghostty#521cf2c5d30bd48028ca61546c64e7913764073d",
+            .hash = "ghostty-1.3.2-dev-5UdBC6WZfwXgQ6HmA5DH6dGNAUqtDMLrhhrHiBX-99J0",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

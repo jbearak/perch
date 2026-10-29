@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# The Zig that builds perch-vt. CI and the maintainer install it from these
+# tarballs and check each against its SHA-256 before use. The digests are the
+# ones ziglang.org publishes in https://ziglang.org/download/index.json, and
+# were checked against the downloaded files.
+
+version = "0.17.0"
+
+[tarballs.x86_64-linux]
+url = "https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz"
+sha256 = "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
+
+[tarballs.aarch64-linux]
+url = "https://ziglang.org/download/0.17.0/zig-aarch64-linux-0.17.0.tar.xz"
+sha256 = "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8"
+
+[tarballs.aarch64-macos]
+url = "https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz"
+sha256 = "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a"

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[workspace]
+resolver = "3"
+members = ["crates/perch", "crates/perch-testprogs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+repository = "https://github.com/jbearak/perch"
+publish = false
+
+[profile.release]
+# The supervisor catches panics at its boundaries; keep unwinding.
+panic = "unwind"
