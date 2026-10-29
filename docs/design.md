@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 8. Revision 8 replaces the screen model (avt) with libghostty-vt, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: draft for review, revision 9. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -28,8 +28,8 @@ Perch never writes anything into a session on its own. Bytes reach a session's i
 What Perch takes from these, and where it departs:
 
 - **Passthrough while attached, like dtach and abduco.** Live output goes to the client byte for byte. VS Code's terminal keeps its own scrollback, selection, links and shell integration sequences, because nothing re-renders them. tmux and screen redraw everything through their own emulator. That costs native scrollback, adds a prefix key, sets `TERM` to `tmux-256color` or `screen`, and drops escape sequences tmux does not know about unless the user enables passthrough. Those costs are why Raven's docs today describe tmux as a workaround and not a solution.
-- **A screen model on the side, like shpool and zmx.** dtach and abduco keep nothing, so a reattached terminal shows a blank screen until the program redraws, and line editors lose their mode state (bracketed paste, application cursor keys). Perch feeds all output through libghostty-vt, Ghostty's terminal emulation library, which zmx also uses. Perch uses it only to restore the screen on attach and to answer status queries while detached. It never renders live output from it.
-- **The hidden primary screen too.** zmx restores only the active screen, so attaching while `less` or `vim` is open (R's help pager, for one) loses the primary screen and its history. Perch keeps a second emulator instance that follows only the primary screen (see [Restore on attach](#restore-on-attach)).
+- **A screen model on the side, like shpool and zmx.** dtach and abduco keep nothing, so a reattached terminal shows a blank screen until the program redraws, and line editors lose their mode state (bracketed paste, application cursor keys). Perch feeds all output through Ghostty's terminal emulation library (`ghostty-vt`), which zmx also uses. Perch uses it only to restore the screen on attach and to answer status queries while detached. It never renders live output from it.
+- **The hidden primary screen too.** zmx restores only the active screen, so attaching while `less` or `vim` is open (R's help pager, for one) loses the primary screen and its history. Perch formats both screens (see [Restore on attach](#restore-on-attach)).
 - **One supervisor per session, like dtach, abduco and zmx, and unlike tmux and shpool.** See [Process model](#process-model).
 - **Answers cursor-position queries while detached.** zmx answers DA1 and DA2 so that fish does not wait 10 seconds at a prompt. Raven's console uses reedline 0.52, whose painter asks for the cursor position (DSR 6) when it draws a prompt, and crossterm waits up to 2 seconds for the reply. A detached Raven console that receives code over its socket would stall at every prompt. Perch answers DSR 5, DSR 6, DA1 and DA2 from its model when no terminal is attached.
 - **No code injection.** zmx's `write` command types a `printf ... | base64 -d > file` pipeline into the shell. Perch has no feature that composes commands for the program.
@@ -87,9 +87,11 @@ The double fork changes a process's parent and session. It does not move it out 
 
 ### Supervisor robustness
 
-- **The terminal model runs in its own process.** libghostty-vt is Zig code behind a C interface. A crash inside it cannot be caught by Rust's `catch_unwind`, and it would take the supervisor down, and the user's R session with it. So the supervisor forks a model process when the session starts. Fork without `exec` works even after an update has deleted the binary. The supervisor sends it every byte of output, every resize and every snapshot request over a socket pair, and the model process answers with snapshots and query replies. If the model process dies, the supervisor logs it, marks the model `failed`, and carries on with passthrough. It starts a fresh model process, at most 3 times per hour. A fresh model knows nothing of earlier output, so restores show a notice and ask the program to redraw with SIGWINCH until the program has repainted. While no model is running, detached query answers stop. A model bug must never cost the user their R session.
+- **The terminal model runs in its own process.** Ghostty's library is Zig code. Perch builds it with Zig's runtime safety checks on (`ReleaseSafe`), so a bug becomes an immediate abort rather than undefined behavior, but an abort cannot be caught by Rust's `catch_unwind`. In the supervisor it would take the user's R session with it. So the supervisor forks a model process when the session starts. Fork without `exec` works even after an update has deleted the binary. The model process holds no descriptors but its socket pair to the supervisor, and it exits when that socket closes.
+- **Messages are ordered and tagged.** The supervisor sends the model output in numbered frames, resizes and snapshot requests, all over the one socket, so the model sees them in the order the supervisor decided them. Each model process has a generation number. Replies and snapshots carry the generation and the frame number they belong to, and the supervisor discards anything from an older generation.
+- **When the model fails.** If the model process dies, falls more than 16 MiB behind, or misses a snapshot deadline (2 seconds), the supervisor kills it, logs why, and carries on with passthrough. It starts a fresh model process, at most 3 times per hour, fed from the next point where the stream is between sequences (see [Restore on attach](#restore-on-attach)). A fresh model has not seen earlier output, so it is marked `partial`. A restore from a partial model sends the prologue, a one-line notice, and a resize to one row fewer and back, which makes the kernel deliver SIGWINCH even when the size has not changed. It does not answer DSR 6, because it does not know where the cursor really is. A partial model becomes complete when the program resets the terminal (RIS) or erases the whole screen with the cursor at home. A model bug must never cost the user their R session.
 - Writing to a client never blocks the loop. A slow client can slow the program down, as any terminal can, but a client that has stopped reading holds it up for at most 5 seconds. See [Flow control](#flow-control).
-- Writing to the model process never blocks the loop either. If the model process falls more than 16 MiB behind, the supervisor treats it as failed and restarts it.
+- Writing to the model process never blocks the loop either. Frames for it wait in their own queue, which is where the 16 MiB limit applies.
 
 ## Files and sockets
 
@@ -210,7 +212,7 @@ Clients reach the supervisor over its Unix socket. Each frame is a 4-byte big-en
 - The queue holds at most 1 MiB. A send that does not fit gets `queue_full` and nothing is queued. The supervisor writes the queue to the PTY master without blocking, as fast as the kernel accepts it.
 - `queued` is the acknowledgement. Once a client has it, the bytes will be written in order unless the session ends first. If the connection drops before `queued` arrives, the outcome is unknown, and the client reports exactly that ("may not have been sent") and never resends. Raven's console socket has the same rule.
 - `submit: true` appends a carriage return, which is what pressing Enter sends.
-- `paste: true` wraps the data in bracketed-paste markers (`ESC [200~` and `ESC [201~`) only if the program has turned bracketed paste on, which the session terminal reports. Otherwise the bytes go raw. The caller decides; Perch does not guess.
+- `paste: true` wraps the data in bracketed-paste markers (`ESC [200~` and `ESC [201~`) only if the program has turned bracketed paste on, which the supervisor's tracker sees as it reads the output. Otherwise the bytes go raw. The caller decides; Perch does not guess.
 - `send` has terminal semantics. The bytes arrive as if typed. Whether the program reads them as one line, several lines or a paste depends on the program and its terminal mode, as with any terminal. A long line sent to a program reading in canonical mode can be cut by the kernel's line limit. Callers that need reliable execution use an application-level channel, as Raven does with its console socket. Sight sends `do "<file>"`, a short line.
 - Perch adds no bytes of its own. It does not add `set more off`, answer `--more--` or load anything.
 
@@ -252,31 +254,36 @@ A client can read slowly (xterm.js parses far slower than `cat` writes) or stop 
 
 ### Restore on attach
 
-**Decision: the screen model is [libghostty-vt](https://github.com/ghostty-org/ghostty)** (MIT), Ghostty's terminal emulation library, through the Rust bindings [`libghostty-vt`](https://github.com/uzaaft/libghostty-rs) (MIT or Apache-2.0). Perch pins the bindings by git commit (`9ede35b`), which pins Ghostty at `521cf2c` and needs Zig 0.17.0. The crates.io release 0.2.2 pins an older Ghostty that needs Zig 0.15.2, which cannot link on macOS 26 ([build check](research/libghostty-build.md)). The library is linked statically.
+**Decision: the screen model is Ghostty's terminal library, `ghostty-vt`** (MIT), used through a small Zig library of Perch's own, `perch-vt`.
 
-Earlier revisions chose avt, after a [spike](research/emulator-spike.md) against vt100. libghostty-vt does more of the work Perch needs, and the maintainer chose it:
+Earlier revisions chose avt, after a [spike](research/emulator-spike.md) against vt100. Ghostty's library does more of the work Perch needs, and the maintainer chose it:
 
-- It answers DSR 5 and DSR 6 itself, from the cursor at the moment of the query, and asks a callback for DA. Perch needs no query parser of its own.
-- Its formatter writes a screen out as escape sequences, with options for history, modes, scroll region, tab stops, keyboard state including kitty keyboard flags, cursor, pen, hyperlinks, character sets and palette. Perch needs no mode tracker of its own.
-- It keeps grapheme clusters, hyperlinks, underline styles and kitty keyboard state, which avt dropped.
-- It reflows the primary screen and its history on resize.
+- It answers DSR 6 from the cursor at the moment of the query.
+- Its formatter writes a screen out as escape sequences, with the modes, scroll region, tab stops, keyboard state, cursor, pen and character sets.
+- It keeps grapheme clusters, underline styles and kitty keyboard state, which avt dropped.
+- It reflows the primary screen and its history on resize, and stores about 10 MB for 10,000 lines at 120 columns ([build check](research/libghostty-build.md)).
 
-What it does not do: its C interface formats only the active screen, and it does not report whether its parser is in the middle of a sequence. Perch works around both, below.
+**Why a Zig library of Perch's own.** Revision 8 used the published C interface through third-party Rust bindings. Review found that it could not do what a restore needs: it formats only the active screen, cannot write terminal state without screen content, emits modes Perch must not replay (the alternate-screen and synchronized-output modes) and the whole 256-color palette, and says nothing about whether its parser is between sequences. Ghostty's Zig modules can do all of these, as zmx shows. So `perch-vt` is a few hundred lines of Zig that import the `ghostty-vt` module and export exactly the C functions Perch needs:
 
-**Two emulator instances.** The model process holds two libghostty terminals:
+- create a terminal with a size and history limits, and free it;
+- feed bytes, collecting DSR 6 replies tagged with their position;
+- resize;
+- report whether the parser and its UTF-8 decoder are at ground;
+- build a restore, described below, in one call, with a byte limit.
 
-- The **session terminal** receives every byte. It is the source for the active screen, the alternate screen, modes, cursor and query replies. It keeps no history.
-- The **primary mirror** receives every byte except those the program writes while it is on the alternate screen. So its active screen is always the program's primary screen, and it keeps the history. When the program enters the alternate screen with mode 1049, the mirror gets `ESC 7` in place of the switch, so its saved cursor matches. When the program leaves, the mirror gets `ESC 8` for mode 1049, or for modes 47 and 1047, which copy the cursor across screens, the session terminal's new cursor and pen. RIS and resizes go to both.
+Perch's Rust code declares those few functions itself. It does not use the third-party bindings. The Zig package pins Ghostty by commit and content hash in `build.zig.zon` (currently `521cf2c`) and needs Zig 0.17.0, both pinned. Zig 0.15.2, which older Ghostty commits need, cannot link on macOS 26. `perch-vt` is built with `ReleaseSafe` and linked statically into the `perch` binary.
 
-Perch recognizes the screen switches with its boundary tracker (below). A test feeds random streams with screen switches to both instances and checks, after every switch back, that the session terminal and the mirror format the primary screen identically.
+**History** is the terminal's own primary-screen scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines. Ghostty limits scrollback by lines and by bytes, whichever is reached first, and prunes only whole pages, so it keeps at least the requested number of lines and sometimes a page more. Perch sets the line limit and a byte limit of 64 MiB. History is formatted from the model's cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
 
-**History** is the mirror's scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines. Ghostty limits scrollback by lines and by bytes, whichever is reached first, and prunes whole pages, so the line limit is approximate. Perch sets the line limit and a byte limit of 64 MiB. The build check measured about 10 MB for 10,000 lines at 120 columns. History is formatted from the model's cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
+**Boundary tracker.** The supervisor needs three facts about the output stream at the moment it reads it, without waiting for the model process: where the stream is between sequences, where the queries are, and whether bracketed paste is on. A small tracker in the supervisor finds them. It is a port of the state machine in Ghostty's parser (`Parser.zig`, its parse table, and the UTF-8 handling in `stream.zig`, MIT-licensed and credited in `NOTICE`). It follows Ghostty exactly, including one point where Ghostty differs from xterm.js: a C1 control encoded as UTF-8 (U+009B) prints as a character in Ghostty and acts as CSI in xterm.js. It recognizes DSR 5, DSR 6, DA1 and DA2 and the bracketed-paste mode (`CSI ? 2004 h` and `l`, alone or with other parameters), and RIS and DECSTR, which reset it. A differential test feeds random streams to the tracker and to `perch-vt` and checks that they agree on ground after every byte.
 
-**Boundary tracker.** libghostty-vt does not say whether it is in the middle of an escape sequence or a UTF-8 character, and a restore must be taken between sequences. So the supervisor runs a small tracker of its own over the same bytes. It is a port of Ghostty's parser states (Ghostty's `Parser.zig`, its parse table and the UTF-8 handling in `stream.zig`, MIT-licensed and credited in `NOTICE`), and it tracks only what Perch needs: whether the stream is at ground, where each sequence ends, the alternate-screen switches (`CSI ? Pm h` and `l` with 47, 1047 or 1049, including several parameters in one sequence) and RIS. It follows Ghostty exactly, including one point where Ghostty differs from xterm.js: a C1 control encoded as UTF-8 (U+009B) prints as a character in Ghostty and acts as CSI in xterm.js. A differential test checks the tracker against libghostty's behavior: after a random prefix, a sentinel character prints if and only if the tracker says ground.
+**The model is fed only up to ground.** The supervisor sends the model output up to the last point where the tracker is at ground, and holds back an unfinished sequence or UTF-8 character until it completes. A sequence longer than 1 MiB (an image, a large clipboard write) is sent on in pieces anyway, which is harmless because a control string takes effect only when it ends. So the model is almost always at ground, and a restore never waits for the program:
 
-**Snapshot boundary.** A restore is always taken where the tracker is at ground. If a restore is due while the program is in the middle of a sequence, the supervisor sends the model output only up to the end of that sequence, asks for the snapshot there, and sends the rest of that read as live output after the restore.
+- The supervisor asks the model for a snapshot at the frame it has fed so far.
+- The client receives the restore, then the bytes the supervisor is still holding back, then live output.
+- The model and the client have then seen exactly the same bytes since the snapshot point. If the held bytes are the start of a query, the query completes in the client's live output, which is consistent with the ownership rule below.
 
-If the program stays in the middle of a sequence for 1 second with no further output, or a restore has waited 5 seconds in total (a long image or clipboard sequence can stay unfinished that long), the supervisor takes the snapshot anyway, and that unfinished sequence belongs to the supervisor alone. It sends both emulator instances a `CAN`, which returns their parsers to ground. The rest of the sequence, up to its end as the tracker finds it, is withheld from the model and from the client. The model and the terminal then agree. The cost is that one sequence's effect (a color change, a title) is missing from both until the program repeats it, and a query inside it goes unanswered. That happens only when a program stops writing in the middle of an escape sequence, or sends a very long one during an attach.
+`perch-vt` reports with each snapshot whether its parser was at ground. If it was not, the tracker and the library disagree, which the differential test exists to prevent. The supervisor logs it, and the prologue's `CAN` contains the damage.
 
 **Three restore modes.** The client chooses one in its attach frame.
 
@@ -288,37 +295,38 @@ A client that re-attaches in the same process, after "Press Enter to take it bac
 
 A **resync** after a stall is a `screen` restore. Its contract is weaker: lines that scrolled off while output was being dropped are missing from the terminal's scrollback.
 
-**The prologue** puts any terminal into a known state. In order:
+**The prologue** puts any terminal into a known state. Perch writes it, not the library. In order:
 
 1. `CAN` (0x18), which aborts an escape sequence or control string that a dropped frame left open. A partial UTF-8 character ends as a replacement character at the next byte. `OSC 8 ; ; ST` then closes any open hyperlink.
 2. Pop the alternate screen's kitty keyboard stack (`CSI < 99 u`), leave the alternate screen (`ESC [?1049l`), then pop the main screen's stack. Kitty keeps a stack per screen. All three are harmless if the terminal is already on the main screen with empty stacks.
-3. DECSTR (`ESC [!p`), followed by explicit resets for terminals that implement DECSTR partly or not at all: `ESC [r`, `ESC [0m`, `ESC [4l`, `ESC [20l`, `ESC [?6l`, `ESC [?7h`, `ESC [?1l`, `ESC (B`, `ESC )B`, `SI`, `ESC [?25h`, `ESC >`, `CSI > 4 m` (modifyOtherKeys off), `l` for the private modes 9, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004 and 2026, and default tab stops (`ESC [3g`, then `ESC H` every 8 columns).
+3. DECSTR (`ESC [!p`), followed by explicit resets for terminals that implement DECSTR partly or not at all: `ESC [r`, `ESC [0m`, `ESC [4l`, `ESC [20l`, `ESC [?6l`, `ESC [?7h`, `ESC [?1l`, `ESC (B`, `ESC )B`, `SI`, `ESC [?25h`, `ESC >`, `CSI > 4 m` (modifyOtherKeys off), `l` for the private modes 9, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004 and 2026, default tab stops (`ESC [3g`, then `ESC H` every 8 columns), and the color resets `OSC 104`, `OSC 110`, `OSC 111` and `OSC 112`.
 4. Home the cursor and save it (`ESC [H ESC 7`).
 
-The formatter writes only state that differs from the defaults, so it relies on the prologue having set them.
+What `perch-vt` writes assumes the defaults the prologue sets, because Ghostty's formatter writes only what differs from them.
 
 A **full restore**, after the prologue:
 
-1. Resizes both emulator instances and then the PTY to the client's size. If the size changed, the kernel delivers SIGWINCH and the program redraws as it would for any resize. If it did not change, Perch forces no redraw, because the model is already correct and forced redraws make some line editors print a second prompt.
+1. Resizes the model and then the PTY to the client's size. If the size changed, the kernel delivers SIGWINCH and the program redraws as it would for any resize. If it did not change, Perch forces no redraw, because the model is already correct and forced redraws make some line editors print a second prompt.
 2. Clears the screen and the terminal's scrollback (`ESC [H ESC [2J ESC [3J`).
-3. Sends history: the mirror's scrollback, formatted as escape sequences with soft-wrapped rows joined so the terminal wraps them at its own width, and no terminal state. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width, and that fits the 4 MiB history cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
-4. Homes the cursor, clears the screen, and draws the primary screen from the mirror, with its cursor, pen, hyperlink, character sets and kitty keyboard flags.
-5. If the program is on the alternate screen, switches the terminal there with the mode the program used (47, 1047 or 1049) and draws the alternate screen from the session terminal, with its cursor and screen state.
-6. Writes the session terminal's state: modes, scroll region, tab stops, keyboard state and palette from the formatter, the window title as OSC 2 and the working directory as OSC 7 (the formatter has no title, and its OSC 7 carries a stray NUL that zmx found), and the cursor style. Synchronized output (2026) is never restored: it is a handshake between a program and the terminal that was attached, and replaying it can leave a new terminal waiting to render.
-7. Switches the client to live passthrough.
+3. Sends history: the primary screen's scrollback rows, formatted with soft-wrapped rows joined so the terminal wraps them at its own width, with styles but no terminal state, and with blank rows kept. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width, and that fits the 4 MiB history cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
+4. Homes the cursor, clears the screen, and draws the primary screen's active area with its pen, character sets and kitty keyboard flags.
+5. If the program is on the alternate screen, switches the terminal there with the mode the program used (47, 1047 or 1049) and draws the alternate screen's active area the same way.
+6. Writes terminal state with no screen content: modes except 47, 1047, 1049 and 2026 (synchronized output is a handshake between a program and the terminal that was attached, and replaying it can leave a new terminal waiting to render), scroll region, tab stops and keyboard state; palette entries and the OSC 10, 11 and 12 colors only where the program changed them; the window title as OSC 2 and the working directory as OSC 7; and the cursor style.
+7. Restores each screen's saved cursor (DECSC) and kitty keyboard stack from the library's internal state, then writes the final cursor position last, counted from the scroll region's corner if origin mode is on, so no earlier step can move it.
+8. Switches the client to live passthrough, starting with the bytes the supervisor is still holding back.
 
-A `screen` restore does the same without steps 2 and 3. The exact order of the formatter's pieces within steps 4 to 6 (zmx found that writing tab stops after positioning the cursor moves it) is settled by the fidelity tests.
+A `screen` restore does the same without steps 2 and 3. `perch-vt` builds the whole restore in one call and stops at a byte limit (32 MiB for the screens and state, plus the 4 MiB of history). A restore that would exceed it, which only extreme content can cause, falls back to the prologue, the notice and the resize nudge that a partial model uses.
 
 **Fidelity contract.** After a full restore into xterm.js, at the client's size:
 
-- Each visible cell of the active screen has the model's grapheme, foreground and background color (16, 256 or RGB), and attributes (bold, faint, italic, underline with its style and color, blink, inverse, invisible, strikethrough, overline), and the hyperlink the model has. The cursor is where the model has it, with its style.
+- Each visible cell of the active screen has the model's grapheme, foreground and background color (16, 256 or RGB), and attributes (bold, faint, italic, underline with its style and color, blink, inverse, invisible, strikethrough, overline). The cursor is where the model has it, with its style and pending wrap.
 - After the program leaves the alternate screen, the primary screen is the model's primary screen.
-- Modes, scroll region, tab stops, keyboard state and palette match the model.
-- History has the right text, colors and hyperlinks in the right order, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit or 4 MiB of history, whichever is reached first. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
+- Modes (other than those step 6 leaves out), scroll region, tab stops, keyboard state, the saved cursor, the kitty keyboard stack and changed palette entries and colors match the model.
+- History has the right text and colors in the right order, blank lines included, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit or 4 MiB of history, whichever is reached first. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
 
 The contract applies to `full` restores. A `screen` restore meets the first three points.
 
-Not covered: images (sixel, kitty graphics), double-width and double-height lines, synchronized output, UTF-8 encoded C1 controls (which Ghostty and xterm.js treat differently), the effect of a sequence withheld by the fallback above, any difference between how Ghostty and xterm.js interpret the same sequence, and any terminal state the formatter does not write.
+Not covered: hyperlinks on cells (Ghostty's VT formatter writes only the hyperlink open at the cursor), images (sixel, kitty graphics), double-width and double-height lines, synchronized output, UTF-8 encoded C1 controls (which Ghostty and xterm.js treat differently), any other difference between how Ghostty and xterm.js interpret the same sequence, and any terminal state the formatter does not write.
 
 The plan's first milestone tests this contract against xterm.js (headless), and against tmux as a second terminal, with Raven's console (reedline), zsh and fish with right prompts, `less`, `vim`, progress bars, split UTF-8, invalid bytes, partial control strings, RIS, kitty keyboard flags on both screens, and attaches at different widths. Restore and the query rules below are the riskiest parts of the design, so they are proven first.
 
@@ -326,26 +334,28 @@ The plan's first milestone tests this contract against xterm.js (headless), and 
 
 Programs ask the terminal questions by writing escape sequences and reading the reply from their input. With no terminal attached, nothing answers.
 
-**Who answers.** For each query, at most one party answers. The session terminal produces a reply for every query it understands, at the moment it reads the query, so a DSR 6 reply has the cursor where the program asked. Perch decides what to do with each reply. The supervisor sends output to the model process and to the client in the same frames, numbered in order, and the model process returns each reply tagged with the number of the frame that contained the query.
+**Who answers.** For each query, at most one party answers. The supervisor's tracker sees every query as it reads the output, and decides its owner then. DSR 5, DA1 and DA2 have fixed replies, which the supervisor writes itself when it owns the query. A DSR 6 reply needs the cursor at the moment of the query, so the supervisor takes it from the model, which returns every DSR 6 reply tagged with the frame and position of its query.
 
-- Perch keeps only replies to DSR 5, DSR 6, DA1 and DA2, recognized by shape (`CSI 0 n`, `CSI <r>;<c> R`, `CSI ? ... c`, `CSI > ... c`). It discards every other reply the library produces: color reports, mode reports, version and size reports, kitty keyboard flags.
-- Ownership passes to a client when the supervisor enqueues that client's restore. Snapshots are taken at a ground state, or the unfinished sequence is withheld (see [Restore on attach](#restore-on-attach)), so no query straddles the change. A query in a frame produced before that point belongs to the supervisor, which writes the reply to the program when it arrives. A query in a frame after it reaches the client in its live output, and the real terminal answers. Its reply from the model is held as outstanding.
+- Ownership passes to a client when the supervisor enqueues that client's restore. A query in output read before that point belongs to the supervisor. Output read after it reaches the client, whose terminal answers. The held-back bytes go to the client after the restore, so a query cannot straddle the change (see [Restore on attach](#restore-on-attach)).
 - With no client, or a lagging client, every query belongs to the supervisor.
-- The supervisor recognizes the client's replies by the same shapes in client input, and removes the oldest outstanding reply of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
-- When the supervisor drops output after a stall, outstanding replies whose frames were dropped never reached the client as queries. The supervisor writes them to the program at once.
-- Before it detaches a client or lets another take over, the supervisor reads whatever that client has already sent, without blocking, and processes it as normal input. It then writes every outstanding reply still held, and from then on discards input from that client. A reply the old terminal sends later never reaches the program.
-- An outstanding reply the live client has not matched within 2 seconds is discarded, as with a real terminal that does not support the query.
+- For each query forwarded to the live client, the supervisor records an outstanding entry with its kind and frame. It recognizes the client's replies by their shape in client input (`CSI 0 n`, `CSI <r>;<c> R`, `CSI ? ... c`, `CSI > ... c`), and removes the oldest outstanding entry of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
+- When the supervisor drops output after a stall, queries in dropped frames never reached the client. The supervisor answers them.
+- Before it detaches a client or lets another take over, the supervisor reads whatever that client has already sent, without blocking, and processes it as normal input. It then answers every query still outstanding, and from then on discards input from that client. A reply the old terminal sends later never reaches the program.
+- To answer a DSR 6 it owns, the supervisor waits for the model's reply for that query, up to 500 ms. If the model is failed, partial, or does not answer in time, the query goes unanswered.
+- An outstanding entry the live client has not matched within 2 seconds is dropped without an answer, as with a real terminal that does not support the query.
 
-**Limits of the guarantee.** A keystroke that has the shape of a reply (Shift+F3 sends `CSI 1;2 R` in some terminals) can be counted as the answer to an outstanding DSR 6. If the client then detaches before the terminal's real reply, that query goes unanswered and the program waits for its own timeout. A query inside a sequence withheld by the restore fallback also goes unanswered. Perch never sends a second reply to a query it has seen answered. Duplicate replies are worse than a missed one, because a stray reply arrives as typed text.
+The model process produces replies to other queries too (color and mode reports, size reports, including the ones mode 2048 sends on resize). `perch-vt` drops all of them. Only DSR 6 replies leave it.
+
+**Limits of the guarantee.** A keystroke that has the shape of a reply (Shift+F3 sends `CSI 1;2 R` in some terminals) can be counted as the answer to an outstanding DSR 6. If the client then detaches before the terminal's real reply, that query goes unanswered and the program waits for its own timeout. A DSR 6 the supervisor owns goes unanswered while the model is failed or partial. Perch never sends a second reply to a query it has seen answered. Duplicate replies are worse than a missed one, because a stray reply arrives as typed text.
 
 **What it answers.**
 
 | Query | Reply |
 |-------|-------|
 | DSR 5 (`ESC [5n`) | `ESC [0n` |
-| DSR 6 (`ESC [6n`) | `ESC [<row>;<col>R` from the session terminal, at the query |
-| DA1 (`ESC [c`) | `ESC [?1;2c` (VT100 with advanced video), set through the library's DA callback |
-| DA2 (`ESC [>c`) | `ESC [>0;0;0c`, set the same way |
+| DSR 6 (`ESC [6n`) | `ESC [<row>;<col>R` from the model, at the query |
+| DA1 (`ESC [c`) | `ESC [?1;2c` (VT100 with advanced video) |
+| DA2 (`ESC [>c`) | `ESC [>0;0;0c` |
 
 The DA replies claim only a basic VT100, because the terminal that attaches later may support less than Ghostty does. Programs that probe for features (OSC 11 background color, kitty keyboard, XTVERSION) conventionally send DA1 last as a sentinel, so answering DA1 tells them "not supported" without Perch inventing anything. Perch does not answer color or feature queries. A wrong color answer could flip a program's light or dark theme. A program that waits for one of these without a DA1 sentinel will wait for its own timeout while detached, as it would in dtach or abduco.
 
@@ -579,10 +589,10 @@ From the brief, with where this design handles each:
 
 New risks this design adds:
 
-- **libghostty-vt is pre-1.0.** Its C interface changes between Ghostty commits. Perch pins the bindings commit and therefore the Ghostty commit and the Zig version, and upgrades them deliberately, with the fidelity tests as the gate. A git dependency also means `cargo deny` must allow that one repository as a source.
-- **The build needs Zig and fetches Ghostty.** The `libghostty-vt-sys` build script clones Ghostty at the pinned commit and runs `zig build`, which fetches Zig packages. CI pins Zig 0.17.0 and caches both. Every Zig package statically linked into Perch is checked for a GPL-3.0-compatible license, and the notices go in `NOTICE`.
-- **The primary mirror can drift** from the session terminal if Perch misreads a screen switch. The differential test guards it, and a drift costs restore fidelity, never the session.
-- **Memory.** The model process holds two emulator instances, one with history. Ghostty stores cells in compact pages and can compress scrollback. The plan measures memory at 1,000 and 10,000 lines and at 120 and 500 columns, and the docs state the numbers.
+- **Ghostty's Zig modules are internal and change between commits.** `perch-vt` uses them directly. Perch pins the Ghostty commit and the Zig version, keeps `perch-vt` small, and upgrades deliberately, with the fidelity tests as the gate.
+- **The build needs Zig and fetches Ghostty.** `zig build` fetches Ghostty and its Zig packages by content hash. CI pins Zig 0.17.0 and caches the packages. Every Zig package statically linked into Perch is checked for a GPL-3.0-compatible license, and the notices go in `NOTICE`.
+- **The tracker can disagree with Ghostty** about where a sequence ends. The differential test guards it, `perch-vt` reports ground with every snapshot, and a disagreement costs restore fidelity, never the session.
+- **Memory.** The model process holds one terminal with its history: about 10 MB for 10,000 lines at 120 columns in the build check. `perch-vt` sets the kitty image storage limit to zero, since Perch restores no images. The plan measures memory at 1,000 and 10,000 lines and at 120 and 500 columns, and the docs state the numbers.
 - **Restore fidelity is bounded by the contract above.** Programs using images or other state the formatter does not write may not come back exactly.
 - **Host policy can end sessions.** Documented, detected by `perch doctor` where possible, and not fixable by Perch in v1.
 
@@ -591,8 +601,8 @@ New risks this design adds:
 Some claims depend on behavior that only a test can settle. The plan's first milestone covers the riskiest ones.
 
 - The fidelity contract and every transition in [Terminal queries](#terminal-queries) and [Flow control](#flow-control), in a headless xterm.js and in tmux: split UTF-8, invalid bytes, partial and unterminated control strings, RIS and DECSTR, kitty push and pop on both screens, queries split across reads, keystrokes interleaved with delayed replies, takeover during a restore, stalls during live output and during a restore, and attaches at different widths.
-- That the boundary tracker agrees with libghostty-vt on sequence boundaries (CAN, SUB, ESC inside strings, raw and UTF-8 encoded C1), with a behavioral differential test, and that the primary mirror stays identical to the session terminal's primary screen.
-- That a crash in the model process leaves the program running and passthrough working.
+- That the boundary tracker agrees with `perch-vt` on ground after every byte (CAN, SUB, ESC inside strings, raw and UTF-8 encoded C1), with a differential test.
+- That a crash or hang in the model process leaves the program running and passthrough working, and that a restarted model behaves as `partial` until it is complete.
 - Memory of the model process at the sizes listed under Known risks.
 - How xterm.js, Terminal.app, iTerm and tmux handle DECSTR, `ESC [3J` and `ESC [?1049l` when already on the primary screen.
 - Raven's console (reedline) at a prompt while detached, and behind a large queued send.
@@ -622,11 +632,12 @@ Some claims depend on behavior that only a test can settle. The plan's first mil
 ```text
 Cargo.toml                 workspace
 crates/perch/              the binary (supervisor, client, CLI)
+perch-vt/                  the Zig library over Ghostty's terminal modules
 editors/vscode/            the extension
 docs/                      design, plan, user docs
 ```
 
-This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically linked libraries.
+This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically linked libraries. `perch-vt/` holds the Zig library.
 
 ## Decisions on the brief's open questions
 
@@ -635,6 +646,10 @@ This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically l
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 9
+
+From the review of revision 8 by Sonnet and Terra. Revision 8 drove Ghostty through its published C interface, which formats only the active screen and cannot write state alone, so it needed a second "mirror" terminal and workarounds that drifted (modes changed on the alternate screen, cursor differences after resizes) and replay rules that got the order of formatter output wrong. Revision 9 replaces that with `perch-vt`, a Zig library of Perch's own over Ghostty's modules, which formats both screens and terminal state exactly as a restore needs, including the saved cursor, the kitty stack and only the changed palette entries, and reports parser ground. The supervisor keeps a small tracker for the facts it needs synchronously (ground, queries, bracketed paste), which removes the ordering races between it and the model process. The model is fed only up to ground, so restores never wait and the `CAN` fallback is gone. The model is built `ReleaseSafe`, has generations and a `partial` state after a restart, and answers only DSR 6; the supervisor answers DSR 5 and DA itself. Hyperlinks on cells moved to "Not covered".
 
 ### Revision 8
 
