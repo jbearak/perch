@@ -14,6 +14,11 @@ Ghostty (terminal library, ghostty-vt module), commit
 https://github.com/ghostty-org/ghostty
 License: MIT
 
+crates/perch/src/tracker.rs is a port of Ghostty's parser state machine
+(src/terminal/Parser.zig, src/terminal/parse_table.zig and the byte path of
+src/terminal/stream.zig) and of its UTF-8 decoder (src/terminal/UTF8Decoder.zig)
+at that commit, used under this license.
+
 MIT License
 
 Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
@@ -39,7 +44,8 @@ SOFTWARE.
 ------------------------------------------------------------------------------
 
 Björn Höhrmann's DFA-based UTF-8 decoder, as adapted in Ghostty
-(src/terminal/UTF8Decoder.zig) and in uucode (src/utf8.zig)
+(src/terminal/UTF8Decoder.zig) and in uucode (src/utf8.zig), and ported from
+Ghostty's adaptation in crates/perch/src/tracker.rs
 http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
 License: MIT
 

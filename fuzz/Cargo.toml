@@ -30,6 +30,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "tracker"
+path = "fuzz_targets/tracker.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 

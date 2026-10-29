@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::queries::{Kind, ReplyMatcher};
+use crate::tracker::reply_kind;
 use crate::transport::Transport;
 
 /// The most bytes the queue holds. Replies are taken even over it.
@@ -314,25 +315,6 @@ fn scan(b: &[u8]) -> Scan {
         reply_kind(params, fin)
     };
     Scan::Complete(i + 1, kind)
-}
-
-/// The reply shapes: `CSI 0 n`, `CSI <r>;<c> R`, `CSI ? ... c`, `CSI > ... c`.
-fn reply_kind(params: &[u8], fin: u8) -> Option<Kind> {
-    let numeric = |p: &[u8]| p.iter().all(|b| b.is_ascii_digit() || *b == b';');
-    match (fin, params.first()) {
-        (b'n', _) if params == b"0" => Some(Kind::Dsr5),
-        (b'R', _) => {
-            let mut parts = params.split(|b| *b == b';');
-            let (Some(r), Some(c), None) = (parts.next(), parts.next(), parts.next()) else {
-                return None;
-            };
-            let digits = |p: &[u8]| !p.is_empty() && p.iter().all(u8::is_ascii_digit);
-            (digits(r) && digits(c)).then_some(Kind::Dsr6)
-        }
-        (b'c', Some(b'?')) if numeric(&params[1..]) => Some(Kind::Da1),
-        (b'c', Some(b'>')) if numeric(&params[1..]) => Some(Kind::Da2),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,8 @@
 pub mod cli;
 pub mod client;
 pub mod clock;
+#[cfg(feature = "test-hooks")]
+pub mod differential;
 pub mod flow;
 pub mod input;
 pub mod meta;
@@ -15,6 +17,7 @@ pub mod runtime;
 pub mod selfinstall;
 pub mod supervisor;
 pub mod sys;
+pub mod tracker;
 pub mod transport;
 pub mod vt_ffi;
 
