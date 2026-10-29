@@ -17,7 +17,7 @@ cargo build --release -p perch --target "$musl"
 bin="$CARGO_TARGET_DIR/$musl/release/perch"
 "$bin" version --json
 file "$bin"
-file "$bin" | grep -Eq '(statically|static-pie) linked'
+file "$bin" | grep -E '(statically|static-pie) linked' >/dev/null
 ! file "$bin" | grep interpreter >/dev/null
 dups=$(nm --defined-only "$bin" | awk 'NF == 3 && $2 ~ /^[TDBR]$/ { print $3 }' | sort | uniq -d)
 if [ -n "$dups" ]; then
