@@ -23,7 +23,132 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
-  "contributes": {},
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "perch",
+          "title": "Perch",
+          "icon": "media/perch.svg"
+        }
+      ]
+    },
+    "views": {
+      "perch": [
+        {
+          "id": "perch.sessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "perch.refresh",
+        "title": "Refresh",
+        "category": "Perch",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "perch.kill",
+        "title": "Kill",
+        "category": "Perch",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "perch.dismiss",
+        "title": "Dismiss",
+        "category": "Perch",
+        "icon": "$(close)"
+      },
+      {
+        "command": "perch.showLastOutput",
+        "title": "Show Last Output",
+        "category": "Perch",
+        "icon": "$(output)"
+      },
+      {
+        "command": "perch.showDetached",
+        "title": "Show Detached Sessions",
+        "category": "Perch"
+      },
+      {
+        "command": "perch.showCommandLinePath",
+        "title": "Show Command-Line Path",
+        "category": "Perch"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "perch.refresh",
+          "when": "view == perch.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "perch.kill",
+          "when": "view == perch.sessions && viewItem == perch.session.live",
+          "group": "inline"
+        },
+        {
+          "command": "perch.kill",
+          "when": "view == perch.sessions && viewItem == perch.session.live",
+          "group": "1_session"
+        },
+        {
+          "command": "perch.showLastOutput",
+          "when": "view == perch.sessions && viewItem == perch.session.ended",
+          "group": "inline@1"
+        },
+        {
+          "command": "perch.dismiss",
+          "when": "view == perch.sessions && viewItem == perch.session.ended",
+          "group": "inline@2"
+        },
+        {
+          "command": "perch.showLastOutput",
+          "when": "view == perch.sessions && viewItem == perch.session.ended",
+          "group": "1_session@1"
+        },
+        {
+          "command": "perch.dismiss",
+          "when": "view == perch.sessions && viewItem == perch.session.ended",
+          "group": "1_session@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "perch.kill",
+          "when": "false"
+        },
+        {
+          "command": "perch.dismiss",
+          "when": "false"
+        },
+        {
+          "command": "perch.showLastOutput",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Perch",
+      "properties": {
+        "perch.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "A `perch` binary to run instead of the one bundled with the extension. Empty uses the bundled binary. A leading `~/` means the home directory."
+        },
+        "perch.addToPath": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Append the directory of Perch's command-line copy to `PATH`, and set `PERCH_BIN`, in every new terminal in the editor, not only Perch's. A `perch` you installed yourself still wins. Run **Perch: Show Command-Line Path** to see the directory."
+        }
+      }
+    }
+  },
   "scripts": {
     "build": "node esbuild.mjs",
     "typecheck": "tsc --noEmit -p .",
@@ -31,7 +156,8 @@
     "check-deps": "node scripts/check-deps.mjs",
     "licenses": "node scripts/check-deps.mjs --write",
     "pretest": "npm run build && tsc -p tsconfig.test.json",
-    "test": "node out/test/runTest.js"
+    "test": "node out/test/runTest.js",
+    "test:core": "tsc -p tsconfig.test.json && mocha --recursive out/test/core"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

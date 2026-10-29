@@ -1,36 +1,57 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import * as assert from 'assert';
-import { execFile } from 'child_process';
 import * as fs from 'fs';
-import { promisify } from 'util';
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { bundledBinaryPath } from '../../core/binary';
-
-const extensionId = 'jbearak.perch';
+import { activated, bundledBinaryOrSkip, extensionId, perch } from './helpers';
 
 describe('activation', () => {
   it('activates as a workspace extension', async () => {
-    const ext = vscode.extensions.getExtension(extensionId);
-    assert.ok(ext, `${extensionId} is installed`);
-    await ext.activate();
+    const { ext } = await activated();
     assert.strictEqual(ext.isActive, true);
     // Without a remote, VS Code runs every extension as UI; the manifest is
     // what puts Perch on the workspace host.
     assert.deepStrictEqual(ext.packageJSON.extensionKind, ['workspace']);
+    assert.strictEqual(ext.id, extensionId);
   });
 
-  it('runs the bundled binary', async function () {
-    const ext = vscode.extensions.getExtension(extensionId);
-    assert.ok(ext);
-    const binary = bundledBinaryPath(ext.extensionPath, process.platform, process.arch);
-    if (!fs.existsSync(binary)) {
-      // CI places the Linux release binary here and sets PERCH_REQUIRE_BINARY.
-      if (process.env.PERCH_REQUIRE_BINARY === '1') assert.fail(`missing ${binary}`);
-      this.skip();
-    }
-    const { stdout } = await promisify(execFile)(binary, ['version', '--json']);
-    const report = JSON.parse(stdout);
-    assert.strictEqual(report.selftest.ok, true, stdout);
+  it('labels its client with the workspace key and a window key', async () => {
+    const { testing } = await activated();
+    // The test window has no workspace.
+    assert.match(testing.label, /^none#[0-9a-f]{8}$/);
+  });
+
+  it('makes the bundled binary executable and runs it', async function () {
+    const { ext } = await activated();
+    const binary = bundledBinaryOrSkip(this, ext.extensionPath);
+    // Activation restores the bit a registry's archive may drop.
+    assert.strictEqual(fs.statSync(binary).mode & 0o777, 0o755);
+    const report = JSON.parse(await perch(binary, ['version', '--json']));
+    assert.strictEqual(report.selftest.ok, true);
+  });
+
+  it('is available here and not on a Windows host', async function () {
+    const { ext, testing } = await activated();
+    assert.strictEqual(await testing.available('win32'), false);
+    bundledBinaryOrSkip(this, ext.extensionPath);
+    assert.strictEqual(await testing.available(), true);
+  });
+
+  it('installs the command-line copy and puts it on PATH for terminals', async function () {
+    const { ext, testing } = await activated();
+    bundledBinaryOrSkip(this, ext.extensionPath);
+    await testing.commandLineInstalled;
+    const copy = path.join(testing.commandLineDir, 'perch');
+    assert.ok(fs.existsSync(copy), `${copy} exists`);
+    assert.match(testing.commandLineDir, new RegExp(`bin/${process.platform}-${process.arch}$`));
+    const report = JSON.parse(await perch(copy, ['version', '--json']));
+    assert.strictEqual(report.selftest.ok, true);
+    const bin = testing.environment.get('PERCH_BIN');
+    assert.strictEqual(bin?.type, vscode.EnvironmentVariableMutatorType.Replace);
+    assert.strictEqual(bin?.value, copy);
+    const pathMutator = testing.environment.get('PATH');
+    assert.strictEqual(pathMutator?.type, vscode.EnvironmentVariableMutatorType.Append);
+    assert.strictEqual(pathMutator?.value, `${path.delimiter}${testing.commandLineDir}`);
   });
 });
