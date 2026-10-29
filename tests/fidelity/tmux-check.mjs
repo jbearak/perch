@@ -34,8 +34,11 @@ function capture(file, cols, rows, full) {
     `stty -echo; cat '${file}'; tmux -S '${sock}' wait-for -S ${name}; exec sleep 100000`);
   tmux('wait-for', name);
   const out = tmux('capture-pane', '-p', '-e', '-t', name, ...(full ? ['-S', '-', '-E', '-'] : []));
+  const history = Number(tmux('display-message', '-p', '-t', name, '#{history_size}').trim());
   tmux('kill-session', '-t', name);
-  return out.replace(/\n+$/, '').split('\n').map(acs);
+  const lines = out.replace(/\n+$/, '').split('\n').map(acs);
+  lines.history = history;
+  return lines;
 }
 
 // tmux keeps DEC special graphics as an attribute (shown as SO ... SI in
@@ -71,9 +74,16 @@ try {
         const full = r.mode === 'full';
         let la = capture(a, cols, rows, full);
         let lb = capture(b, cols, rows, full);
-        // History limited by the client: the newest part of A's.
-        if (lb.length < la.length) la = la.slice(la.length - lb.length);
         const diffs = [];
+        if (full) {
+          // The pane holds exactly the history rows the restore sent (from
+          // the client's scrollback and the 4 MiB cap), and they are the
+          // newest part of A's.
+          if (lb.history !== r.history_sent) diffs.push(`history: ${lb.history} rows kept, the restore sent ${r.history_sent}`);
+          const drop = la.history - lb.history;
+          if (drop < 0) diffs.push(`history: A has ${la.history} rows, fewer than the ${lb.history} kept`);
+          else la = la.slice(drop);
+        }
         if (la.length !== lb.length) diffs.push(`${la.length} lines != ${lb.length}`);
         for (let i = 0; i < Math.min(la.length, lb.length); i++) {
           if (la[i] !== lb[i]) diffs.push(`line ${i}: ${JSON.stringify(la[i])} != ${JSON.stringify(lb[i])}`);

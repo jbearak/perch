@@ -5,12 +5,14 @@
 // every restore against these oracles, in three headless xterm.js versions:
 //
 // - xterm (same size): terminal A gets the program's output, B the restore.
-//   Both buffers, scrollback included, must match cell for cell
+//   B must hold exactly the history rows the restore sent (from the
+//   client's scrollback and the 4 MiB cap). Both buffers must then match
+//   cell for cell
 //   (characters, width, colors, attributes, underline style and color,
 //   hyperlinks, wrapping), with the cursor, pending wrap, saved cursors and
 //   IModes; again after the output that follows (the program's own exit
-//   from the alternate screen, more output). Where history is limited, B's
-//   scrollback must be the newest part of A's. A screen restore leaves the
+//   from the alternate screen, more output), B's history being the newest
+//   part of A's. A screen restore leaves the
 //   scrollback B already had.
 // - model: after a width change Ghostty and xterm.js reflow differently,
 //   so B's rows are checked against the model's own rows.
@@ -123,7 +125,15 @@ function compareLines(what, a, b, out) {
 }
 
 /// A against B, both xterm.js at the same size.
-function compareXterm(A, B, { mode, history }) {
+// The history rows B must hold: what the restore sent (model-dump's
+// `history_sent`, from the client's scrollback and the 4 MiB history cap,
+// plus what later output scrolled up), within B's own scrollback limit.
+function historyWanted(sent, limit) {
+  return Math.min(sent, limit);
+}
+
+/// A against B, both xterm.js at the same size.
+function compareXterm(A, B, { mode, history, sent }) {
   const out = [];
   if (A.active !== B.active) out.push(`active buffer ${A.active} != ${B.active}`);
   let a = A.normal;
@@ -131,10 +141,14 @@ function compareXterm(A, B, { mode, history }) {
   if (mode === 'screen') {
     a = a.slice(a.length - A.rows);
     b = b.slice(b.length - B.rows);
-  } else if (b.length < a.length && history !== undefined && b.length - B.rows <= history) {
-    // History limited by the client's scrollback or the history cap: B
-    // holds the newest part of A's.
-    a = a.slice(a.length - b.length);
+  } else {
+    const want = historyWanted(sent, history);
+    const kept = b.length - B.rows;
+    if (kept !== want) out.push(`history: B kept ${kept} rows, the restore sent ${want}`);
+    // B holds the newest part of A's history.
+    if (a.length - A.rows < want) out.push(`history: A has ${a.length - A.rows} rows, fewer than the ${want} sent`);
+    a = a.slice(Math.max(0, a.length - (want + A.rows)));
+    b = b.slice(Math.max(0, b.length - (want + B.rows)));
   }
   compareLines('normal', a, b, out);
   if (A.alternate) compareLines('alternate', A.alternate, B.alternate ?? [], out);
@@ -146,7 +160,7 @@ function compareXterm(A, B, { mode, history }) {
 
 /// B's rows against the model's own, by text: for history after a width
 /// change.
-function compareModel(expected, B, { mode }) {
+function compareModel(expected, B, { mode, history }) {
   const out = [];
   const screens = expected.screens;
   // The model's rows drop trailing spaces; so does this comparison.
@@ -156,8 +170,11 @@ function compareModel(expected, B, { mode }) {
   if (mode === 'screen') {
     want = want.slice(want.length - expected.rows);
     got = got.slice(got.length - B.rows);
-  } else if (got.length < want.length) {
-    want = want.slice(want.length - got.length);
+  } else {
+    const sent = historyWanted(expected.history_sent, history);
+    const kept = got.length - B.rows;
+    if (kept !== sent) out.push(`history: B kept ${kept} rows, the restore sent ${sent}`);
+    want = want.slice(Math.max(0, want.length - (sent + expected.rows)));
   }
   if (want.length !== got.length) out.push(`normal: ${want.length} model rows != ${got.length} lines`);
   for (let i = 0; i < Math.min(want.length, got.length); i++) {
@@ -322,7 +339,7 @@ async function runFixture(fx, dumped, version, report) {
       kitty?.feed(live);
       const snapB = snapshot(B);
       if (w.oracle === 'xterm') {
-        fail(`restore ${w.index} after (${label})`, compareXterm(snapshot(A), snapB, w), script.known);
+        fail(`restore ${w.index} after (${label})`, compareXterm(snapshot(A), snapB, { ...w, sent: r.after.history_sent }), script.known);
       } else {
         fail(`restore ${w.index} after (${label})`, compareModel(r.after, snapB, w), script.known);
       }
@@ -365,7 +382,7 @@ async function runFixture(fx, dumped, version, report) {
       const where = `restore ${step.index}`;
       const sameSize = c === A.cols && rw === A.rows;
       const oracle = r.partial ? 'fallback' : rs.oracle ?? (sameSize && !resized ? 'xterm' : 'model');
-      const ctx = { mode: r.mode, history: r.scrollback, oracle, index: step.index, restore: rs, clients: [] };
+      const ctx = { mode: r.mode, history: r.scrollback, sent: r.history_sent, oracle, index: step.index, restore: rs, clients: [] };
 
       // The perch-vt oracle, from model-dump.
       fail(`${where} (perch-vt)`, r.differences ?? [], script.known);
