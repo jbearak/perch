@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 15. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: agreed by Sonnet and Terra, revision 16. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -87,7 +87,7 @@ The double fork changes a process's parent and session. It does not move it out 
 
 ### Supervisor robustness
 
-- **The terminal model runs in its own process.** Ghostty's library is Zig code. Perch builds it with Zig's runtime safety checks on (`ReleaseSafe`), so a bug becomes an immediate abort rather than undefined behavior, but an abort cannot be caught by Rust's `catch_unwind`. In the supervisor it would take the user's R session with it. So the supervisor forks a model process when the session starts. Fork without `exec` works even after an update has deleted the binary. The model process holds no descriptors but its socket pair to the supervisor, and it exits when that socket closes.
+- **The terminal model runs in its own process.** Ghostty's library is Zig code. Perch builds it with Zig's runtime safety checks on (`ReleaseSafe`), so a bug becomes an immediate abort rather than undefined behavior, but an abort cannot be caught by Rust's `catch_unwind`. In the supervisor it would take the user's R session with it. So the supervisor forks a model process when the session starts. Fork without `exec` works even after an update has deleted the binary. The model process holds no descriptors but its socket pair to the supervisor and its stderr, which stays pointed at `supervisor.log` so that the message of a Zig safety abort is kept for diagnosis. It exits when the socket closes.
 - **Messages are ordered and tagged.** The supervisor sends the model output in numbered frames, resizes and snapshot requests, all over the one socket, so the model sees them in the order the supervisor decided them. Each model process has a generation number. Replies and snapshots carry the generation and the frame number they belong to, and the supervisor discards anything from an older generation.
 - **When the model fails.** If the model process dies, falls more than 16 MiB behind, or misses a snapshot deadline (2 seconds), the supervisor kills it, logs why, and carries on with passthrough. It starts a fresh model process, at most 3 times per hour, fed from the next point where the stream is between sequences (see [Restore on attach](#restore-on-attach)). A fresh model has not seen earlier output, so it is marked `partial`. A restore from a partial model sends the prologue, a one-line notice, and a resize to one row fewer and back (one row more, for a one-row terminal), which makes the kernel deliver SIGWINCH even when the size has not changed. It does not answer DSR 6, because it does not know where the cursor really is. A restore from a partial model also turns bracketed paste back on if the supervisor's tracker says the program has it on. A partial model becomes complete only when the program resets the terminal with RIS, because nothing less tells it the modes, margins, tab stops, palette, keyboard state and hidden screen. A model bug must never cost the user their R session.
 - **Limits on the model.** On Linux the model process runs with an address-space limit (`RLIMIT_AS`, 1 GiB), so a runaway allocation ends it, not the machine. macOS does not enforce `RLIMIT_AS`, so there the supervisor reads the model's resident memory every 10 seconds (`proc_pid_rusage`) and treats more than 1 GiB as a failure. The scrollback byte limit and the size clamp bound normal growth well below that. Three DSR 6 replies missing their deadline within a minute count as a failure, like a missed snapshot deadline. DSR 6 queries a partial model does not answer do not count.
@@ -314,7 +314,7 @@ A **resync** after a stall is a `screen` restore. Its contract is weaker: lines 
 3. DECSTR (`ESC [!p`), followed by explicit resets for terminals that implement DECSTR partly or not at all: `ESC [r`, `ESC [0m`, `ESC [4l`, `ESC [20l`, `ESC [?6l`, `ESC [?7h`, `ESC [?1l`, `ESC (B`, `ESC )B`, `SI`, `ESC [?25h`, `ESC >`, `CSI > 4 m` (modifyOtherKeys off), every replayable mode set to Ghostty's default (for example `l` for 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004 and 2026), default tab stops (`ESC [3g`, then `ESC H` every 8 columns), and the color resets `OSC 104`, `OSC 110`, `OSC 111` and `OSC 112`.
 4. Home the cursor and save it (`ESC [H ESC 7`).
 
-What `perch-vt` writes assumes the defaults the prologue sets, because Ghostty's formatter writes only what differs from them. One table in `perch-vt` lists the modes Perch replays, each with Ghostty's default. The prologue's mode resets and the replay in step 6 are both generated from it, so they cannot disagree.
+What `perch-vt` writes assumes the defaults the prologue sets, because Ghostty's formatter writes only what differs from them. One table in `perch-vt` lists every mode Ghostty knows, each with Ghostty's default and two marks: whether the prologue resets it and whether the restore replays it. Most modes have both. 2026 is reset by the prologue, because a dropped frame can leave a terminal waiting in synchronized output, but never replayed. The prologue's mode resets and the replay in step 7 are both generated from the table, so they cannot disagree.
 
 A **full restore**, after the prologue:
 
@@ -677,6 +677,10 @@ This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically l
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 16
+
+Sonnet and Terra both agree as of revision 15. Two clarifications from Sonnet's confirmation, which need no further review: the mode table marks prologue resets and replay separately (2026 is reset, never replayed), and the model process keeps stderr on `supervisor.log` so an abort leaves its cause.
 
 ### Revision 15
 
