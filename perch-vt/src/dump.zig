@@ -177,7 +177,10 @@ fn writeRow(w: *Writer, row: Pin) Writer.Error!void {
     try writeString(w, buf[0..keep]);
     try w.print(",{},\"", .{r.wrap});
     for (cells, 0..) |cell, x| {
-        if (!cell.hasStyling() and cell.content_tag == .codepoint) continue;
+        switch (cell.content_tag) {
+            .codepoint, .codepoint_grapheme => if (!cell.hasStyling()) continue,
+            .bg_color_palette, .bg_color_rgb => {},
+        }
         var sbuf: [256]u8 = undefined;
         var sw: Writer = .fixed(&sbuf);
         switch (cell.content_tag) {
@@ -266,4 +269,14 @@ test "dump is JSON with both screens" {
     const rows = parsed.value.object.get("screens").?.object.get("primary").?.object.get("rows").?.array;
     try testing.expectEqual(@as(usize, 3), rows.items.len);
     try testing.expectEqualStrings("h\"i", rows.items[0].array.items[0].string);
+}
+
+test "dump writes grapheme clusters" {
+    var t: Terminal = try .init(ghostty.TinyIo.init.io(), testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(testing.allocator);
+    t.modes.set(.grapheme_cluster, true);
+    t.printString("h\u{2764}\u{FE0F}") catch unreachable;
+    const out = try dump(testing.allocator, &t);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "h\u{2764}\u{FE0F}") != null);
 }

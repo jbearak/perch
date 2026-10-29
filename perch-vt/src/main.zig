@@ -25,6 +25,11 @@ const Handler = Stream.Handler;
 
 const gpa = std.heap.smp_allocator;
 
+/// Ghostty logs what it ignores (an invalid C0 such as the prologue's CAN at
+/// ground, a UTF-8 encoded C1) at warning level, which ReleaseSafe would
+/// print to the model process's stderr for every such byte. Only errors.
+pub const std_options: std.Options = .{ .log_level = .err };
+
 /// A model as C sees it.
 pub const Handle = opaque {};
 

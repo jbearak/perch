@@ -196,12 +196,62 @@ pub fn build_with_limits(
         // here, before any content.
         bytes.extend_from_slice(b"\x1b[H\x1b[2J\x1b[3J");
     }
-    bytes.extend_from_slice(&body);
+    bytes.extend_from_slice(&sixteen_colors(&body));
     Ok(Restore {
         bytes,
         size: (cols, rows),
         nudge: None,
     })
+}
+
+/// Rewrites `CSI 38;5;N m` and `CSI 48;5;N m` for N below 16 in the 16-color
+/// form (`CSI 3N m`, `CSI 9N m`, and 4N or 10N for the background). Ghostty
+/// stores both forms as the same palette index and its formatter writes the
+/// 256-color one, but xterm.js draws bold text in bright colors only for
+/// the 16-color form, so a bold `CSI 1;31 m` prompt would come back dull.
+/// Programs mostly use the 16-color form for these colors; one that wrote
+/// `CSI 38;5;1 m` with bold gets the bright color back instead. Nothing
+/// else in a restore can hold these bytes: text never contains ESC, and
+/// OSC strings are written without controls.
+pub fn sixteen_colors(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if let Some((sgr, len)) = palette_sgr(&body[i..]) {
+            out.extend_from_slice(sgr.as_bytes());
+            i += len;
+        } else {
+            out.push(body[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `ESC [ 38;5;N m` or `ESC [ 48;5;N m` with N below 16, as the 16-color
+/// SGR and the length matched.
+fn palette_sgr(b: &[u8]) -> Option<(String, usize)> {
+    let rest = b.strip_prefix(b"\x1b[")?;
+    let (fg, rest) = if let Some(r) = rest.strip_prefix(b"38;5;") {
+        (true, r)
+    } else {
+        (false, rest.strip_prefix(b"48;5;")?)
+    };
+    let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 || digits > 2 || rest.get(digits) != Some(&b'm') {
+        return None;
+    }
+    let n: u8 = std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()?;
+    if n >= 16 || (digits == 2 && rest[0] == b'0') {
+        return None;
+    }
+    let code = match (fg, n < 8) {
+        (true, true) => 30 + n as u32,
+        (true, false) => 90 + n as u32 - 8,
+        (false, true) => 40 + n as u32,
+        (false, false) => 100 + n as u32 - 8,
+    };
+    Some((format!("\x1b[{code}m"), 2 + 5 + digits + 1))
 }
 
 /// The restore from a partial model, and the fallback past the byte limit:
@@ -430,6 +480,9 @@ pub fn differences(
                         let gv = &gs[field];
                         match field.as_str() {
                             "rows" | "history_rows" => {}
+                            // Never saved restores as the defaults at home,
+                            // which is what the prologue saves.
+                            "saved_cursor" if ev.is_null() && is_default_saved(gv) => {}
                             _ if ev != gv => out.push(format!("{name}.{field}: {ev} != {gv}")),
                             _ => {}
                         }
@@ -444,14 +497,29 @@ pub fn differences(
                         };
                         all[all.len() - keep..].to_vec()
                     };
-                    let (er, gr) = (take(es), take(gs));
+                    let (mut er, gr) = (take(es), take(gs));
+                    // History limited by the client's scrollback or the
+                    // history cap: the newest rows.
+                    if gr.len() < er.len() && gr.len() >= rows {
+                        er.drain(..er.len() - gr.len());
+                    }
                     if er.len() != gr.len() {
                         out.push(format!("{name}: {} rows != {}", er.len(), gr.len()));
                     }
+                    // A logical line that continues from history onto the
+                    // screen is split there, and stays split as later
+                    // output scrolls it up: one row may differ only in
+                    // being soft-wrapped.
+                    let mut split = name == "primary" && mode == Mode::Full;
                     for (i, (a, b)) in er.iter().zip(&gr).enumerate() {
-                        if a != b {
-                            out.push(format!("{name} row {i}: {a} != {b}"));
+                        if a == b {
+                            continue;
                         }
+                        if split && a[0] == b[0] && a[2] == b[2] && a[1] == true && b[1] == false {
+                            split = false;
+                            continue;
+                        }
+                        out.push(format!("{name} row {i}: {a} != {b}"));
                     }
                 }
             }
@@ -460,6 +528,14 @@ pub fn differences(
         }
     }
     out
+}
+
+fn is_default_saved(v: &serde_json::Value) -> bool {
+    *v == serde_json::json!({
+        "x": 0, "y": 0, "pending_wrap": false, "protected": false, "origin": false,
+        "style": "\x1b[0m",
+        "charset": ["ascii", "ascii", "ascii", "ascii", "G0", "G2"],
+    })
 }
 
 #[cfg(test)]
@@ -602,6 +678,20 @@ mod tests {
         );
         assert_eq!(Nudge::for_size(5, 1).via, (5, 2));
         assert_eq!(partial(CLIENT, false).bytes.len(), want.len() - 8);
+    }
+
+    #[test]
+    fn palette_colors_below_16_use_the_16_color_form() {
+        assert_eq!(
+            sixteen_colors(
+                b"a\x1b[38;5;1mb\x1b[48;5;15mc\x1b[38;5;16m\x1b[38;5;01m\x1b[58;5;1m\x1b[38;5;9"
+            ),
+            b"a\x1b[31mb\x1b[107mc\x1b[38;5;16m\x1b[38;5;01m\x1b[58;5;1m\x1b[38;5;9"
+        );
+        assert_eq!(
+            sixteen_colors(b"\x1b[48;5;0m\x1b[38;5;8m"),
+            b"\x1b[40m\x1b[90m"
+        );
     }
 
     #[test]

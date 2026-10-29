@@ -7,6 +7,7 @@
 //!
 //! - `restore-N.bin`: the bytes a client receives for the Nth restore:
 //!   the restore, then the bytes the gate was still holding back;
+//! - `live-N.bin`: the live output that client received after it;
 //! - `hostile.bin`: the client state every restore is also tried against
 //!   (alternate screen, margins, insert mode, an open OSC 8 and a
 //!   half-written CSI);
@@ -28,8 +29,16 @@
 //! ```
 //!
 //! `feed` takes the next N bytes of the stream (all of the rest for null);
+//! `fill` feeds `count` copies of `byte` and `repeat` feeds `text` (UTF-8)
+//! `count` times, for output too long to commit;
 //! `exit_alt` is the program's own exit from the alternate screen followed
-//! by more output. A restore may set `byte_cap` to test the fallback.
+//! by more output. A restore may set `byte_cap` or `history_cap`.
+//!
+//! Each restore opens a window that ends at the next restore, resize or
+//! the end of the script. `live-N.bin` holds the output the client
+//! received in it: everything after the restore, less the rest of a
+//! sequence over 16 MiB that was arriving when it attached, which the
+//! supervisor withholds.
 
 use perch::restore::{self, Client, Gate, Mode};
 use perch::vt_ffi::{Model, RestoreLimits};
@@ -56,12 +65,29 @@ fn main() {
     }
 }
 
-/// A second terminal fed what a client receives, compared with the model.
-struct Replay {
+/// The terminals restored by the latest restore, and what they received
+/// since: a second `perch-vt` per client state, compared with the model.
+struct Window {
     plain: Model,
     hostile: Model,
     index: usize,
     mode: Mode,
+    /// Whether the restore was built from the model (not the partial one).
+    compared: bool,
+    /// Live output the client received after the restore.
+    live: Vec<u8>,
+    /// The restore came in the middle of a long sequence: the rest of it is
+    /// withheld from this client.
+    withholding: bool,
+}
+
+struct Run {
+    model: Model,
+    gate: Gate,
+    frame: u64,
+    window: Option<Window>,
+    restores: Vec<Value>,
+    out: PathBuf,
 }
 
 fn size(v: &Value) -> (u16, u16) {
@@ -71,6 +97,141 @@ fn size(v: &Value) -> (u16, u16) {
 
 fn dump(m: &Model) -> Value {
     serde_json::from_slice(&m.dump().expect("dump")).expect("dump is JSON")
+}
+
+impl Run {
+    /// Output as the supervisor handles it: through the gate to the model,
+    /// and live to the restored client, less what it withholds.
+    fn feed(&mut self, mut bytes: &[u8]) {
+        if self.window.as_ref().is_some_and(|w| w.withholding) {
+            let mut n = 0;
+            while n < bytes.len() && self.gate.long().is_some() {
+                self.push(&bytes[n..n + 1]);
+                n += 1;
+            }
+            bytes = &bytes[n..];
+            if self.gate.long().is_none() {
+                if let Some(w) = &mut self.window {
+                    w.withholding = false;
+                }
+            } else {
+                return;
+            }
+        }
+        self.push(bytes);
+        if let Some(w) = &mut self.window {
+            w.live.extend_from_slice(bytes);
+            w.plain.feed(bytes, 0);
+            w.hostile.feed(bytes, 0);
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        for chunk in self.gate.push(bytes).chunks {
+            self.frame += 1;
+            self.model.feed(&chunk.bytes, self.frame);
+        }
+    }
+
+    fn restore(&mut self, r: &Value) {
+        self.finish();
+        let index = self.restores.len();
+        let mode = match r["mode"].as_str() {
+            Some("screen") => Mode::Screen,
+            _ => Mode::Full,
+        };
+        let (c, rw) = size(&r["size"]);
+        let client = Client {
+            cols: c,
+            rows: rw,
+            scrollback_rows: r["scrollback"].as_u64().unwrap_or(1000) as u32,
+        };
+        let paste = self.gate.tracker().bracketed_paste();
+        let withholding = self.gate.long().is_some();
+        let built = if self.gate.partial() {
+            restore::partial(client, paste)
+        } else {
+            let limits = RestoreLimits {
+                client_scrollback_rows: client.scrollback_rows,
+                history_cap: r["history_cap"]
+                    .as_u64()
+                    .map_or(restore::HISTORY_CAP, |n| n as usize),
+                byte_cap: r["byte_cap"]
+                    .as_u64()
+                    .map_or(restore::BYTE_CAP, |n| n as usize),
+            };
+            restore::build_with_limits(&mut self.model, mode, client, paste, limits)
+                .expect("restore")
+        };
+        let held = self.gate.held().to_vec();
+        let mut client_bytes = built.bytes.clone();
+        client_bytes.extend_from_slice(&held);
+        std::fs::write(self.out.join(format!("restore-{index}.bin")), &client_bytes)
+            .expect("write restore");
+
+        let expected = dump(&self.model);
+        let (rc, rr) = built.size;
+        let new_client =
+            || Model::new(rc, rr, client.scrollback_rows, SCROLLBACK_BYTES).expect("model");
+        let mut plain = new_client();
+        let mut hostile = new_client();
+        hostile.feed(HOSTILE, 0);
+        plain.feed(&built.bytes, 0);
+        hostile.feed(&built.bytes, 0);
+        let compared = built.nudge.is_none();
+        let diff = |m: &Model| {
+            if compared {
+                restore::differences(&expected, &dump(m), mode)
+            } else {
+                Vec::new()
+            }
+        };
+        self.restores.push(json!({
+            "index": index,
+            "mode": if mode == Mode::Full { "full" } else { "screen" },
+            "size": [rc, rr],
+            "scrollback": client.scrollback_rows,
+            "held": held.len(),
+            "withheld": withholding,
+            "partial": built.nudge.is_some(),
+            "nudge": built.nudge.map(|n| json!({"via": [n.via.0, n.via.1], "back": [n.back.0, n.back.1]})),
+            "prologue_len": restore::prologue(rc).len(),
+            "notice": String::from_utf8_lossy(restore::NOTICE),
+            "expected": expected,
+            "differences": diff(&plain),
+            "differences_hostile": diff(&hostile),
+        }));
+        // The client then gets the held bytes as live output.
+        plain.feed(&held, 0);
+        hostile.feed(&held, 0);
+        self.window = Some(Window {
+            plain,
+            hostile,
+            index,
+            mode,
+            compared,
+            live: Vec::new(),
+            withholding,
+        });
+    }
+
+    /// Ends the latest restore's window: writes its live output and
+    /// compares again.
+    fn finish(&mut self) {
+        let Some(w) = self.window.take() else { return };
+        std::fs::write(self.out.join(format!("live-{}.bin", w.index)), &w.live)
+            .expect("write live");
+        let entry = &mut self.restores[w.index];
+        entry["live"] = json!(w.live.len());
+        entry["after"] = dump(&self.model);
+        if w.compared {
+            let expected = &entry["after"];
+            let plain = restore::differences(expected, &dump(&w.plain), w.mode);
+            let hostile = restore::differences(expected, &dump(&w.hostile), w.mode);
+            entry["differences_after"] = json!(plain);
+            entry["differences_after_hostile"] = json!(hostile);
+        }
+    }
 }
 
 fn run(script_path: &Path, out: &Path) {
@@ -87,142 +248,53 @@ fn run(script_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create OUTDIR");
     std::fs::write(out.join("hostile.bin"), HOSTILE).expect("write hostile.bin");
 
-    let mut model = Model::new(cols, rows, scrollback, SCROLLBACK_BYTES).expect("model");
-    let mut gate = Gate::new();
-    let mut frame = 0u64;
+    let mut run = Run {
+        model: Model::new(cols, rows, scrollback, SCROLLBACK_BYTES).expect("model"),
+        gate: Gate::new(),
+        frame: 0,
+        window: None,
+        restores: Vec::new(),
+        out: out.to_path_buf(),
+    };
     let mut pos = 0usize;
-    let mut replay: Option<Replay> = None;
-    let mut restores: Vec<Value> = Vec::new();
-
-    // Feeds output as the supervisor would: through the gate to the model,
-    // and raw to the terminals that were restored.
-    let mut feed =
-        |bytes: &[u8], model: &mut Model, gate: &mut Gate, replay: &mut Option<Replay>| {
-            for chunk in gate.push(bytes).chunks {
-                frame += 1;
-                model.feed(&chunk.bytes, frame);
-            }
-            if let Some(r) = replay {
-                r.plain.feed(bytes, 0);
-                r.hostile.feed(bytes, 0);
-            }
-        };
-
     for action in script["actions"].as_array().expect("actions") {
         if let Some(n) = action.get("feed") {
             let end = match n.as_u64() {
                 Some(n) => (pos + n as usize).min(stream.len()),
                 None => stream.len(),
             };
-            feed(&stream[pos..end], &mut model, &mut gate, &mut replay);
+            run.feed(&stream[pos..end]);
             pos = end;
+        } else if let Some(f) = action.get("fill") {
+            let byte = f["byte"].as_u64().expect("fill byte") as u8;
+            let count = f["count"].as_u64().expect("fill count") as usize;
+            run.feed(&vec![byte; count]);
+        } else if let Some(r) = action.get("repeat") {
+            let text = r["text"].as_str().expect("repeat text").as_bytes();
+            let count = r["count"].as_u64().expect("repeat count") as usize;
+            run.feed(&text.repeat(count));
         } else if let Some(s) = action.get("resize") {
+            run.finish();
             let (c, r) = size(s);
-            model.resize(c, r).expect("resize");
-            if let Some(rp) = &mut replay {
-                rp.plain.resize(c, r).expect("resize");
-                rp.hostile.resize(c, r).expect("resize");
-            }
+            run.model.resize(c, r).expect("resize");
         } else if let Some(e) = action.get("exit_alt") {
             let mode = e["mode"].as_u64().expect("exit_alt mode");
             let mut bytes = format!("\x1b[?{mode}l").into_bytes();
             bytes.extend_from_slice(e["then"].as_str().unwrap_or("").as_bytes());
-            feed(&bytes, &mut model, &mut gate, &mut replay);
+            run.feed(&bytes);
         } else if let Some(r) = action.get("restore") {
-            finish(&model, replay.take(), &mut restores);
-            let index = restores.len();
-            let mode = match r["mode"].as_str() {
-                Some("screen") => Mode::Screen,
-                _ => Mode::Full,
-            };
-            let (c, rw) = size(&r["size"]);
-            let client = Client {
-                cols: c,
-                rows: rw,
-                scrollback_rows: r["scrollback"].as_u64().unwrap_or(1000) as u32,
-            };
-            let paste = gate.tracker().bracketed_paste();
-            let built = if gate.partial() {
-                restore::partial(client, paste)
-            } else {
-                let limits = RestoreLimits {
-                    client_scrollback_rows: client.scrollback_rows,
-                    history_cap: r["history_cap"]
-                        .as_u64()
-                        .map_or(restore::HISTORY_CAP, |n| n as usize),
-                    byte_cap: r["byte_cap"]
-                        .as_u64()
-                        .map_or(restore::BYTE_CAP, |n| n as usize),
-                };
-                restore::build_with_limits(&mut model, mode, client, paste, limits)
-                    .expect("restore")
-            };
-            let mut client_bytes = built.bytes.clone();
-            client_bytes.extend_from_slice(gate.held());
-            std::fs::write(out.join(format!("restore-{index}.bin")), &client_bytes)
-                .expect("write restore");
-
-            let expected = dump(&model);
-            let (rc, rr) = built.size;
-            let new_client =
-                || Model::new(rc, rr, client.scrollback_rows, SCROLLBACK_BYTES).expect("model");
-            let mut plain = new_client();
-            let mut hostile = new_client();
-            hostile.feed(HOSTILE, 0);
-            plain.feed(&built.bytes, 0);
-            hostile.feed(&built.bytes, 0);
-            let compared = built.nudge.is_none();
-            let diff = |m: &Model| {
-                if compared {
-                    restore::differences(&expected, &dump(m), mode)
-                } else {
-                    Vec::new()
-                }
-            };
-            restores.push(json!({
-                "index": index,
-                "mode": if mode == Mode::Full { "full" } else { "screen" },
-                "size": [rc, rr],
-                "scrollback": client.scrollback_rows,
-                "held": gate.held().len(),
-                "partial": built.nudge.is_some(),
-                "nudge": built.nudge.map(|n| json!({"via": [n.via.0, n.via.1], "back": [n.back.0, n.back.1]})),
-                "prologue_len": restore::prologue(rc).len(),
-                "notice": String::from_utf8_lossy(restore::NOTICE),
-                "expected": expected,
-                "differences": diff(&plain),
-                "differences_hostile": diff(&hostile),
-            }));
-            // The client then gets the held bytes as live output.
-            plain.feed(gate.held(), 0);
-            hostile.feed(gate.held(), 0);
-            replay = compared.then_some(Replay {
-                plain,
-                hostile,
-                index,
-                mode,
-            });
+            run.restore(r);
         } else {
             panic!("unknown action {action}");
         }
     }
-    finish(&model, replay.take(), &mut restores);
-    let summary = json!({ "restores": restores, "final": dump(&model) });
+    run.finish();
+    let summary = json!({ "restores": run.restores, "final": dump(&run.model) });
     std::fs::write(
         out.join("summary.json"),
         serde_json::to_vec_pretty(&summary).expect("summary"),
     )
     .expect("write summary");
-}
-
-/// The comparison after the actions that followed a restore.
-fn finish(model: &Model, replay: Option<Replay>, restores: &mut [Value]) {
-    let Some(r) = replay else { return };
-    let expected = dump(model);
-    let entry = &mut restores[r.index];
-    entry["differences_after"] = json!(restore::differences(&expected, &dump(&r.plain), r.mode));
-    entry["differences_after_hostile"] =
-        json!(restore::differences(&expected, &dump(&r.hostile), r.mode));
 }
 
 /// Fill a model with `lines` lines of history at `cols` columns, every
