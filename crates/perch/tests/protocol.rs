@@ -82,6 +82,11 @@ impl Raw {
         }
     }
 
+    fn json_of(&mut self, request: &str) -> serde_json::Value {
+        self.send(kind::REQUEST, request);
+        self.json()
+    }
+
     fn json(&mut self) -> serde_json::Value {
         let f = self.recv().expect("a frame");
         serde_json::from_slice(&f.payload).unwrap()
@@ -228,6 +233,37 @@ fn an_exact_1_mib_frame_is_accepted() {
     assert_eq!(r["id"], 9);
     assert_eq!(r["ok"], true);
     assert_eq!(r["result"]["state"], "running");
+}
+
+#[test]
+fn oversized_replies_and_metadata_are_refused_and_the_session_survives() {
+    let rt = Rt::new();
+    let id = rt.new_session(&["--", "sleep", "1000"]);
+    let mut c = Raw::connect(&rt, &id);
+    c.send(kind::HELLO, HELLO);
+    assert_eq!(c.recv().unwrap().kind, kind::WELCOME);
+
+    // The reply would echo an `id` that fills the request's whole frame.
+    let head = r#"{"op":"info","id":""#;
+    let tail = r#""}"#;
+    let pad = "x".repeat(proto::MAX_FRAME - 1 - head.len() - tail.len());
+    c.send(kind::REQUEST, &format!("{head}{pad}{tail}"));
+    let r = c.json();
+    assert_eq!(r["error"]["code"], "too_large");
+
+    // Two annotations that each fit a frame but together outgrow meta.json.
+    let big = "v".repeat(600 << 10);
+    for (n, key) in ["a", "b"].iter().enumerate() {
+        let req = serde_json::json!({ "id": n, "op": "annotate", "set": { *key: big } });
+        c.send(kind::REQUEST, &req.to_string());
+        let r = c.json();
+        assert_eq!(r["ok"], n == 0, "{r}");
+    }
+    assert_eq!(
+        c.json_of(r#"{"id":5,"op":"info"}"#)["result"]["state"],
+        "running"
+    );
+    assert!(rt.listed(&id).is_some());
 }
 
 #[test]

@@ -719,7 +719,15 @@ impl Supervisor {
         for (i, payload) in requests {
             let resp = self.handle_request(&payload);
             let c = &mut self.conns[i];
-            c.out.extend(proto::encode_json(kind::RESPONSE, &resp));
+            // A reply echoes the request's `id`, so a request near the
+            // frame cap can make one too large to send.
+            let frame = proto::encode(kind::RESPONSE, &serde_json::to_vec(&resp).expect("JSON"))
+                .unwrap_or_else(|_| {
+                    let err =
+                        proto::error_response(&Value::Null, "too_large", "the reply is too large");
+                    proto::encode_json(kind::RESPONSE, &err)
+                });
+            c.out.extend(frame);
             if c.out.len() > MAX_CONN_BACKLOG {
                 c.dead = true;
             }
@@ -751,9 +759,9 @@ impl Supervisor {
             }
             "rename" => match req.get("name").and_then(Value::as_str) {
                 Some(name) if !name.is_empty() => {
-                    self.meta.name = name.to_owned();
-                    self.write_meta();
-                    proto::ok_response(&id, json!({}))
+                    let mut next = self.meta.clone();
+                    next.name = name.to_owned();
+                    self.replace_meta(&id, next)
                 }
                 _ => proto::error_response(&id, "bad_request", "`name` must be a non-empty string"),
             },
@@ -804,10 +812,20 @@ impl Supervisor {
             }
             Some(_) => return proto::error_response(id, "bad_request", "`unset` must be an array"),
         }
+        let mut next = self.meta.clone();
         for k in unset {
-            self.meta.annotations.remove(&k);
+            next.annotations.remove(&k);
         }
-        self.meta.annotations.extend(set);
+        next.annotations.extend(set);
+        self.replace_meta(id, next)
+    }
+
+    /// Writes changed metadata, unless it would outgrow what readers take.
+    fn replace_meta(&mut self, id: &Value, next: Meta) -> Value {
+        if !next.fits() {
+            return proto::error_response(id, "too_large", "meta.json would exceed 1 MiB");
+        }
+        self.meta = next;
         self.write_meta();
         proto::ok_response(id, json!({}))
     }

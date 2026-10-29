@@ -149,6 +149,11 @@ impl Meta {
         self.state == EXITED || self.state == LOST
     }
 
+    /// Whether [`read`] can read this back.
+    pub fn fits(&self) -> bool {
+        self.to_json().len() as u64 <= MAX_SIZE
+    }
+
     /// The JSON written to the file.
     pub fn to_json(&self) -> String {
         let mut s = serde_json::to_string_pretty(self).expect("metadata serializes");
