@@ -376,11 +376,11 @@ fixture('reedline-redraw', {
 fixture('fish-right-prompt', {
   description: 'a fish-style right prompt drawn with cursor movement after the left prompt (fish is not installed here, so this is synthetic)',
   parts: [
-    `${OSC}133;A${ST}${CSI}1mjmb${CSI}0m@host ~/p> ${CSI}s${CSI}66G${CSI}33m(main) 0.2s${CSI}0m${CSI}u`,
+    `${OSC}133;A${ST}${CSI}1myou${CSI}0m@host ~/p> ${CSI}s${CSI}66G${CSI}33m(main) 0.2s${CSI}0m${CSI}u`,
     'echo hi',
     `\r\n${OSC}133;C${ST}hi\r\n${OSC}133;D;0${ST}`,
-    `${OSC}133;A${ST}${CSI}1mjmb${CSI}0m@host ~/p> ${CSI}s${CSI}70G${CSI}33m(main)${CSI}0m${CSI}u`,
-    restore({ assert: [{ name: 'right prompt drawn', line: [2, `jmb@host ~/p>${' '.repeat(56)}(main)`] }, { name: 'cursor after the left prompt', cursor: [14, 2] }] }),
+    `${OSC}133;A${ST}${CSI}1myou${CSI}0m@host ~/p> ${CSI}s${CSI}70G${CSI}33m(main)${CSI}0m${CSI}u`,
+    restore({ assert: [{ name: 'right prompt drawn', line: [2, `you@host ~/p>${' '.repeat(56)}(main)`] }, { name: 'cursor after the left prompt', cursor: [14, 2] }] }),
     restore({ mode: 'screen' }),
     'ls\r\n',
   ],
