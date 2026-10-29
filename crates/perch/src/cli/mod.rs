@@ -4,6 +4,7 @@
 
 mod list;
 mod new;
+mod selfinstall;
 mod session;
 mod version;
 
@@ -34,6 +35,8 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("dismiss") => session::dismiss(rest),
         Some("rename") => session::rename(rest),
         Some("annotate") => session::annotate(rest),
+        // Hidden: the extension runs it; users have no reason to.
+        Some("self-install") => selfinstall::run(rest),
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             ExitCode::SUCCESS

@@ -12,6 +12,7 @@ pub mod procinfo;
 pub mod proto;
 pub mod queries;
 pub mod runtime;
+pub mod selfinstall;
 pub mod supervisor;
 pub mod sys;
 pub mod transport;
