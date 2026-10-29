@@ -149,9 +149,10 @@ impl Meta {
         self.state == EXITED || self.state == LOST
     }
 
-    /// Whether [`read`] can read this back.
+    /// Whether [`read`] can read this back, with room left for the fields
+    /// the supervisor adds when the session ends.
     pub fn fits(&self) -> bool {
-        self.to_json().len() as u64 <= MAX_SIZE
+        self.to_json().len() as u64 + LIFECYCLE_RESERVE <= MAX_SIZE
     }
 
     /// The JSON written to the file.
@@ -164,6 +165,8 @@ impl Meta {
 
 /// The largest `meta.json` Perch reads.
 const MAX_SIZE: u64 = 1 << 20;
+/// Room [`Meta::fits`] keeps for `exit`, `endedAt`, `degraded` and `state`.
+const LIFECYCLE_RESERVE: u64 = 4 << 10;
 
 /// Reads `meta.json` inside a session directory.
 pub fn read(dir: BorrowedFd<'_>) -> io::Result<Meta> {
@@ -220,6 +223,33 @@ mod tests {
             ended_at: None,
             extra: Map::new(),
         }
+    }
+
+    #[test]
+    fn metadata_that_fits_stays_readable_after_the_session_ends() {
+        let mut m = sample();
+        let base = m.to_json().len() as u64;
+        let pad = (MAX_SIZE - LIFECYCLE_RESERVE - base) as usize;
+        m.annotations
+            .insert("raven.console".into(), "i".repeat(pad + 3));
+        assert!(m.fits());
+        m.annotations
+            .insert("raven.console".into(), "i".repeat(pad + 4));
+        assert!(!m.fits());
+        m.annotations
+            .insert("raven.console".into(), "i".repeat(pad + 3));
+
+        m.state = "exited".into();
+        m.exit = Some(Exit {
+            code: Some(255),
+            signal: Some("SIGKILL".into()),
+            signal_number: Some(9),
+            error: Some("exec failed: No such file or directory (os error 2)".into()),
+            extra: Map::new(),
+        });
+        m.ended_at = Some("2026-10-29T15:04:05.123456789Z".into());
+        m.degraded = vec!["directory-recreated".into(), "model-failed".into()];
+        assert!(m.to_json().len() as u64 <= MAX_SIZE);
     }
 
     #[test]
