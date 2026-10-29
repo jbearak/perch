@@ -2,6 +2,8 @@
 
 Question: which terminal emulator crate should hold Perch's screen model? See [design.md](../design.md#restore-on-attach).
 
+Outcome: this spike chose avt over vt100. Design revision 8 later replaced avt with libghostty-vt, at the maintainer's direction; libghostty-vt was not part of this spike. The results stay here as the record of why vt100 was rejected.
+
 Candidates checked: `vt100` 0.18.1 (MIT) and `avt` 0.19.0 (Apache-2.0). `alacritty_terminal` (Apache-2.0) reflows and answers queries but has no serializer. libghostty-vt (MIT) needs Zig. Neither of those two was run.
 
 Results on an Apple M-series laptop, release build:
