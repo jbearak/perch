@@ -266,28 +266,30 @@ impl Run {
         let entry = &mut self.restores[w.index];
         entry["live"] = json!(w.live.len());
         let mut after = dump(&self.model);
-        after["history_sent"] = json!(history_after(&entry["expected"], &after));
+        // The rows the restore sent, plus those the output scrolled up, less
+        // any it cleared: the newest that fit the client's scrollback.
+        // Counted on the restored terminal, which keeps more than the
+        // client and so prunes none of them, and held exactly
+        // `history_sent` before the output; the model prunes by whole
+        // pages, so its own count cannot say.
+        let plain = dump(&w.plain);
+        let rows = |v: &Value| {
+            v["screens"]["primary"]["history_rows"]
+                .as_u64()
+                .unwrap_or(0)
+        };
+        let limit = entry["scrollback"].as_u64().unwrap_or(0);
+        after["history_sent"] = json!(rows(&plain).min(limit));
+        after["history_exact"] = json!(false);
         entry["after"] = after;
         if w.compared {
             let expected = &entry["after"];
-            let plain = restore::differences(expected, &dump(&w.plain), w.mode);
+            let plain = restore::differences(expected, &plain, w.mode);
             let hostile = restore::differences(expected, &dump(&w.hostile), w.mode);
             entry["differences_after"] = json!(plain);
             entry["differences_after_hostile"] = json!(hostile);
         }
     }
-}
-
-/// The history rows a restored client holds after more output: those the
-/// restore sent, plus the rows that output scrolled into history.
-pub fn history_after(expected: &Value, after: &Value) -> u64 {
-    let rows = |v: &Value| {
-        v["screens"]["primary"]["history_rows"]
-            .as_u64()
-            .unwrap_or(0)
-    };
-    let sent = expected["history_sent"].as_u64().unwrap_or(0);
-    (sent + rows(after).saturating_sub(rows(expected))).min(rows(after))
 }
 
 fn run(script_path: &Path, out: &Path) {

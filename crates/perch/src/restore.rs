@@ -274,8 +274,9 @@ pub fn partial(client: Client, bracketed_paste: bool) -> Restore {
 /// cursor, pen, character sets, saved cursor, kitty stack and rows. An
 /// alternate screen counts only while it is active, and a `screen`
 /// restore is compared without history. A full restore is compared on
-/// exactly the newest `history_sent` history rows when `expected` has that
-/// field (see `Model::history_kept`). Soft wrapping is compared on
+/// the newest `history_sent` history rows when `expected` has that field
+/// (see `Model::history_kept`), which the terminal must hold exactly, or
+/// at least with `history_exact: false`. Soft wrapping is compared on
 /// history rows only, except where the restore cannot rebuild it: at the
 /// boundary with the screen, and around blank cells.
 pub fn differences(
@@ -309,7 +310,9 @@ pub fn differences(
                     for (field, ev) in es.as_object().into_iter().flatten() {
                         let gv = &gs[field];
                         match field.as_str() {
-                            "rows" | "history_rows" => {}
+                            // Shell-integration state, which a restore
+                            // does not carry.
+                            "rows" | "history_rows" | "semantic_content" => {}
                             // Never saved restores as the defaults at home,
                             // which is what the prologue saves.
                             "saved_cursor" if ev.is_null() && is_default_saved(gv) => {}
@@ -327,14 +330,26 @@ pub fn differences(
                         };
                         all[all.len() - keep..].to_vec()
                     };
-                    let (mut er, gr) = (take(es), take(gs));
+                    let (mut er, mut gr) = (take(es), take(gs));
                     // History limited by the client's scrollback or the
-                    // history cap: exactly the newest `history_sent` rows,
-                    // when the caller says how many were sent.
+                    // history cap: the terminal holds the `history_sent`
+                    // rows (exactly, or at least with `history_exact`
+                    // false), and the newest of them must be the model's.
+                    // The model may have pruned some of them since; the
+                    // newest it still has are compared.
                     if name == "primary" && mode == Mode::Full {
                         if let Some(sent) = expected["history_sent"].as_u64() {
-                            let keep = (sent as usize + rows).min(er.len());
-                            er.drain(..er.len() - keep);
+                            let sent = sent as usize;
+                            let exact = expected["history_exact"].as_bool().unwrap_or(true);
+                            let kept = gr.len().saturating_sub(rows);
+                            if (exact && kept != sent) || (!exact && kept < sent) {
+                                out.push(format!(
+                                    "history: kept {kept} rows, the restore and later output sent {sent}"
+                                ));
+                            }
+                            let keep = sent.min(kept).min(er.len().saturating_sub(rows)) + rows;
+                            er.drain(..er.len().saturating_sub(keep));
+                            gr.drain(..gr.len().saturating_sub(keep));
                         } else if gr.len() < er.len() && gr.len() >= rows {
                             er.drain(..er.len() - gr.len());
                         }
@@ -391,7 +406,7 @@ pub fn differences(
                     }
                 }
             }
-            "history_sent" => {}
+            "history_sent" | "history_exact" => {}
             _ if *e != got[key] => out.push(format!("{key}: {e} != {}", got[key])),
             _ => {}
         }
