@@ -1,0 +1,48 @@
+# control session
+C> 0000004901 Hello {"min":1,"max":1,"client":"golden-test","mode":"control","label":"test"}
+S> 0000005b02 Welcome {"protocol":1,"perch":"<version>","capabilities":["info","kill","rename","annotate","detach"]}
+C> 0000002804 Request {"id":1,"op":"rename","name":"renamed"}
+S> 0000001f05 Response {"id":1,"ok":true,"result":{}}
+C> 0000004c04 Request {"id":"two","op":"annotate","set":{"k":"v"},"unset":["none"],"future":true}
+S> 0000002305 Response {"id":"two","ok":true,"result":{}}
+C> 0000001b04 Request {"id":3,"op":"frobnicate"}
+S> 0000005705 Response {"error":{"code":"unsupported","message":"unknown op `frobnicate`"},"id":3,"ok":false}
+C> 0000002104 Request {"id":4,"op":"rename","name":""}
+S> 0000006105 Response {"error":{"code":"bad_request","message":"`name` must be a non-empty string"},"id":4,"ok":false}
+C> 0000000904 Request {"id":5}
+S> 0000004c05 Response {"error":{"code":"bad_request","message":"missing `op`"},"id":5,"ok":false}
+C> 0000000904 Request not json
+S> 0000006205 Response {"error":{"code":"bad_request","message":"a request must be a JSON object"},"id":null,"ok":false}
+C> 0000001704 Request {"id":6,"op":"detach"}
+S> 0000002f05 Response {"id":6,"ok":true,"result":{"detached":false}}
+C> 0000004901 Hello {"min":1,"max":1,"client":"golden-test","mode":"control","label":"test"}
+S> 0000005203 Error {"code":"unexpected_frame","message":"frame type 1 is not valid in control mode"}
+S> (closed)
+# version mismatch
+C> 0000004001 Hello {"min":2,"max":3,"client":"future","mode":"control","label":""}
+S> 0000009903 Error {"code":"version","message":"no common protocol version: supervisor speaks 1..1, client 2..3","supervisor":{"min":1,"max":1},"client":{"min":2,"max":3}}
+S> (closed)
+# request before Hello
+C> 0000001504 Request {"id":1,"op":"info"}
+S> 0000004403 Error {"code":"expected_hello","message":"the first frame must be Hello"}
+S> (closed)
+# unreadable Hello
+C> 0000000a01 Hello {"min":1}
+S> 0000005a03 Error {"code":"bad_hello","message":"unreadable Hello: missing field `max` at line 1 column 9"}
+S> (closed)
+# attach mode (not in this supervisor)
+C> 0000002201 Hello {"min":1,"max":1,"mode":"attach"}
+S> 0000004b03 Error {"code":"unsupported","message":"this supervisor does not support attach"}
+S> (closed)
+# unknown mode
+C> 0000002401 Hello {"min":1,"max":1,"mode":"spectate"}
+S> 0000003903 Error {"code":"bad_hello","message":"unknown mode `spectate`"}
+S> (closed)
+# a zero-length frame
+C> 00000000 (length 0)
+S> 0000003503 Error {"code":"bad_frame","message":"frame with length 0"}
+S> (closed)
+# a frame over 1 MiB
+C> 00100001 01 (length 1 MiB + 1)
+S> 0000005003 Error {"code":"bad_frame","message":"frame of 1048577 bytes is over the 1 MiB limit"}
+S> (closed)

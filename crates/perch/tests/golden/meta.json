@@ -1,0 +1,30 @@
+{
+  "annotations": {
+    "raven.console": "ipc"
+  },
+  "command": [
+    "sleep",
+    "1000"
+  ],
+  "createdAt": "<createdAt>",
+  "cwd": "<cwd>",
+  "degraded": [],
+  "exit": null,
+  "format": 1,
+  "host": "<host>",
+  "id": "<id>",
+  "kind": "r",
+  "name": "R: thesis",
+  "owner": "jbearak.raven",
+  "perchVersion": "<perchVersion>",
+  "pid": "<pid>",
+  "pidStart": "<pidStart>",
+  "protocol": {
+    "max": 1,
+    "min": 1
+  },
+  "scrollback": 1000,
+  "state": "running",
+  "supervisorPid": "<supervisorPid>",
+  "supervisorStart": "<supervisorStart>"
+}
