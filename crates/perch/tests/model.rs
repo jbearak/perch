@@ -274,6 +274,19 @@ fn a_hung_model_is_replaced_once_16_mib_behind() {
 }
 
 #[test]
+fn repeated_long_sequences_do_not_hide_a_hung_model() {
+    check_failure(
+        &[],
+        |rt, t| {
+            test_model(rt, &t.id, Some("hang"));
+            t.round("longcsi:17000000 ris longcsi:17000000 ris dsr5");
+        },
+        &["fell more than 16 MiB behind"],
+        Shows::LogOnly,
+    );
+}
+
+#[test]
 fn a_model_over_its_memory_limit_is_replaced() {
     // Linux enforces RLIMIT_AS (1 GiB) in the model, so allocating past it
     // costs only address space. macOS has the supervisor read the resident

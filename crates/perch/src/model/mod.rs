@@ -217,9 +217,13 @@ impl Model {
 
     /// The frames just queued are a sequence over 16 MiB, released at once.
     /// A model that is keeping up needs time to get through them, so they
-    /// do not count as falling behind.
+    /// do not count as falling behind. Only one release at a time: until
+    /// it is written, later ones count, so a model that stopped reading
+    /// still fails.
     pub fn released_long_sequence(&mut self) {
-        if let Some(l) = &mut self.link {
+        if let Some(l) = &mut self.link
+            && l.burst_end <= l.written
+        {
             l.burst_end = l.written + l.backlog() as u64;
         }
     }
