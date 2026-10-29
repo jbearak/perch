@@ -134,9 +134,17 @@ pub fn feed(self: *Vt, bytes: []const u8, frame: u64) void {
             self.stream.next(c);
         }
     } else {
-        self.fed += bytes.len;
-        self.stream.nextSlice(bytes);
+        self.feedSlice(bytes, frame);
     }
+}
+
+/// Feed through Ghostty's bulk path, `nextSlice`, which production builds'
+/// `feed` takes. Test-observer builds use it to check that path against the
+/// tracker; the queries it observes carry the chunk's end as their offset.
+pub fn feedSlice(self: *Vt, bytes: []const u8, frame: u64) void {
+    self.frame = frame;
+    self.fed += bytes.len;
+    self.stream.nextSlice(bytes);
 }
 
 pub fn resize(self: *Vt, cols: u16, rows: u16) ghostty.Terminal.ResizeError!void {

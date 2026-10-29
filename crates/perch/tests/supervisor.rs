@@ -129,6 +129,8 @@ fn golden_list_json() {
             "lastOutputAt",
             "perchVersion",
             "command",
+            "memoryBytes",
+            "foreground",
         ],
     );
     golden("list.json", &format!("{v:#}\n"));
@@ -402,7 +404,15 @@ sleep 1000
     let id = rt.new_session(&["--", "sh", "-c", script]);
     let mut pids = Vec::new();
     for f in ["ignorer", "bg", "stopped", "shell"] {
-        let text = rt.wait_file(&rt.dir(&id).join(f));
+        // `echo > file` creates the file before writing it: wait for the
+        // whole line.
+        let path = rt.dir(&id).join(f);
+        let text = wait_for(Duration::from_secs(10), || {
+            std::fs::read_to_string(&path)
+                .ok()
+                .filter(|t| t.ends_with('\n'))
+        })
+        .unwrap_or_else(|| panic!("{} never appeared", path.display()));
         let pid: i32 = text.trim().parse().unwrap();
         let start = perch::procinfo::start_time(pid).expect("running");
         pids.push((pid, start));
@@ -625,7 +635,7 @@ fn tombstone_on_exit_while_detached() {
         assert_eq!(
             std::fs::read_to_string(dir.join("tail.txt")).unwrap(),
             "",
-            "empty until the model"
+            "the model's tail of a blank screen"
         );
         assert!(!dir.join("sock").exists());
         assert!(dir.join("supervisor.log").exists());

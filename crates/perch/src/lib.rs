@@ -10,6 +10,7 @@ pub mod differential;
 pub mod flow;
 pub mod input;
 pub mod meta;
+pub mod model;
 pub mod procinfo;
 pub mod proto;
 pub mod queries;

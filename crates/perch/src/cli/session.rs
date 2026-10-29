@@ -53,6 +53,10 @@ const LIVE_FIELDS: &[&str] = &[
     "cols",
     "lastOutputAt",
     "lastInputAt",
+    "model",
+    "memoryBytes",
+    "cwd",
+    "foreground",
 ];
 
 /// A session as `list --json` and `info --json` show it: the metadata, the
@@ -103,6 +107,22 @@ fn one_session(
 
 // ---------------------------------------------------------------------------
 
+/// `12 MB`, `1.5 GB`: decimal units, as memory is shown elsewhere.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["bytes", "kB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1000.0 && unit + 1 < UNITS.len() {
+        v /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 || v >= 10.0 {
+        format!("{v:.0} {}", UNITS[unit])
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
 pub(super) fn info(args: &[String]) -> ExitCode {
     let (query, flags) = match one_session("info", args, &["--json"]) {
         Ok(x) => x,
@@ -143,6 +163,15 @@ pub(super) fn info(args: &[String]) -> ExitCode {
     }
     if !s("lastOutputAt").is_empty() {
         lines.push(("last output", s("lastOutputAt")));
+    }
+    if let Some(bytes) = v["memoryBytes"].as_u64() {
+        lines.push(("memory", format!("about {}", human_bytes(bytes))));
+    }
+    if let Some(name) = v["foreground"]["name"].as_str() {
+        lines.push(("foreground", format!("{name} ({})", v["foreground"]["pid"])));
+    }
+    if let Some(m) = v["model"].as_str() {
+        lines.push(("model", m.to_owned()));
     }
     for (k, val) in &e.meta.annotations {
         lines.push(("annotation", format!("{k}={val}")));

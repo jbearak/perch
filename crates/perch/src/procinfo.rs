@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! What Perch reads about other processes: opaque start times, owners and
-//! the members of a terminal session (the kill scope).
+//! What Perch reads about other processes: opaque start times, owners, the
+//! members of a terminal session (the kill scope), and for `info` their
+//! resident memory, current directory and name.
 //!
 //! Start times are opaque strings compared only for equality. On Linux they
 //! are `linux:<ticks>`, field 22 of `/proc/<pid>/stat`; on macOS
@@ -11,6 +12,7 @@
 #[cfg(target_os = "linux")]
 mod imp {
     use std::fs;
+    use std::path::PathBuf;
 
     /// The fields of `/proc/<pid>/stat` after the process name, which is
     /// in parentheses and can itself contain `)` and spaces, so the split
@@ -48,6 +50,22 @@ mod imp {
             .is_some_and(|f| f.first() == Some(&"Z"))
     }
 
+    /// The second field of `/proc/<pid>/statm`, resident pages.
+    pub fn resident_bytes(pid: i32) -> Option<u64> {
+        let statm = fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+        let pages: u64 = statm.split_ascii_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * crate::sys::page_size())
+    }
+
+    pub fn cwd(pid: i32) -> Option<PathBuf> {
+        fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+
+    pub fn name(pid: i32) -> Option<String> {
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        Some(comm.trim_end_matches('\n').to_owned())
+    }
+
     pub fn session_members(sid: i32) -> Vec<i32> {
         let Ok(dir) = fs::read_dir("/proc") else {
             return Vec::new();
@@ -67,7 +85,21 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use std::path::PathBuf;
+
     use crate::sys;
+
+    pub fn resident_bytes(pid: i32) -> Option<u64> {
+        sys::proc_resident_bytes(pid)
+    }
+
+    pub fn cwd(pid: i32) -> Option<PathBuf> {
+        sys::proc_cwd(pid)
+    }
+
+    pub fn name(pid: i32) -> Option<String> {
+        Some(sys::proc_bsd_info(pid)?.name)
+    }
 
     pub fn start_time(pid: i32) -> Option<String> {
         let info = sys::proc_bsd_info(pid)?;
@@ -93,7 +125,7 @@ mod imp {
 /// Whether `pid` has exited and waits to be reaped. A zombie is out of the
 /// kill scope: it cannot be signaled and holds nothing.
 pub use imp::is_zombie;
-pub use imp::{real_uid, session_members, start_time};
+pub use imp::{cwd, name, real_uid, resident_bytes, session_members, start_time};
 
 #[cfg(target_os = "linux")]
 pub use imp::start_time_from_stat;
@@ -116,6 +148,24 @@ mod tests {
         assert_eq!(a, b);
         assert!(is_same_process(me, &a, crate::sys::getuid()));
         assert!(!is_same_process(me, "linux:1", crate::sys::getuid()));
+    }
+
+    #[test]
+    fn own_memory_directory_and_name() {
+        let me = crate::sys::getpid();
+        assert!(resident_bytes(me).is_some_and(|b| b > 0));
+        assert_eq!(
+            cwd(me).map(|p| p.canonicalize().unwrap()),
+            Some(std::env::current_dir().unwrap().canonicalize().unwrap())
+        );
+        let exe = std::env::current_exe().unwrap();
+        let file = exe.file_name().unwrap().to_string_lossy();
+        let n = name(me).expect("name");
+        // Linux keeps 15 bytes of the name.
+        assert!(
+            !n.is_empty() && file.starts_with(&n[..n.len().min(15)]),
+            "{n} vs {file}"
+        );
     }
 
     #[test]
