@@ -35,3 +35,16 @@ Same probe, extended to time parsing of mixed SGR and non-ASCII text, built `Rel
 - `-Dsimd=true`: 354 MB/s. `-Dsimd=false`: 400 MB/s (macOS arm64).
 - With `-Dsimd=false`, `zig build -Dtarget=` produced a static x86-64 musl ELF, a static arm64 musl ELF and an x86-64 Mach-O. The arm64 musl build ran on `rockylinux:8` and `alpine:3` (about 290 MB/s under colima).
 - Not yet checked: linking a `perch-vt` static library into a Rust binary for each target.
+
+## Model memory at the history and width limits (M2c)
+
+Measured 2026-10-29 on macOS 26 (arm64) with `perch-testprogs model-dump --memory LINES COLS`: one `perch-vt` model (ReleaseSafe, SIMD off) at 50 rows, scrollback set to LINES lines and Perch's 64 MiB byte limit, fed LINES + 50 lines that fill every cell with a color change every 8 cells. The figure is the process's peak resident memory (`getrusage`), measured before anything else is allocated, so it includes about 2.4 MB for the process itself.
+
+| History lines | Columns | Rows kept in history | Peak resident memory |
+|---------------|---------|----------------------|----------------------|
+| 1,000 | 120 | 605 | 6.3 MB |
+| 1,000 | 500 | 906 | 11.2 MB |
+| 10,000 | 120 | 9,605 | 18.7 MB |
+| 10,000 | 500 | 9,906 | 62.1 MB |
+
+History is pruned by whole pages, so fewer rows are kept than the line limit, more so at narrow widths where a page holds more rows. `crates/perch/tests/model_memory.rs` runs the largest case on every CI run and fails above 120 MB.
