@@ -243,6 +243,37 @@ fixture('oversized-apc', {
   ],
 });
 
+// Reads that cross the 16 MiB limit (review of M2c, S1). `fill` and the
+// string part after it are separate reads, so the second read is the one
+// that crosses. The supervisor's feeder must still keep the APC from the
+// model; a CSI held at exactly the limit is fed through when the next read
+// passes it.
+const LIMIT = 16 * 1024 * 1024;
+
+fixture('oversized-apc-crossing', {
+  description: 'an APC held just under 16 MiB, then a read that passes the limit and ends it: it never reaches the model',
+  parts: [
+    'before\r\n',
+    `${ESC}_G`,
+    { fill: { byte: 0x41, count: LIMIT - 3 - 10 } },
+    `${'A'.repeat(100)}${ST}after\r\n`,
+    restore({ assert: [{ name: 'the APC was dropped, not fed', feeder: { discarded: 1, fed_through: 0 } }, { name: 'text after it', line: [1, 'after'] }] }),
+  ],
+});
+
+fixture('oversized-csi-crossing', {
+  description: 'a CSI held at exactly 16 MiB, then a line feed and its final byte in one read: fed through, and the model partial until RIS',
+  parts: [
+    'before\r\n',
+    `${CSI}1`,
+    { fill: { byte: 0x31, count: LIMIT - 3 } },
+    '\nm',
+    restore({ assert: [{ name: 'fed through', feeder: { discarded: 0, fed_through: 1 } }] }),
+    `${ESC}cclean\r\n`,
+    restore({ assert: [{ name: 'complete again after RIS', line: [0, 'clean'] }] }),
+  ],
+});
+
 fixture('oversized-csi', {
   description: 'a CSI over 16 MiB is streamed to the model, which is partial until RIS',
   parts: [

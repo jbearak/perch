@@ -261,6 +261,11 @@ function assertion(as, ctx) {
     const got = t.buffer.normal.length - t.rows;
     return got === as.scrollback ? null : `scrollback ${got}`;
   }
+  if ('feeder' in as) {
+    // What the supervisor's feeder did over the whole fixture.
+    const got = { discarded: ctx.summary.discarded, fed_through: ctx.summary.fed_through };
+    return JSON.stringify(got) === JSON.stringify(as.feeder) ? null : `feeder ${JSON.stringify(got)}`;
+  }
   if ('scrollback_below' in as) {
     const got = t.buffer.normal.length - t.rows;
     return got > 0 && got < as.scrollback_below ? null : `scrollback ${got}`;
@@ -335,7 +340,7 @@ async function runFixture(fx, dumped, version, report) {
       if (label === 'plain') {
         for (const as of w.restore.assert ?? []) {
           if (!as.after) continue;
-          const err = assertion(as, { A, B, snapA: snapshot(A), snapB, expected: r.after });
+          const err = assertion(as, { A, B, snapA: snapshot(A), snapB, expected: r.after, summary: dumped.summary });
           if (err) fail(`restore ${w.index} after: ${as.name}`, [err], script.known);
           else report.push({ fixture: fx.name, version, passed: as.name });
         }
@@ -422,7 +427,7 @@ async function runFixture(fx, dumped, version, report) {
         if (label === 'plain') {
           for (const as of rs.assert ?? []) {
             if (as.after) continue;
-            const err = assertion(as, { A, B, snapA: snapshot(A), snapB, expected: r.expected });
+            const err = assertion(as, { A, B, snapA: snapshot(A), snapB, expected: r.expected, summary: dumped.summary });
             if (err) fail(`${where}: ${as.name}`, [err], script.known);
             else report.push({ fixture: fx.name, version, passed: as.name });
           }

@@ -89,6 +89,9 @@ struct Run {
     /// Set by a long sequence fed through, cleared by RIS, as the
     /// supervisor does.
     partial: bool,
+    /// How many long sequences the feeder dropped and fed through.
+    discarded: u64,
+    fed_through: u64,
     window: Option<Window>,
     restores: Vec<Value>,
     out: PathBuf,
@@ -139,9 +142,13 @@ impl Run {
         for step in self.feeder.push(bytes) {
             match step {
                 Step::Frame { n, bytes } => self.model.feed(&bytes, n),
-                Step::Partial => self.partial = true,
+                Step::Partial => {
+                    self.partial = true;
+                    self.fed_through += 1;
+                }
                 Step::Reset => self.partial = false,
-                Step::Query { .. } | Step::Discarded => {}
+                Step::Discarded => self.discarded += 1,
+                Step::Query { .. } => {}
             }
         }
     }
@@ -265,6 +272,8 @@ fn run(script_path: &Path, out: &Path) {
         model: Model::new(cols, rows, scrollback, SCROLLBACK_BYTES).expect("model"),
         feeder: Feeder::new(),
         partial: false,
+        discarded: 0,
+        fed_through: 0,
         window: None,
         restores: Vec::new(),
         out: out.to_path_buf(),
@@ -302,7 +311,12 @@ fn run(script_path: &Path, out: &Path) {
         }
     }
     run.finish();
-    let summary = json!({ "restores": run.restores, "final": dump(&run.model) });
+    let summary = json!({
+        "restores": run.restores,
+        "final": dump(&run.model),
+        "discarded": run.discarded,
+        "fed_through": run.fed_through,
+    });
     std::fs::write(
         out.join("summary.json"),
         serde_json::to_vec_pretty(&summary).expect("summary"),
