@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "sessions": [
+    {
+      "annotations": {},
+      "attached": false,
+      "clientLabel": null,
+      "clientPid": null,
+      "cols": 80,
+      "command": "<command>",
+      "createdAt": "<createdAt>",
+      "cwd": "<cwd>",
+      "degraded": [],
+      "dir": "<dir>",
+      "exit": null,
+      "format": 1,
+      "host": "<host>",
+      "id": "<id>",
+      "kind": "",
+      "lastInputAt": null,
+      "lastOutputAt": null,
+      "name": "a running one",
+      "perchVersion": "<perchVersion>",
+      "pid": "<pid>",
+      "pidStart": "<pidStart>",
+      "protocol": {
+        "max": 1,
+        "min": 1
+      },
+      "rows": 24,
+      "scrollback": 1000,
+      "state": "running",
+      "supervisorPid": "<supervisorPid>",
+      "supervisorStart": "<supervisorStart>"
+    },
+    {
+      "annotations": {},
+      "attached": false,
+      "command": "<command>",
+      "createdAt": "<createdAt>",
+      "cwd": "<cwd>",
+      "degraded": [],
+      "dir": "<dir>",
+      "endedAt": "<endedAt>",
+      "exit": {
+        "code": 7
+      },
+      "format": 1,
+      "host": "<host>",
+      "id": "<id>",
+      "kind": "shell",
+      "name": "b exited one",
+      "perchVersion": "<perchVersion>",
+      "pid": "<pid>",
+      "pidStart": "<pidStart>",
+      "protocol": {
+        "max": 1,
+        "min": 1
+      },
+      "scrollback": 1000,
+      "state": "exited",
+      "supervisorPid": "<supervisorPid>",
+      "supervisorStart": "<supervisorStart>"
+    }
+  ]
+}

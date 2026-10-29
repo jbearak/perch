@@ -3,9 +3,17 @@
 //! Perch: persistent terminal sessions.
 
 pub mod cli;
+pub mod client;
+pub mod clock;
 pub mod flow;
 pub mod input;
+pub mod meta;
+pub mod procinfo;
+pub mod proto;
 pub mod queries;
+pub mod runtime;
+pub mod supervisor;
+pub mod sys;
 pub mod transport;
 pub mod vt_ffi;
 
