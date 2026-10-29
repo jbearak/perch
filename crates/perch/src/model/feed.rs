@@ -112,31 +112,46 @@ impl Feeder {
     }
 
     /// Output read from the PTY.
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Step> {
+    pub fn push(&mut self, mut chunk: &[u8]) -> Vec<Step> {
+        // The limit is checked where a held sequence would pass it, not at
+        // the end of the read: otherwise a long string that ends later in
+        // the same read would reach the model whole.
         let mut steps = Vec::new();
-        let rest = if self.long == Some(Long::Skip) {
-            let used = self.skip(chunk, &mut steps);
-            &chunk[used..]
-        } else {
-            chunk
-        };
-        if rest.is_empty() {
-            return steps;
+        while !chunk.is_empty() {
+            if self.long == Some(Long::Skip) {
+                let used = self.skip(chunk, &mut steps);
+                chunk = &chunk[used..];
+                continue;
+            }
+            let room = if self.long.is_none() {
+                (self.limit + 1).saturating_sub(self.held.len())
+            } else {
+                self.limit + 1
+            };
+            let (piece, rest) = chunk.split_at(room.clamp(1, chunk.len()));
+            self.push_piece(piece, &mut steps);
+            chunk = rest;
         }
+        steps
+    }
+
+    /// Output that cannot take a held sequence more than one byte past the
+    /// limit, outside a string being dropped.
+    fn push_piece(&mut self, piece: &[u8], steps: &mut Vec<Step>) {
         let start = self.tracker.fed();
-        let events = self.tracker.feed(rest);
-        self.held.extend_from_slice(rest);
+        let events = self.tracker.feed(piece);
+        self.held.extend_from_slice(piece);
         for e in events {
             match e.seen {
                 Seen::Query(kind) => {
-                    let n = self.cut(e.end, &mut steps);
+                    let n = self.cut(e.end, steps);
                     steps.push(Step::Query {
                         id: QueryId(n),
                         kind,
                     });
                 }
                 Seen::Reset => {
-                    self.cut(e.end, &mut steps);
+                    self.cut(e.end, steps);
                     steps.push(Step::Reset);
                 }
                 Seen::Paste(_) => {}
@@ -151,7 +166,7 @@ impl Feeder {
             self.tracker.ground_offset()
         };
         if limit > self.sent {
-            self.cut(limit, &mut steps);
+            self.cut(limit, steps);
         }
         if self.long.is_none() && self.held.len() > self.limit {
             if never_restored(self.tracker.unfinished()) {
@@ -162,11 +177,10 @@ impl Feeder {
                 steps.push(Step::Discarded);
             } else {
                 self.long = Some(Long::FeedThrough);
-                self.cut(self.tracker.fed(), &mut steps);
+                self.cut(self.tracker.fed(), steps);
                 steps.push(Step::Partial);
             }
         }
-        steps
     }
 
     /// Drops a long string a byte at a time until the tracker leaves it,
@@ -469,5 +483,110 @@ mod tests {
             }
         }
         assert_eq!(fed, stream);
+    }
+
+    // Review of M2c, S1: a read that crosses the limit.
+
+    #[test]
+    fn a_never_restored_string_ending_in_the_crossing_read_never_reaches_the_model() {
+        for kind in [&b"\x1b_G"[..], b"\x1bPq", b"\x1b]52;c;", b"\x1b^", b"\x1bX"] {
+            for before in 0..=8 {
+                // `before` bytes of body first, then a read that passes the
+                // limit of 8 and ends the string.
+                let mut f = Feeder::with_limit(8);
+                let mut first = kind.to_vec();
+                first.truncate(8.min(first.len()));
+                let head = &kind[first.len()..];
+                let mut second = head.to_vec();
+                first.extend(std::iter::repeat_n(
+                    b'A',
+                    before.min(8 - first.len().min(8)),
+                ));
+                second.extend(std::iter::repeat_n(b'A', 12));
+                second.extend(b"\x1b\\after");
+                let (fed, other) = run(&mut f, &[b"x", &first, &second]);
+                assert_eq!(fed, b"x\x1b\\after", "{kind:?} {before}");
+                assert_eq!(other, [Step::Discarded], "{kind:?} {before}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_never_restored_string_in_one_read_over_the_limit_never_reaches_the_model() {
+        let mut f = Feeder::with_limit(8);
+        let (fed, other) = run(&mut f, &[b"x\x1b_GAAAAAAAAAAAAAAAAA\x1b\\y"]);
+        assert_eq!(fed, b"x\x1b\\y");
+        assert_eq!(other, [Step::Discarded]);
+    }
+
+    #[test]
+    fn a_screen_sequence_crossing_the_limit_is_fed_whole_and_in_order() {
+        // Held at exactly the limit, then a read with a line feed and the
+        // final byte: the model gets every byte, in order, at most once.
+        let mut f = Feeder::with_limit(8);
+        let (fed, _) = run(&mut f, &[b"\x1b[111111", b"\nm\x1b[6nz"]);
+        assert_eq!(fed, b"\x1b[111111\nm\x1b[6nz");
+        // Over the limit in one read with nothing after: fed through and
+        // partial.
+        let mut f = Feeder::with_limit(8);
+        let (fed, other) = run(&mut f, &[b"\x1b[1111111111"]);
+        assert_eq!(fed, b"\x1b[1111111111");
+        assert_eq!(other, [Step::Partial]);
+    }
+
+    // Review of M2c, S2: what ends a long sequence is handled as usual.
+
+    #[test]
+    fn ris_ending_a_long_csi_resets_after_partial() {
+        let mut f = Feeder::with_limit(8);
+        let (_, other) = run(&mut f, &[b"\x1b[1111111111", b"11\x1bc"]);
+        assert_eq!(other, [Step::Partial, Step::Reset]);
+        let mut f = Feeder::with_limit(8);
+        let (_, other) = run(&mut f, &[b"\x1b[1111111111\x1bc"]);
+        assert_eq!(other, [Step::Partial, Step::Reset]);
+    }
+
+    #[test]
+    fn a_query_right_after_a_long_sequence_is_tagged() {
+        for chunks in [
+            &[&b"\x1b[1111111111"[..], b"m\x1b[6n"][..],
+            &[b"\x1b[1111111111m\x1b[6n"],
+            &[b"\x1b_GAAAAAAAAAA", b"\x1b\\\x1b[6n"],
+            &[b"\x1b_GAAAAAAAAAA\x1b\\\x1b[6n"],
+            &[b"\x1b_GAAAAAAAAAA\x1b[6n"],
+        ] {
+            let mut f = Feeder::with_limit(8);
+            let (_, other) = run(&mut f, chunks);
+            assert!(
+                matches!(
+                    other.last(),
+                    Some(Step::Query {
+                        kind: Kind::Dsr6,
+                        ..
+                    })
+                ),
+                "{chunks:?}: {other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_string_after_another_long_sequence_in_the_same_read_is_dropped() {
+        let apc = b"\x1b_GAAAAAAAAAAAA\x1b\\";
+        // After a CSI fed through.
+        let mut f = Feeder::with_limit(8);
+        let mut read = b"\x1b[1111111111m".to_vec();
+        read.extend(apc);
+        read.extend(b"z");
+        let (fed, other) = run(&mut f, &[&read]);
+        assert_eq!(fed, b"\x1b[1111111111m\x1b\\z");
+        assert_eq!(other, [Step::Partial, Step::Discarded]);
+        // After a string dropped.
+        let mut f = Feeder::with_limit(8);
+        let mut read = apc.to_vec();
+        read.extend(apc);
+        let (fed, other) = run(&mut f, &[&read]);
+        assert_eq!(fed, b"\x1b\\\x1b\\");
+        assert_eq!(other, [Step::Discarded, Step::Discarded]);
     }
 }
