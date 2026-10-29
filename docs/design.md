@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 10. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: draft for review, revision 11. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -286,7 +286,10 @@ Perch's Rust code declares those few functions itself. It does not use the third
 - The client receives the restore, then the bytes the supervisor is still holding back, then live output.
 - The model and the client have then seen exactly the same bytes since the snapshot point. If the held bytes are the start of a query, the query completes in the client's live output, which is consistent with the ownership rule below.
 
-**Very long sequences.** The supervisor holds back at most 16 MiB of one unfinished sequence. A sequence longer than that (a large image or clipboard write) is never given to the model at all: the supervisor discards what it held and lets the rest pass to live clients only. Perch restores no images and no clipboard, so the model loses nothing it would use. A client that attaches while such a sequence is still arriving would receive its remainder without its start, which its terminal would print as text, so the supervisor withholds the rest of that sequence from that client until the tracker sees its end.
+**Very long sequences.** The supervisor holds back at most 16 MiB of one unfinished sequence. What happens to a longer one depends on its kind, which the tracker knows from its introducer:
+
+- An APC, PM, SOS or DCS string, or an OSC 52 (clipboard), 1337 or 5522 string, carries images, clipboard data or requests that Perch does not restore. It is never given to the model: the supervisor discards what it held and lets the rest pass to live clients only.
+- Anything else, including a CSI, can change the screen. Ghostty carries out C0 controls such as line feed even inside a CSI's parameters. So the supervisor feeds it to the model in pieces as it arrives, and marks the model `partial` until the next RIS, because a client attaching in its middle cannot be given a consistent restore. A client that attaches while such a sequence is still arriving would receive its remainder without its start, which its terminal would print as text, so the supervisor withholds the rest of that sequence from that client until the tracker sees its end.
 
 `perch-vt` reports with each snapshot whether its parser was at ground. When the tracker said ground and the library disagrees, the supervisor logs a disagreement, which the differential test exists to prevent, and the prologue's `CAN` contains the damage.
 
@@ -315,8 +318,8 @@ A **full restore**, after the prologue:
 2. Clears the screen and the terminal's scrollback (`ESC [H ESC [2J ESC [3J`).
 3. Sends history: the primary screen's scrollback rows, formatted with soft-wrapped rows joined so the terminal wraps them at its own width, with styles but no terminal state, and with blank rows kept. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width, and that fits the 4 MiB history cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
 4. Homes the cursor, clears the screen, and draws the primary screen's active area, with its hyperlinks.
-5. Writes the primary screen's cursor state, in this order: the saved cursor (move to its position, set its pen, character sets, protection and origin mode, then `ESC 7`, then put origin mode back), then the live cursor (position and pending wrap, then pen, hyperlink, protection, character sets and kitty keyboard flags). Pending wrap is rebuilt as Ghostty's formatter does it, by printing the cell at the right edge with that cell's own style before setting the cursor's pen. Perch never uses `ESC 7` and `ESC 8` for this, because that would overwrite the saved cursor. For a program that entered the alternate screen with 1049, the switch in step 6 saves the primary cursor itself, and the primary's saved cursor in the model is that same state, so the separate saved-cursor write is skipped.
-6. If the program is on the alternate screen, switches the terminal there with the mode the program used (47, 1047 or 1049), draws the alternate screen's active area, and writes its cursor state the same way.
+5. Writes the primary screen's cursor state, in this order: the saved cursor (move to its position, set its pen, character sets, protection and origin mode, then `ESC 7`, then put origin mode back), then the live cursor (position and pending wrap, then pen, hyperlink, protection, character sets and kitty keyboard flags). Pending wrap is rebuilt as Ghostty's formatter does it, by printing the cell at the right edge with that cell's own style before setting the cursor's pen. Perch never uses `ESC 7` and `ESC 8` for this, because that would overwrite the saved cursor.
+6. If the program is on the alternate screen, switches the terminal there with `ESC [?47h`, whatever mode the program used. Mode 47 saves no cursor and clears nothing, so the primary screen's saved cursor written in step 5 survives. When the program later leaves with its own mode, the terminal does what that mode says: `?1049l` restores the primary cursor from that saved slot, which holds the model's value. Then Perch draws the alternate screen's active area and writes its cursor state the same way as in step 5, including its own saved cursor. Ghostty and xterm keep a saved cursor per screen.
 7. Writes terminal state with no screen content: the modes in Perch's replay table where they differ from Ghostty's default, scroll region, tab stops, keyboard state, the kitty keyboard stack of each screen, palette entries and the OSC 10, 11 and 12 colors only where the program changed them, the window title as OSC 2, the working directory as OSC 7, and the cursor style. The replay table is an allowlist. Modes with side effects or that belong to the attached terminal are not on it: 3 (column mode, which resizes and erases), 47, 1047, 1048 and 1049 (screen and cursor switches), 2026 (synchronized output, a handshake with the terminal that was attached), and 2033 and 2048 (which make a capable terminal send reports). Writing a scroll region or tab stops moves the cursor, so after them Perch writes the active screen's final cursor position and pending wrap again, last.
 8. Switches the client to live passthrough, starting with the bytes the supervisor is still holding back.
 
@@ -612,7 +615,8 @@ Some claims depend on behavior that only a test can settle. The plan's first mil
 - That the boundary tracker agrees with `perch-vt` on ground, queries and bracketed paste after every chunk (CAN, SUB, ESC inside strings, raw and UTF-8 encoded C1, mode save and restore), with a differential test through the same code path the supervisor uses.
 - That `perch-vt` can do each thing the restore section needs: history with blank rows kept, the primary screen under the alternate screen, state without content, the replay allowlist, changed palette entries only, both screens' saved cursors and kitty stacks, pending wrap with a blank edge cell, and a DSR 6 reply per query frame.
 - That `perch-vt` links statically into the Rust binary for every target, or else that the separate-executable fallback works.
-- An attach in the middle of a sequence over 16 MiB (OSC, APC and DCS).
+- An attach in the middle of a sequence over 16 MiB (OSC, APC, DCS, and a CSI with embedded C0 controls).
+- Restores for programs that mix 47, 1047 and 1049, checking both screens' saved cursors after the program leaves the alternate screen.
 - That a crash or hang in the model process leaves the program running and passthrough working, and that a restarted model behaves as `partial` until it is complete.
 - Memory of the model process at the sizes listed under Known risks.
 - How xterm.js, Terminal.app, iTerm and tmux handle DECSTR, `ESC [3J` and `ESC [?1049l` when already on the primary screen.
@@ -657,6 +661,10 @@ This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically l
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 11
+
+From Terra's review of revision 10: an oversized sequence is discarded from the model only when it is a string kind whose effect Perch never restores; any other oversized sequence (a CSI can carry line feeds Ghostty acts on) is fed to the model and marks it `partial`. The restore always writes the primary screen's saved cursor and enters the alternate screen with mode 47, which saves and clears nothing, so programs that mix 47, 1047 and 1049 keep the right saved cursor.
 
 ### Revision 10
 
