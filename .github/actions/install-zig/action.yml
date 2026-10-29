@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: Install Zig
+description: >
+  Installs the Zig in perch-vt/zig-toolchain.toml from its ziglang.org tarball,
+  checks the tarball's SHA-256, and restores Zig's global package cache keyed by
+  perch-vt/build.zig.zon.
+runs:
+  using: composite
+  steps:
+    - name: Find the pinned tarball
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        arch=$(uname -m)
+        case "$arch" in arm64) arch=aarch64 ;; esac
+        case "$(uname -s)" in
+          Linux) os=linux ;;
+          Darwin) os=macos ;;
+          *) echo "no Zig pin for $(uname -s)" >&2; exit 1 ;;
+        esac
+        key="$arch-$os"
+        field() {
+          awk -v section="[tarballs.$key]" -v name="$1" '
+            $0 == section { inside = 1; next }
+            /^\[/ { inside = 0 }
+            inside && $1 == name { gsub(/"/, "", $3); print $3 }
+          ' perch-vt/zig-toolchain.toml
+        }
+        url=$(field url)
+        sha=$(field sha256)
+        if [ -z "$url" ] || [ -z "$sha" ]; then
+          echo "perch-vt/zig-toolchain.toml has no tarball for $key" >&2
+          exit 1
+        fi
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "url=$url" >> "$GITHUB_OUTPUT"
+        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+    - name: Download and check Zig
+      shell: bash
+      env:
+        ZIG_URL: ${{ steps.pin.outputs.url }}
+        ZIG_SHA256: ${{ steps.pin.outputs.sha256 }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/zig"
+        mkdir -p "$dir"
+        curl --fail --silent --show-error --location --retry 3 "$ZIG_URL" -o "$dir/zig.tar.xz"
+        echo "$ZIG_SHA256  $dir/zig.tar.xz" | shasum -a 256 -c -
+        tar -xJf "$dir/zig.tar.xz" -C "$dir" --strip-components=1
+        rm "$dir/zig.tar.xz"
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "PERCH_ZIG=$dir/zig" >> "$GITHUB_ENV"
+        echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
+        "$dir/zig" version
+    - name: Cache Zig packages
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/zig-global
+        key: zig-global-${{ steps.pin.outputs.key }}-${{ hashFiles('perch-vt/build.zig.zon') }}

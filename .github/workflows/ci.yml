@@ -1,0 +1,242 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MUSL: ${{ matrix.arch }}-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --features perch/test-hooks -- -D warnings
+      - name: test
+        run: |
+          cargo build -p perch-testprogs
+          cargo test --workspace
+      - name: test (test-hooks)
+        run: |
+          cargo build -p perch-testprogs --features perch/test-hooks
+          cargo test --workspace --features perch/test-hooks
+      - name: test (musl)
+        run: |
+          cargo build -p perch-testprogs --target "$MUSL"
+          cargo test --workspace --target "$MUSL"
+      - name: test (musl, test-hooks)
+        run: |
+          cargo build -p perch-testprogs --target "$MUSL" --features perch/test-hooks
+          cargo test --workspace --target "$MUSL" --features perch/test-hooks
+      - name: release build (musl)
+        run: cargo build --release -p perch --target "$MUSL"
+      - name: check the release binary
+        run: |
+          set -euo pipefail
+          bin="target/$MUSL/release/perch"
+          "$bin" version --json
+          file "$bin"
+          file "$bin" | grep -Eq '(statically|static-pie) linked'
+          if file "$bin" | grep -q interpreter; then
+            echo "release binary has an interpreter" >&2; exit 1
+          fi
+          # No strong symbol defined twice (compiler_rt from Zig and Rust's).
+          dups=$(nm --defined-only "$bin" | awk 'NF == 3 && $2 ~ /^[TDBR]$/ { print $3 }' | sort | uniq -d)
+          if [ -n "$dups" ]; then
+            echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
+          fi
+          # No test hook in a release build.
+          if nm "$bin" | grep -q perch_vt_take_observed; then
+            echo "release binary has perch-vt's test observer" >&2; exit 1
+          fi
+          if strings "$bin" | grep -q PERCH_TEST_TIME_SCALE; then
+            echo "release binary has PERCH_TEST_TIME_SCALE" >&2; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perch-linux-${{ matrix.arch }}
+          path: target/${{ env.MUSL }}/release/perch
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --features perch/test-hooks -- -D warnings
+      - name: test
+        run: |
+          cargo build -p perch-testprogs
+          cargo test --workspace
+      - name: test (test-hooks)
+        run: |
+          cargo build -p perch-testprogs --features perch/test-hooks
+          cargo test --workspace --features perch/test-hooks
+      - name: release build
+        run: |
+          set -euo pipefail
+          cargo build --release -p perch
+          bin=target/release/perch
+          "$bin" version --json
+          file "$bin"
+          dups=$(nm -g -U "$bin" | awk 'NF == 3 { print $3 }' | sort | uniq -d)
+          if [ -n "$dups" ]; then
+            echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
+          fi
+          if nm "$bin" | grep -q perch_vt_take_observed; then
+            echo "release binary has perch-vt's test observer" >&2; exit 1
+          fi
+      # macOS Intel is cross-compiled here and never run: no Intel runners.
+      - name: cross-build x86_64-apple-darwin (not run)
+        run: |
+          set -euo pipefail
+          cargo build --release -p perch --target x86_64-apple-darwin
+          file target/x86_64-apple-darwin/release/perch
+          file target/x86_64-apple-darwin/release/perch | grep -q x86_64
+
+  zig:
+    name: perch-vt zig build test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - name: zig build test
+        working-directory: perch-vt
+        run: |
+          zig fmt --check build.zig build.zig.zon src
+          zig build test --summary all
+          zig build test --summary all -Dtest-observer=true
+
+  checks:
+    name: SPDX, Zig packages, cargo deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - name: SPDX headers
+        run: scripts/spdx-check
+      - name: Zig package check
+        run: scripts/zig-package-check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny (workspace)
+        run: cargo deny check licenses bans sources
+      - name: cargo deny (fuzz)
+        run: cargo deny --manifest-path fuzz/Cargo.toml check licenses bans sources
+
+  msrv:
+    name: MSRV (Rust 1.95)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
+
+  extension:
+    name: Extension (VS Code ${{ matrix.vscode }})
+    needs: linux
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        vscode: ["1.82.0", stable]
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - name: npm checks
+        run: npm run check-deps
+      - run: npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          name: perch-linux-x86_64
+          path: editors/vscode/bin/linux-x64
+      - run: chmod +x bin/linux-x64/perch && bin/linux-x64/perch version
+      - name: Let Electron's sandbox start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: test
+        env:
+          PERCH_VSCODE_VERSION: ${{ matrix.vscode }}
+          PERCH_REQUIRE_BINARY: "1"
+        run: xvfb-run -a npm test
+
+  fuzz-build:
+    name: Fuzz build (nightly)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: cargo fuzz build
+        run: cargo fuzz build
+      - name: run each target for 20 seconds
+        run: |
+          set -euo pipefail
+          for target in $(cargo fuzz list); do
+            cargo fuzz run "$target" -- -max_total_time=20
+          done
