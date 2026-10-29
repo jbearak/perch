@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Every Zig package the shipped perch-vt build fetches, as listed in the local
+# package directory after `zig build` with the shipped flags
+# (-Doptimize=ReleaseSafe -Dcpu=baseline -Dsimd=false
+# -Dvt-features=-kitty-graphics). scripts/zig-package-check fails on any
+# package not listed here.
+#
+# use = "linked": code from the package is in libperch-vt.a, and NOTICE covers
+# it. use = "build-time": fetched by the build but nothing from it is linked.
+# Ghostty's build.zig fetches zlib's source and its color themes as lazy
+# dependencies even though perch-vt builds neither. libperch-vt.a holds only
+# perch-vt's Zig compilation unit (perch-vt, ghostty-vt, uucode's tables and
+# Zig's standard library) and compiler_rt.
+
+[[package]]
+name = "ghostty"
+hash = "ghostty-1.3.2-dev-5UdBC6WZfwXgQ6HmA5DH6dGNAUqtDMLrhhrHiBX-99J0"
+license = "MIT"
+use = "linked"
+
+[[package]]
+name = "uucode"
+hash = "uucode-0.2.0-ZZjBPoGFVgCiflJNFc6Io8xzC67B6PA5bUkk4LT0kCxg"
+license = "MIT AND Unicode-3.0"
+use = "linked"
+
+[[package]]
+name = "translate_c"
+hash = "translate_c-2.0.0-Q_BUWltOBwBYABF84EUL208pIFeUIwbBs29FmVBaafN5"
+license = "MIT"
+use = "build-time"
+
+[[package]]
+name = "aro"
+hash = "aro-0.0.0-JSD1QtuBNwCASyBtNF3pqTl_W3oAJQGEVyFAtrBSE_Pa"
+license = "MIT AND Unicode-3.0"
+use = "build-time"
+
+[[package]]
+name = "zlib (source, for Ghostty's pkg/zlib)"
+hash = "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o"
+license = "Zlib"
+use = "build-time"
+
+[[package]]
+name = "iterm2_themes (Ghostty's color themes)"
+hash = "N-V-__8AAI2WBQDrsjfyEiqnmYZ4VfGdJaZhN2mKsaTaIVWq"
+license = "MIT"
+use = "build-time"

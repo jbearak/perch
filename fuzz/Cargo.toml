@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# cargo-fuzz crate, outside the main workspace. Targets arrive with the
+# milestones that need them (tracker in M2b, restore in M2c, frame_decode in
+# M3b) as [[bin]] entries under fuzz_targets/.
+
+[package]
+name = "perch-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+perch = { path = "../crates/perch", features = ["test-hooks"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
