@@ -101,7 +101,18 @@ pub fn check(case: &Case) -> Result<(), String> {
 
     terminal.feed(feeder.held(), 0);
     terminal.feed(case.after, 0);
-    feed(&mut model, &mut feeder, case.after);
+    // A byte at a time, watching the alternate-screen modes: Ghostty
+    // executes controls inside a CSI, so the bytes alone cannot say when
+    // the program enters the alternate screen.
+    let alt_modes = |m: &Model| [47, 1047, 1049].map(|n| m.mode(n, false) == Some(true));
+    let mut reenters = false;
+    let mut before = alt_modes(&model);
+    for b in case.after {
+        feed(&mut model, &mut feeder, &[*b]);
+        let now = alt_modes(&model);
+        reenters |= now.iter().zip(before).any(|(n, b)| *n && !b);
+        before = now;
+    }
     // While the feeder holds an unfinished sequence the model is behind the
     // terminal by those bytes, as it should be.
     if !feeder.held().is_empty() {
@@ -110,9 +121,6 @@ pub fn check(case: &Case) -> Result<(), String> {
     // Re-entering the alternate screen after a restore made on the primary
     // finds the hidden state the restore did not carry (its saved cursor
     // can bring back character sets too).
-    let reenters = [&b"\x1b[?47h"[..], b"\x1b[?1047h", b"\x1b[?1049h"]
-        .iter()
-        .any(|m| case.after.windows(m.len()).any(|w| w == *m));
     // And the restore enters the alternate screen with 47 whatever mode
     // the program used, so a redundant `?1049h` from a program already
     // there saves, switches and clears in the client but does nothing in
