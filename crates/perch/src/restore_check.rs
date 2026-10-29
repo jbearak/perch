@@ -153,7 +153,14 @@ pub fn check(case: &Case) -> Result<(), String> {
                 .is_some_and(|c| c != "output")
         })
     });
-    if has_rep(case.after) || protection_used || prompt_marks {
+    // Protection may also start only in the output after the restore, over
+    // cells protected earlier (DECSTR turns the mode off, not the cells).
+    let protection_after = ["primary", "alternate"].iter().any(|s| {
+        after_state["screens"][s]["protected_mode"]
+            .as_str()
+            .is_some_and(|m| m != "off")
+    });
+    if has_rep(case.after) || protection_used || protection_after || prompt_marks {
         return Ok(());
     }
     // Reverse wraparound follows the screen rows' soft-wrap marks, which
