@@ -4,11 +4,14 @@
 //! double fork, owning the PTY master, the session directory and its lock,
 //! and the control socket. It runs one single-threaded `poll` loop.
 //!
-//! This milestone's supervisor has no model process and no attach: it keeps
-//! the program's output flowing (reading and discarding it), answers control
-//! requests, keeps its directory published, and ends the session.
+//! It reads the program's output into the boundary tracker and the model
+//! process (see [`crate::model`]), answers the program's terminal queries
+//! while no client is attached (DSR 5, DA1 and DA2 itself, DSR 6 from the
+//! model), answers control requests, keeps its directory published, and
+//! ends the session, leaving `tail.txt` when the program exits detached.
+//! Attaching comes later.
 
-mod log;
+pub(crate) mod log;
 mod program;
 
 use std::collections::BTreeMap;
@@ -24,10 +27,15 @@ use serde_json::{Value, json};
 use self::log::log;
 pub use self::log::{CAP as LOG_CAP, FILE as LOG_FILE};
 pub use self::program::StartError;
+use crate::input::Input;
 use crate::meta::{self, Exit, Meta};
+use crate::model::feed::{Feeder, Step};
+use crate::model::{self as model_mod, Model};
 use crate::proto::{self, Decoder, ErrorBody, Hello, Welcome, kind};
+use crate::queries::{self, ModelState, Queries, QueryId};
 use crate::runtime::{self, RuntimeDir};
 use crate::sys::{self, Lock, PollFd};
+use crate::transport::Transport;
 use crate::{clock, procinfo};
 
 /// How often the supervisor checks that its directory and socket are still
@@ -258,6 +266,50 @@ struct Supervisor {
     killing: Option<Killing>,
     conflict_logged: bool,
     cwd: PathBuf,
+    /// The output side: tracker and what the model is fed.
+    feeder: Feeder,
+    model: Model,
+    queries: Queries,
+    input: Input,
+    /// Writing to the master failed for good.
+    master_write_failed: bool,
+    /// The origin of the time `queries` and `input` count in.
+    epoch: Instant,
+    /// The session is ending with a tombstone, waiting for the tail.
+    ending: Option<Ending>,
+}
+
+/// A tombstone waiting for the model's snapshot of the screen.
+struct Ending {
+    /// The snapshot asked for, or `None` when the model is not complete.
+    snapshot: Option<u64>,
+    tail: Option<Vec<u8>>,
+}
+
+/// What `tail.txt` gets.
+enum Tail {
+    Screen(Vec<u8>),
+    Note(ModelState),
+}
+
+/// Writes to the PTY master without blocking.
+struct Master<'a> {
+    fd: i32,
+    failed: &'a mut bool,
+}
+
+impl Transport for Master<'_> {
+    fn write(&mut self, bytes: &[u8]) -> usize {
+        match sys::write(self.fd, bytes) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+            Err(e) => {
+                log(&format!("cannot write to the PTY: {e}"));
+                *self.failed = true;
+                0
+            }
+        }
+    }
 }
 
 /// Where the supervisor binds its socket: inside the directory being built.
@@ -406,6 +458,13 @@ impl Supervisor {
             killing: None,
             conflict_logged: false,
             cwd: cfg.cwd,
+            feeder: Feeder::new(),
+            model: Model::new(cfg.size.cols, cfg.size.rows, cfg.scrollback),
+            queries: Queries::new(),
+            input: Input::new(),
+            master_write_failed: false,
+            epoch: now,
+            ending: None,
         })
     }
 
@@ -437,17 +496,28 @@ impl Supervisor {
         }
         drop(slave);
         drop(plan);
+        self.model.start(false);
+        self.apply_model_state();
 
         loop {
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
-            let master_idx = match (&self.master, self.master_readable) {
-                (Some(m), true) => {
-                    fds.push(PollFd::new(m.as_raw_fd(), true, false));
+            let master_write = self.input.pending().is_some() && !self.master_write_failed;
+            let master_idx = match &self.master {
+                Some(m) if self.master_readable || master_write => {
+                    fds.push(PollFd::new(
+                        m.as_raw_fd(),
+                        self.master_readable,
+                        master_write,
+                    ));
                     Some(fds.len() - 1)
                 }
                 _ => None,
             };
+            let model_idx = self.model.poll_fd().map(|(fd, write)| {
+                fds.push(PollFd::new(fd, true, write));
+                fds.len() - 1
+            });
             let start_idx = self.start_pipe.as_ref().map(|p| {
                 fds.push(PollFd::new(p.as_raw_fd(), true, false));
                 fds.len() - 1
@@ -477,10 +547,25 @@ impl Supervisor {
                 return code;
             }
             if let Some(i) = master_idx
+                && self.master_readable
                 && (fds[i].readable || fds[i].hangup)
             {
                 self.read_master();
             }
+            if let Some(i) = model_idx
+                && (fds[i].readable || fds[i].hangup)
+            {
+                self.model.read();
+            }
+            self.model.tick();
+            let now = self.elapsed();
+            let events = self.queries.tick(now);
+            self.apply_queries(events);
+            self.input.tick(now);
+            self.handle_model_events();
+            self.model.flush();
+            self.handle_model_events();
+            self.flush_input();
             for (k, c) in self.conns.iter_mut().enumerate() {
                 let p = fds[conn_base + k];
                 if p.readable || p.hangup {
@@ -534,6 +619,15 @@ impl Supervisor {
 
     fn next_wake(&self) -> Option<Instant> {
         let mut t = self.next_identity.min(self.next_touch);
+        for d in [self.queries.next_deadline(), self.input.next_deadline()]
+            .into_iter()
+            .flatten()
+        {
+            t = t.min(self.epoch + d);
+        }
+        if let Some(d) = self.model.next_deadline() {
+            t = t.min(d);
+        }
         for c in &self.conns {
             if c.phase == Phase::AwaitHello {
                 t = t.min(c.hello_deadline);
@@ -569,6 +663,8 @@ impl Supervisor {
                     Exit::from_status(status).describe()
                 ));
                 self.program_status = Some(status);
+            } else {
+                self.model.reaped(pid, status);
             }
         }
     }
@@ -630,22 +726,26 @@ impl Supervisor {
                 error: Some(msg),
                 ..Exit::default()
             });
-            self.tombstone();
+            self.tombstone(Tail::Screen(Vec::new()));
         }
         1
     }
 
-    fn read_master(&mut self) {
+    /// Reads the program's output, up to `rounds` reads.
+    fn read_master_rounds(&mut self, rounds: usize) {
         let Some(m) = &self.master else { return };
         let fd = m.as_raw_fd();
-        let mut buf = [0u8; 64 * 1024];
-        for _ in 0..16 {
+        let mut buf = vec![0u8; 64 * 1024];
+        for _ in 0..rounds {
             match sys::read(fd, &mut buf) {
                 Ok(0) => {
                     self.master_readable = false;
                     return;
                 }
-                Ok(_) => self.last_output = Some(clock::unix_now()),
+                Ok(n) => {
+                    self.last_output = Some(clock::unix_now());
+                    self.output(&buf[..n]);
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
                 // EIO: every slave descriptor is closed.
                 Err(_) => {
@@ -654,6 +754,111 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    fn read_master(&mut self) {
+        self.read_master_rounds(16);
+    }
+
+    /// Output read from the PTY: through the tracker to the model, with
+    /// each query given its owner.
+    fn output(&mut self, chunk: &[u8]) {
+        if self.model.restart_if_due(self.feeder.at_ground_point()) {
+            self.apply_model_state();
+        }
+        for step in self.feeder.push(chunk) {
+            match step {
+                Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
+                Step::Query { id, kind } => {
+                    // The model may have failed on this read already.
+                    self.handle_model_events();
+                    let events = self.queries.query(id, kind, self.elapsed());
+                    self.apply_queries(events);
+                }
+                Step::Reset => {
+                    if self.model.reset_seen() {
+                        self.apply_model_state();
+                    }
+                }
+                Step::Discarded => {
+                    log("a sequence over 16 MiB was not given to the model");
+                }
+                Step::Partial => {
+                    log("a sequence over 16 MiB was fed to the model in pieces; it is partial");
+                    if self.model.mark_partial() {
+                        self.apply_model_state();
+                    }
+                }
+            }
+        }
+        if self.model.restart_if_due(self.feeder.at_ground_point()) {
+            self.apply_model_state();
+        }
+        self.handle_model_events();
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.epoch.elapsed()
+    }
+
+    /// Tells `queries` the model's state.
+    fn apply_model_state(&mut self) {
+        let events = self.queries.set_model(self.model.state());
+        self.apply_queries(events);
+    }
+
+    fn apply_queries(&mut self, events: Vec<queries::Event>) {
+        for e in events {
+            match e {
+                queries::Event::Answer { bytes, .. } => self.input.push_reply(bytes),
+                queries::Event::Unanswered { .. } | queries::Event::Expired { .. } => {}
+                queries::Event::ModelMissedDeadlines => {
+                    self.model
+                        .fail("it missed 3 DSR 6 deadlines within a minute");
+                }
+            }
+        }
+    }
+
+    /// Acts on what the model said or did, until nothing is left.
+    fn handle_model_events(&mut self) {
+        loop {
+            let events = self.model.take_events();
+            if events.is_empty() {
+                return;
+            }
+            for e in events {
+                match e {
+                    model_mod::Event::Failed => self.apply_model_state(),
+                    model_mod::Event::Reply { frame, bytes } => {
+                        let events =
+                            self.queries
+                                .model_reply(QueryId(frame), &bytes, self.elapsed());
+                        self.apply_queries(events);
+                    }
+                    model_mod::Event::Snapshot { id, tail } => {
+                        if let Some(e) = &mut self.ending
+                            && e.snapshot == Some(id)
+                        {
+                            e.tail = Some(tail);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes queued replies to the program without blocking.
+    fn flush_input(&mut self) {
+        let Some(m) = &self.master else { return };
+        if self.master_write_failed {
+            return;
+        }
+        let mut t = Master {
+            fd: m.as_raw_fd(),
+            failed: &mut self.master_write_failed,
+        };
+        self.input.flush(&mut t);
     }
 
     fn accept(&mut self) {
@@ -767,6 +972,8 @@ impl Supervisor {
             },
             "annotate" => self.annotate(&id, &req),
             "detach" => proto::ok_response(&id, json!({ "detached": false })),
+            #[cfg(feature = "test-hooks")]
+            "test-model" => self.test_model(&id, &req),
             other => proto::error_response(&id, "unsupported", &format!("unknown op `{other}`")),
         }
     }
@@ -820,6 +1027,28 @@ impl Supervisor {
         self.replace_meta(id, next)
     }
 
+    /// Test hooks: the model's process and generation, and faults to
+    /// stage in it.
+    #[cfg(feature = "test-hooks")]
+    fn test_model(&mut self, id: &Value, req: &serde_json::Map<String, Value>) -> Value {
+        if let Some(fault) = req.get("fault").and_then(Value::as_str) {
+            log(&format!("test hook: model fault `{fault}`"));
+            if let Err(e) = self.model.inject(fault) {
+                return proto::error_response(id, "bad_request", &e);
+            }
+            self.model.flush();
+        }
+        proto::ok_response(
+            id,
+            json!({
+                "pid": self.model.pid(),
+                "generation": self.model.generation(),
+                "state": model_state_name(self.model.state()),
+                "pwd": self.model.pwd().map(|p| String::from_utf8_lossy(p).into_owned()),
+            }),
+        )
+    }
+
     /// Writes changed metadata, unless it would outgrow what readers take.
     fn replace_meta(&mut self, id: &Value, next: Meta) -> Value {
         if !next.fits() {
@@ -832,6 +1061,17 @@ impl Supervisor {
 
     /// The live fields.
     fn info(&self) -> Value {
+        let scope = self.scope();
+        let memory: u64 = scope
+            .iter()
+            .filter_map(|&p| procinfo::resident_bytes(p))
+            .sum();
+        let foreground = self
+            .master
+            .as_ref()
+            .and_then(|m| sys::tcgetpgrp(m.as_raw_fd()).ok())
+            .filter(|&pgid| pgid > 0)
+            .map(|pgid| json!({ "pid": pgid, "name": procinfo::name(pgid) }));
         json!({
             "state": self.meta.state,
             "exit": self.meta.exit,
@@ -844,7 +1084,23 @@ impl Supervisor {
             "lastOutputAt": self.last_output.map(clock::rfc3339),
             "lastInputAt": null,
             "degraded": self.meta.degraded,
+            "model": model_state_name(self.model.state()),
+            "memoryBytes": (!scope.is_empty()).then_some(memory),
+            "cwd": self.live_cwd(),
+            "foreground": foreground,
         })
+    }
+
+    /// The program's directory if it can be read, else the last OSC 7,
+    /// else the starting directory.
+    fn live_cwd(&self) -> String {
+        if let Some(p) = self.program.and_then(procinfo::cwd) {
+            return p.to_string_lossy().into_owned();
+        }
+        if let Some(p) = self.model.pwd().and_then(model_mod::osc7_path) {
+            return p;
+        }
+        self.meta.cwd.clone()
     }
 
     // -----------------------------------------------------------------
@@ -897,15 +1153,19 @@ impl Supervisor {
     /// Advances a kill or a natural exit. Returns an exit code when the
     /// supervisor should exit.
     fn progress(&mut self) -> Option<i32> {
+        if self.ending.is_some() {
+            return self.finish_ending();
+        }
         if self.start_pipe.is_some() && self.killing.is_none() {
             return None;
         }
         let Some(k) = &self.killing else {
-            // Exit while detached: a tombstone.
+            // Exit while detached: a tombstone, after the output still in
+            // the PTY has reached the model.
             let status = self.program_status?;
+            self.read_master_rounds(64);
             self.meta.exit = Some(Exit::from_status(status));
-            self.tombstone();
-            return Some(0);
+            return self.begin_ending();
         };
         let now = Instant::now();
         if now < k.next_scan {
@@ -935,24 +1195,58 @@ impl Supervisor {
         self.meta.exit = self.program_status.map(Exit::from_status);
         match origin {
             // The requester knows the session ended: leave nothing behind.
-            KillOrigin::Request => self.remove_dir(),
+            KillOrigin::Request => {
+                self.remove_dir();
+                Some(0)
+            }
             // SIGTERM from someone else: keep a tombstone.
-            KillOrigin::Signal => self.tombstone(),
+            KillOrigin::Signal => self.begin_ending(),
         }
+    }
+
+    /// Asks a complete model for the screen's tail, and ends once it has
+    /// answered, failed, or missed its deadline.
+    fn begin_ending(&mut self) -> Option<i32> {
+        let snapshot = self.model.request_snapshot(model_mod::TAIL_HISTORY);
+        self.model.flush();
+        self.ending = Some(Ending {
+            snapshot,
+            tail: None,
+        });
+        self.handle_model_events();
+        self.finish_ending()
+    }
+
+    fn finish_ending(&mut self) -> Option<i32> {
+        let e = self.ending.as_mut()?;
+        let tail = match (e.snapshot, e.tail.take()) {
+            (_, Some(bytes)) => Tail::Screen(bytes),
+            (Some(_), None) if self.model.state() == ModelState::Ok => return None,
+            _ => Tail::Note(self.model.state()),
+        };
+        self.tombstone(tail);
         Some(0)
     }
 
-    /// Records `exited`, writes `tail.txt` (empty until the model exists),
-    /// removes the socket, and releases the lock by exiting.
-    fn tombstone(&mut self) {
+    /// Records `exited`, writes `tail.txt`, removes the socket, and
+    /// releases the lock by exiting.
+    fn tombstone(&mut self, tail: Tail) {
         self.meta.state = meta::EXITED.into();
         self.meta.ended_at = Some(clock::rfc3339(clock::unix_now()));
         let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new("tail.txt"), false);
-        let _ = sys::open_file_at(
+        if let Ok(mut f) = sys::open_file_at(
             self.dir.as_fd(),
             OsStr::new("tail.txt"),
             sys::OpenMode::CreateNew,
-        );
+        ) {
+            let bytes = match tail {
+                Tail::Screen(bytes) => bytes,
+                Tail::Note(state) => tail_note(state).into_bytes(),
+            };
+            if let Err(e) = f.write_all(&bytes) {
+                log(&format!("cannot write tail.txt: {e}"));
+            }
+        }
         self.write_meta();
         let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new("sock"), false);
         log(&format!(
@@ -1095,6 +1389,26 @@ impl Supervisor {
         let _ = sys::touch_at(self.rt.fd.as_fd(), OsStr::new(&self.meta.id));
         touch_tree(self.dir.as_fd(), 0);
     }
+}
+
+/// `info`'s name for the model's state.
+pub fn model_state_name(state: ModelState) -> &'static str {
+    match state {
+        ModelState::Ok => "ok",
+        ModelState::Partial => "partial",
+        ModelState::Failed => "failed",
+    }
+}
+
+/// What `tail.txt` says when the model could not give the screen.
+fn tail_note(state: ModelState) -> String {
+    let why = match state {
+        ModelState::Partial => {
+            "the terminal model was restarted after a failure and had not seen the whole screen"
+        }
+        _ => "the terminal model had failed",
+    };
+    format!("[perch] The last screen was not recorded: {why}. See supervisor.log.\n")
 }
 
 fn touch_tree(dir: std::os::fd::BorrowedFd<'_>, depth: u32) {

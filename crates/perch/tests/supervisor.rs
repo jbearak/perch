@@ -129,6 +129,8 @@ fn golden_list_json() {
             "lastOutputAt",
             "perchVersion",
             "command",
+            "memoryBytes",
+            "foreground",
         ],
     );
     golden("list.json", &format!("{v:#}\n"));
@@ -625,7 +627,7 @@ fn tombstone_on_exit_while_detached() {
         assert_eq!(
             std::fs::read_to_string(dir.join("tail.txt")).unwrap(),
             "",
-            "empty until the model"
+            "the model's tail of a blank screen"
         );
         assert!(!dir.join("sock").exists());
         assert!(dir.join("supervisor.log").exists());
