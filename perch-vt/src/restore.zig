@@ -152,7 +152,7 @@ const Builder = struct {
         if (kept == 0) return;
         const total = historyRows(screen);
 
-        var rows: RowWriter = .{ .sep = "\r\n" };
+        var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
         var it = historyPin(screen, total - kept).rowIterator(.right_down, historyPin(screen, total - 1));
         while (it.next()) |row| try rows.write(self.out(), row);
         try self.out().splatBytesAll("\r\n", self.t.rows);
@@ -167,7 +167,7 @@ const Builder = struct {
         try writeCleanSlate(w);
         try w.writeAll("\x1b[H\x1b[2J");
         if (lastUsedRow(screen)) |last| {
-            var rows: RowWriter = .{ .sep = "\r\n" };
+            var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
             var it = activePin(screen, 0).rowIterator(.right_down, activePin(screen, last));
             while (it.next()) |row| {
                 try rows.write(w, row);
@@ -278,7 +278,7 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
     defer alloc.free(content);
     const between = try alloc.alloc(usize, n);
     defer alloc.free(between);
-    var rows: RowWriter = .{ .sep = "\r\n" };
+    var rows: RowWriter = .{ .sep = "\r\n", .cluster = t.modes.get(.grapheme_cluster) };
     var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
     var i: usize = 0;
     while (it.next()) |row| : (i += 1) {
@@ -308,20 +308,39 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
 /// when the terminal will wrap there by itself.
 const RowWriter = struct {
     sep: []const u8,
+    /// Grapheme clustering (2027) is on.
+    cluster: bool = false,
     prev: ?Pin = null,
 
     fn write(self: *RowWriter, w: *Writer, row: Pin) Writer.Error!void {
         if (self.prev) |prev| {
             if (!joins(prev, row)) {
                 try w.writeAll(self.sep);
-            } else if (startsWithBackground(row)) {
-                try writeWrapPrimer(w, row);
+            } else if (endsBeforeWideCharacter(prev)) {
+                // Only the wide character itself wraps here.
+                if (startsWithBackground(row)) try writeWrapPrimer(w, row);
+            } else if (self.cluster or startsWithBackground(row)) {
+                // A space with the default pen makes the wrap: it joins no
+                // grapheme cluster (with 2027 a printed character can
+                // attach to the cell waiting at the edge instead of
+                // wrapping), and it scrolls in a row without a background.
+                // Then step back, so the row is written from its start,
+                // where nothing is left of it to join.
+                try w.writeAll("\x1b[0m \x08");
             }
         }
         try writeRowCells(w, row);
         self.prev = row;
     }
 };
+
+/// Whether the row ends where a wide character did not fit, leaving the
+/// cursor before the edge rather than waiting to wrap.
+fn endsBeforeWideCharacter(row: Pin) bool {
+    const page = row.node.page();
+    const cells = page.getCells(page.getRow(row.y));
+    return cells[cells.len - 1].wide == .spacer_head;
+}
 
 /// Whether the row's first cell has a background color. Printing it is
 /// what makes the terminal wrap onto the row, and a wrap at the bottom of
@@ -337,7 +356,8 @@ fn startsWithBackground(row: Pin) bool {
 }
 
 /// Wrap onto the row with the default pen, by printing its first
-/// character, and step back over it so the row is then written as usual.
+/// character (a wide one, which wraps by itself after a spacer head), and
+/// step back over it so the row is then written as usual.
 fn writeWrapPrimer(w: *Writer, row: Pin) Writer.Error!void {
     const page = row.node.page();
     const cell = page.getCells(page.getRow(row.y))[0];

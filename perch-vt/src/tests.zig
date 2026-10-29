@@ -872,6 +872,19 @@ test "ISO protection mode is restored, so EL keeps protected cells" {
     try testing.expect(primary(s.vt).cursor.protected);
 }
 
+test "2027: a row joined onto its continuation does not cluster with the cell at the edge" {
+    // A cluster cut by a malformed byte leaves a cell ending in ZWJ at the
+    // edge; the next row's emoji would attach to it instead of wrapping.
+    const a = try newModel(2, 1);
+    defer a.destroy();
+    a.feed("\x1b[?2027h\xf0\x9f\x91\xa8\xe2\x80\x8d\xe2\r\xf0\x9f\x91\xa8\x8d", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(historyRows(primary(a)), historyRows(primary(r.vt)));
+    try expectHistoryTail(primary(a), primary(r.vt));
+    try expectSameActive(primary(a), primary(r.vt));
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();
