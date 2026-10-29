@@ -244,8 +244,14 @@ impl Model {
 
     /// Kills the model and carries on without it.
     pub fn fail(&mut self, why: &str) {
+        self.drop_link(why, true);
+    }
+
+    fn drop_link(&mut self, why: &str, kill: bool) {
         let Some(link) = self.link.take() else { return };
-        let _ = sys::kill(link.pid, sys::sig::KILL);
+        if kill {
+            let _ = sys::kill(link.pid, sys::sig::KILL);
+        }
         log(&format!(
             "model process {} (generation {}) failed: {why}; passthrough continues",
             link.pid, self.generation
@@ -393,7 +399,8 @@ impl Model {
     pub fn reaped(&mut self, pid: i32, status: sys::WaitStatus) {
         let how = Exit::from_status(status).describe();
         if self.link.as_ref().is_some_and(|l| l.pid == pid) {
-            self.fail(&format!("it ended: {how}"));
+            // Reaped, so its PID may already be someone else's: no kill.
+            self.drop_link(&format!("it ended: {how}"), false);
         } else {
             // An old model, already failed and killed.
             log(&format!("model process {pid} ended: {how}"));
