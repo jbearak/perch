@@ -192,6 +192,9 @@ const Builder = struct {
     /// state, while this screen is the client's active one.
     fn writeScreen(self: *Builder, screen: *const Screen) (Error || Writer.Error)!void {
         const w = self.out();
+        // The previous screen's pen and character sets must not reach the
+        // clear or the cells: `?47h` keeps them.
+        try writeCleanSlate(w);
         try w.writeAll("\x1b[H\x1b[2J");
         if (lastUsedRow(screen)) |last| {
             var rows: RowWriter = .{ .sep = "\r\n" };

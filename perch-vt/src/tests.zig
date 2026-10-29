@@ -437,6 +437,16 @@ test "primary screen restored while the alternate is active (47 and 1047)" {
     }
 }
 
+test "alternate screen drawn in ASCII when the primary kept DEC graphics" {
+    const a = try newModel(20, 4);
+    defer a.destroy();
+    a.feed("\x1b(0", 0);
+    a.feed("\x1b[?47h\x1b(B\x1b[44mqqq\x1b[0m", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try expectSameScreen(alternate(a), alternate(r.vt));
+}
+
 test "state without content through the mode table" {
     const a = try newModel(20, 6);
     defer a.destroy();
