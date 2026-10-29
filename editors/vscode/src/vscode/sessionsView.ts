@@ -25,6 +25,9 @@ export class SessionStore implements vscode.Disposable {
   private loaded = false;
   private readonly changed = new vscode.EventEmitter<ListDiff>();
   readonly onDidChange = this.changed.event;
+  private readonly refreshed = new vscode.EventEmitter<void>();
+  /** Fires after every listing, changed or not: ages move on. */
+  readonly onDidRefresh = this.refreshed.event;
   /** Why the last listing failed, or undefined. */
   error: string | undefined;
 
@@ -45,10 +48,12 @@ export class SessionStore implements vscode.Disposable {
     this.current = sessions;
     this.error = error;
     if (first || errorChanged || !isEmptyDiff(diff)) this.changed.fire(diff);
+    this.refreshed.fire();
   }
 
   dispose(): void {
     this.changed.dispose();
+    this.refreshed.dispose();
   }
 }
 
@@ -96,7 +101,7 @@ export class SessionsProvider implements vscode.TreeDataProvider<SessionItem>, v
     private readonly store: SessionStore,
     private readonly context: () => DescribeContext,
   ) {
-    this.subscription = store.onDidChange(() => this.changed.fire(undefined));
+    this.subscription = store.onDidRefresh(() => this.changed.fire(undefined));
   }
 
   getTreeItem(item: SessionItem): SessionItem {

@@ -86,6 +86,18 @@ pub fn install(source: &Path, version: &str, dest: &Path) -> Result<Outcome, Str
     if needed {
         let bytes =
             fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+        // Unrecorded rather than wrong if interrupted between the two
+        // renames: an unknown version is replaced by the next installer,
+        // while a stale one could let an older version replace this one.
+        match fs::remove_file(dest.join(VERSION_FILE)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "cannot replace {}: {e}",
+                    dest.join(VERSION_FILE).display()
+                ));
+            }
+            _ => {}
+        }
         write_replace(dest, BINARY, &bytes, 0o755)?;
         write_replace(dest, VERSION_FILE, format!("{version}\n").as_bytes(), 0o644)?;
     }
@@ -229,6 +241,22 @@ fn compare_prerelease(a: &str, b: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replacement that fails part way leaves no version recorded, so an
+    /// older installer cannot take the recorded version as the binary's.
+    #[test]
+    fn an_interrupted_replacement_leaves_no_version_recorded() {
+        let dest = std::env::temp_dir().join(format!("perch-si-{}", random_name(8)));
+        // A non-empty directory where the binary goes makes its rename fail.
+        fs::create_dir_all(dest.join(BINARY).join("x")).unwrap();
+        fs::write(dest.join(VERSION_FILE), "0.1.0\n").unwrap();
+        let source = dest.join("source");
+        fs::write(&source, b"binary").unwrap();
+
+        assert!(install(&source, "0.3.0", &dest).is_err());
+        assert_eq!(installed_version(&dest), None);
+        fs::remove_dir_all(&dest).unwrap();
+    }
 
     #[test]
     fn versions_order_as_semver() {
