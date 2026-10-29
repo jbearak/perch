@@ -252,7 +252,7 @@ A client can read slowly (xterm.js parses far slower than `cat` writes) or stop 
 
 ### Restore on attach
 
-**Decision: the screen model is [libghostty-vt](https://github.com/ghostty-org/ghostty)** (MIT), Ghostty's terminal emulation library, through the Rust crate [`libghostty-vt`](https://crates.io/crates/libghostty-vt) (MIT or Apache-2.0), pinned at `=0.2.2`, which pins Ghostty at commit `a887df4`. Building it needs Zig 0.15.2, also pinned. The library is linked statically.
+**Decision: the screen model is [libghostty-vt](https://github.com/ghostty-org/ghostty)** (MIT), Ghostty's terminal emulation library, through the Rust bindings [`libghostty-vt`](https://github.com/uzaaft/libghostty-rs) (MIT or Apache-2.0). Perch pins the bindings by git commit (`9ede35b`), which pins Ghostty at `521cf2c` and needs Zig 0.17.0. The crates.io release 0.2.2 pins an older Ghostty that needs Zig 0.15.2, which cannot link on macOS 26 ([build check](research/libghostty-build.md)). The library is linked statically.
 
 Earlier revisions chose avt, after a [spike](research/emulator-spike.md) against vt100. libghostty-vt does more of the work Perch needs, and the maintainer chose it:
 
@@ -270,7 +270,7 @@ What it does not do: its C interface formats only the active screen, and it does
 
 Perch recognizes the screen switches with its boundary tracker (below). A test feeds random streams with screen switches to both instances and checks, after every switch back, that the session terminal and the mirror format the primary screen identically.
 
-**History** is the mirror's scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines. History is formatted from the model's cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
+**History** is the mirror's scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines. Ghostty limits scrollback by lines and by bytes, whichever is reached first, and prunes whole pages, so the line limit is approximate. Perch sets the line limit and a byte limit of 64 MiB. The build check measured about 10 MB for 10,000 lines at 120 columns. History is formatted from the model's cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
 
 **Boundary tracker.** libghostty-vt does not say whether it is in the middle of an escape sequence or a UTF-8 character, and a restore must be taken between sequences. So the supervisor runs a small tracker of its own over the same bytes. It is a port of Ghostty's parser states (Ghostty's `Parser.zig`, its parse table and the UTF-8 handling in `stream.zig`, MIT-licensed and credited in `NOTICE`), and it tracks only what Perch needs: whether the stream is at ground, where each sequence ends, the alternate-screen switches (`CSI ? Pm h` and `l` with 47, 1047 or 1049, including several parameters in one sequence) and RIS. It follows Ghostty exactly, including one point where Ghostty differs from xterm.js: a C1 control encoded as UTF-8 (U+009B) prints as a character in Ghostty and acts as CSI in xterm.js. A differential test checks the tracker against libghostty's behavior: after a random prefix, a sentinel character prints if and only if the tracker says ground.
 
@@ -579,8 +579,8 @@ From the brief, with where this design handles each:
 
 New risks this design adds:
 
-- **libghostty-vt is pre-1.0.** Its C interface changes between Ghostty commits. Perch pins the crate and therefore the Ghostty commit and the Zig version, and upgrades them deliberately, with the fidelity tests as the gate.
-- **The build needs Zig and fetches Ghostty.** The `libghostty-vt-sys` build script clones Ghostty at the pinned commit and runs `zig build`, which fetches Zig packages. CI pins Zig 0.15.2 and caches both. Every Zig package statically linked into Perch is checked for a GPL-3.0-compatible license, and the notices go in `NOTICE`.
+- **libghostty-vt is pre-1.0.** Its C interface changes between Ghostty commits. Perch pins the bindings commit and therefore the Ghostty commit and the Zig version, and upgrades them deliberately, with the fidelity tests as the gate. A git dependency also means `cargo deny` must allow that one repository as a source.
+- **The build needs Zig and fetches Ghostty.** The `libghostty-vt-sys` build script clones Ghostty at the pinned commit and runs `zig build`, which fetches Zig packages. CI pins Zig 0.17.0 and caches both. Every Zig package statically linked into Perch is checked for a GPL-3.0-compatible license, and the notices go in `NOTICE`.
 - **The primary mirror can drift** from the session terminal if Perch misreads a screen switch. The differential test guards it, and a drift costs restore fidelity, never the session.
 - **Memory.** The model process holds two emulator instances, one with history. Ghostty stores cells in compact pages and can compress scrollback. The plan measures memory at 1,000 and 10,000 lines and at 120 and 500 columns, and the docs state the numbers.
 - **Restore fidelity is bounded by the contract above.** Programs using images or other state the formatter does not write may not come back exactly.
@@ -638,7 +638,7 @@ This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically l
 
 ### Revision 8
 
-The maintainer chose libghostty-vt over avt as the screen model. Changes: the model runs in its own process, because a crash in the Zig library cannot be caught and must not take the session down; two emulator instances, so the primary screen and its history survive while a program holds the alternate screen; query replies come from the library at the moment of the query; the formatter replaces avt's dump and Perch's mode tracker; a boundary tracker ported from Ghostty's parser replaces Perch's DEC parser and UTF-8 decoder; the fidelity contract now covers graphemes, hyperlinks, underline styles and kitty keyboard flags; the build pins Zig 0.15.2 and the Ghostty commit.
+The maintainer chose libghostty-vt over avt as the screen model. Changes: the model runs in its own process, because a crash in the Zig library cannot be caught and must not take the session down; two emulator instances, so the primary screen and its history survive while a program holds the alternate screen; query replies come from the library at the moment of the query; the formatter replaces avt's dump and Perch's mode tracker; a boundary tracker ported from Ghostty's parser replaces Perch's DEC parser and UTF-8 decoder; the fidelity contract now covers graphemes, hyperlinks, underline styles and kitty keyboard flags; the build pins Zig and the Ghostty commit (corrected after a build check: bindings `9ede35b`, Ghostty `521cf2c`, Zig 0.17.0, because Zig 0.15.2 cannot link on macOS 26).
 
 ### Revision 7
 
