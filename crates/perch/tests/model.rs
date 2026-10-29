@@ -332,7 +332,10 @@ fn a_zig_abort_leaves_its_message_in_the_log() {
         |rt, t| {
             test_model(rt, &t.id, Some("abort"));
         },
-        &["perch-vt test abort", "SIGABRT"],
+        // Zig's panic handler ends in SIGABRT, or SIGSEGV where writing the
+        // stack trace fails (static musl on x86_64); the message is what
+        // matters.
+        &["perch-vt test abort", "ended: killed by signal"],
         Shows::Failed,
     );
 }
