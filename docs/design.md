@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 12. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: draft for review, revision 13. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -327,7 +327,7 @@ A **full restore**, after the prologue:
    2. A clean slate for printing: reset the pen (`ESC [0m`), character sets (`ESC (B`, `SI`), protection (`CSI 0 " q`) and hyperlink, so the next step prints what the cell holds.
    3. The live cursor's position and pending wrap. Pending wrap is rebuilt by printing the cell at the right edge in that cell's own style, which leaves the cursor pending at the margin. A blank edge cell is printed as a space in its style. Perch never uses `ESC 7` and `ESC 8` for this, as Ghostty's own formatter does for a blank edge, because that would overwrite the saved cursor.
    4. The live cursor's pen, hyperlink, protection and character sets.
-   5. The screen's kitty keyboard stack. Ghostty keeps 8 entries in a ring with an index, so Perch pushes the entries after the index around to it, oldest first, then sets the current entry. An entry of all zeros looks the same as an unused one, so it is skipped, which can lose an explicit zero entry at the bottom of the stack.
+   5. The screen's kitty keyboard stack. Ghostty keeps 8 entries in a ring with an index and does not record which zeros were pushed, so Perch rebuilds the whole ring in order, zeros included: it pushes the 7 entries after the index around to it, oldest first, then sets the current entry. It skips this step when every entry is zero, the state of a program that never used the protocol. Pops then return what they would have in the model, as long as the client's own stack holds at least 8 entries.
 6. If the program is on the alternate screen, switches the terminal there with `ESC [?47h`, whatever mode the program used. Mode 47 saves no cursor and clears nothing, so the primary screen's saved cursor written in step 5 survives. When the program later leaves with its own mode, the terminal does what that mode says: `?1049l` restores the primary cursor from that saved slot, which holds the model's value. Then Perch draws the alternate screen's active area and writes its cursor state and kitty keyboard stack the same way as in step 5, including its own saved cursor. Ghostty and xterm keep a saved cursor and a kitty stack per screen, so each screen's are written while that screen is active.
 7. Writes terminal state with no screen content: the modes in Perch's replay table where they differ from Ghostty's default, scroll region, tab stops, keyboard state (modifyOtherKeys), palette entries and the OSC 10, 11 and 12 colors only where the program changed them, the window title as OSC 2, the working directory as OSC 7, and the cursor style. The replay table is an allowlist. Modes with side effects or that belong to the attached terminal are not on it: 3 (column mode, which resizes and erases), 47, 1047, 1048 and 1049 (screen and cursor switches), 2026 (synchronized output, a handshake with the terminal that was attached), 2031, 2033, 2048 and 5522 (which make a capable terminal send reports), and 1007 (alternate scroll, a preference of the terminal's user rather than state of the program). The plan lists every mode Ghostty knows and which side of the table it falls on. Writing a scroll region or tab stops moves the cursor, so after them Perch writes the active screen's final cursor position and pending wrap again, last, with the same clean slate as in step 5 and the cursor's pen after it.
 8. Switches the client to live passthrough, starting with the bytes the supervisor is still holding back.
@@ -341,7 +341,7 @@ A `screen` restore does the same without steps 2 and 3. `perch-vt` builds the wh
 - Each visible cell of the active screen has the model's grapheme, foreground and background color (16, 256 or RGB), attributes (bold, faint, italic, underline with its style and color, blink, inverse, invisible, strikethrough, overline) and hyperlink. The cursor is where the model has it, with its style and pending wrap.
 - After the program leaves the alternate screen, the primary screen is the model's primary screen.
 - The modes in the replay table, scroll region, tab stops, keyboard state, the kitty keyboard flags and changed palette entries and colors match the model. The saved cursor's position and pen match. Its other fields (protection, origin mode, character sets, pending wrap) are written too, but xterm.js may not keep all of them in its saved-cursor slot, so the contract does not promise them.
-- Each screen's kitty keyboard stack comes back as described in step 5: at most 8 entries, without explicit all-zero entries below the current one.
+- Each screen's kitty keyboard stack comes back as described in step 5: the 8 entries Ghostty keeps, in order, zeros included. A client whose stack holds fewer entries keeps only the newest of them.
 - History has the right text, colors and hyperlinks in the right order, blank lines included, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit or 4 MiB of history, whichever is reached first. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
 
 The contract applies to `full` restores. A `screen` restore meets the first three points.
@@ -626,7 +626,10 @@ Some claims depend on behavior that only a test can settle. The plan's first mil
 - That `perch-vt` links statically into the Rust binary for every target, or else that the separate-executable fallback works.
 - An attach in the middle of a sequence over 16 MiB (OSC, APC, DCS, and a CSI with embedded C0 controls).
 - Restores for programs that mix 47, 1047 and 1049, checking both screens' saved cursors after the program leaves the alternate screen.
-- Whether Ghostty's stream continuation can replace the hold-back rule (see Restore on attach).
+- Whether Ghostty's stream continuation can replace the hold-back rule (see Restore on attach), including what happens when its bounded buffer cannot hold a continuation (`ContinuationUnavailable`), which needs a defined fallback before the 16 MiB rule can go.
+- Mixed 47, 1047 and 1049 transitions on the xterm.js version VS Code ships. xterm.js clears its alternate buffer whenever it returns to the normal one, even after mode 47, where Ghostty keeps it, so a program that switches back and forth can see different alternate contents.
+- Kitty keyboard stacks with zero entries, ring wraparound, and further pushes and pops after a restore, on both screens, including a client with a smaller stack.
+- That a client attaching midway through each kind of discarded oversized string receives none of its remainder.
 - That linking the Zig static library into Rust does not produce duplicate `compiler_rt` symbols.
 - That the seam between history and screen ends history with exactly one line break.
 - The epilogue in iTerm, Terminal.app and tmux (listed in the maintainer checklist where it cannot be automated).
@@ -674,6 +677,10 @@ This mirrors Raven's layout. `NOTICE` credits Ghostty and the other statically l
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 13
+
+From Terra's confirmation round on revision 12: the kitty keyboard stack is rebuilt as the whole 8-entry ring in order, zeros included, because skipping zeros changes what a later pop returns. Added checks for the continuation buffer running out, xterm.js clearing its alternate buffer, the kitty ring, and attaches in the middle of discarded strings.
 
 ### Revision 12
 
