@@ -288,7 +288,7 @@ Perch's Rust code declares those few functions itself. It does not use the third
 - The client receives the restore, then the bytes the supervisor is still holding back, then live output.
 - The model and the client have then seen exactly the same bytes since the snapshot point. If the held bytes are the start of a query, the query completes in the client's live output, which is consistent with the ownership rule below.
 
-**An alternative to evaluate first.** Ghostty at the pinned commit can track an unfinished sequence itself and write a replay-safe continuation of it (`Stream.writeContinuation`, `continuation_max_bytes`, and a handler-free `BoundaryScanner`). If the plan's first spike shows that `perch-vt` can return that continuation with each snapshot, Perch feeds the model everything, sends the continuation to the client after the restore, and drops the hold-back rule and the 16 MiB rule below. The supervisor would still track queries and bracketed paste itself. The spike decides by two criteria: the continuation must be exact for every case in the fidelity tests, and the API must be one Perch can keep up with across Ghostty upgrades. If either fails, the hold-back rule below stands.
+**An alternative to evaluate.** Ghostty at the pinned commit can track an unfinished sequence itself and write a replay-safe continuation of it (`Stream.writeContinuation`, `continuation_max_bytes`, and a handler-free `BoundaryScanner`). If an evaluation at the end of the plan's restore milestone shows that `perch-vt` can return that continuation with each snapshot, Perch feeds the model everything, sends the continuation to the client after the restore, and drops the hold-back rule and the 16 MiB rule below. The supervisor would still track queries and bracketed paste itself. The evaluation decides by two criteria: the continuation must be exact for every case in the fidelity tests, and the API must be one Perch can keep up with across Ghostty upgrades. If either fails, the hold-back rule below stands.
 
 **Very long sequences.** The supervisor holds back at most 16 MiB of one unfinished sequence. What happens to a longer one depends on its kind, which the tracker knows from its introducer:
 
@@ -453,6 +453,7 @@ perch annotate <session> K=V... [--unset K]
 perch detach [<session>]                      default: $PERCH_SESSION_ID
 perch doctor [--json]
 perch version [--json]
+perch self-install <dest>                     hidden; used by the extension to keep a stable copy
 ```
 
 `--json` output carries `"schema": 1` and follows the additive-fields rule.
@@ -546,7 +547,7 @@ interface CreateOptions {
   cwd?: string;
   env?: Record<string, string>;        // {dir} and {id} expand
   annotations?: Record<string, string>;
-  terminal?: { location?: vscode.TerminalLocation; iconPath?: vscode.IconPath; color?: vscode.ThemeColor };
+  terminal?: { location?: vscode.TerminalLocation; iconPath?: vscode.TerminalOptions['iconPath']; color?: vscode.ThemeColor };
 }
 ```
 
