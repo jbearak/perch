@@ -101,10 +101,15 @@ pub fn check(case: &Case) -> Result<(), String> {
 
     terminal.feed(feeder.held(), 0);
     terminal.feed(case.after, 0);
-    // A byte at a time, watching the alternate-screen modes: Ghostty
-    // executes controls inside a CSI, so the bytes alone cannot say when
-    // the program enters the alternate screen.
-    let alt_modes = |m: &Model| [47, 1047, 1049].map(|n| m.mode(n, false) == Some(true));
+    // A byte at a time, watching the alternate-screen modes and the active
+    // screen: Ghostty executes controls inside a CSI, and a mode can stay
+    // set after the screen was left, so neither the bytes nor the modes
+    // alone say when the program enters the alternate screen.
+    let alt_modes = |m: &Model| {
+        let modes = [47, 1047, 1049].map(|n| m.mode(n, false) == Some(true));
+        let alternate = m.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
+        [modes[0], modes[1], modes[2], alternate]
+    };
     let mut reenters = false;
     let mut before = alt_modes(&model);
     for b in case.after {
