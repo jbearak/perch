@@ -1,6 +1,6 @@
 # Perch implementation plan
 
-Status: draft for review, revision 5. This plan implements [design.md](design.md) at revision 16. Where they disagree, the design wins and the plan gets fixed.
+Status: draft for review, revision 6. This plan implements [design.md](design.md) at revision 16. Where they disagree, the design wins and the plan gets fixed.
 
 ## Principles
 
@@ -11,10 +11,10 @@ Status: draft for review, revision 5. This plan implements [design.md](design.md
 - **Small dependency set.** Rust runtime dependencies: `libc`, `serde`, `serde_json`. No async runtime, no argument-parsing crate, no `nix`, no third-party Ghostty bindings. All `libc` calls live in one `sys` module and all calls into `perch-vt` in one `vt_ffi` module.
 - **No runtime npm dependencies** in the extension. A CI check fails if `dependencies` in `editors/vscode/package.json` is not empty. Development and test packages are pinned by lockfile and listed with their licenses in `docs/licenses.md`, checked in CI against an allow-list.
 - **Licenses.** `deny.toml` allows MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib and NCSA (which `libfuzzer-sys` carries), sets `include-dev = true`, and ignores Perch's own crates through `publish = false` and `licenses.private.ignore = true`. CI runs `cargo deny check licenses bans sources` on the workspace and again with `--manifest-path fuzz/Cargo.toml`. Advisories run weekly, not on every PR. A script checks that every source file starts with `// SPDX-License-Identifier: GPL-3.0-only` (or the Zig and TypeScript equivalents). The one exception is `tracker.rs`, a port of MIT code from Ghostty, whose header is `GPL-3.0-only AND MIT` and keeps Ghostty's copyright line.
-- **Zig packages.** `perch-vt/zig-packages.toml` lists every Zig package the shipped build fetches: name, content hash, license, and whether it is linked or used only at build time. A CI step runs `zig build` with the shipped flags and empty global and local package directories, lists what lands in the local `zig-pkg/`, and fails on any package not in the file. `NOTICE` covers every linked one.
+- **Zig packages.** `perch-vt/zig-packages.toml` lists every Zig package the shipped build fetches: name, content hash, license, and whether it is linked or used only at build time. A CI step runs `zig build` the same way, with the shipped flags and empty global and local package directories, lists what lands in the local `zig-pkg/`, and fails on any package not in the file. `NOTICE` covers every linked one.
 - **Pinned toolchains.** Rust stable, with `rust-version = "1.95"` in the workspace, because `reedline` 0.52.1 (a test dependency) needs it. A CI job checks the workspace with Rust 1.95. Zig 0.17.0 from ziglang.org, checked against SHA-256 digests committed in `perch-vt/zig-toolchain.toml` for the three host tarballs CI and the maintainer use (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`). CI never uses macOS Intel runners: `x86_64-apple-darwin` is cross-compiled on the arm64 runner and not executed.
 - **Two kinds of test build.** Plain `cargo test` covers what needs no hooks. `cargo test --features test-hooks` enables `PERCH_TEST_TIME_SCALE`, fault injection (model crash, hang, memory pressure, missed replies) and `perch-vt`'s test observer (`build.rs` passes `-Dtest-observer=true` when the feature is on), and runs every integration test and the differential tests, which are compiled only with the feature. The fuzz crate depends on `perch` with `test-hooks`. Release builds have neither, and CI checks that with `nm` and `strings` on the release binary: no `perch_vt_take_observed` symbol and no `PERCH_TEST_TIME_SCALE` string.
-- **Test programs.** Integration tests that need `perch-testprogs` run after `cargo build -p perch-testprogs` (CI does this first), and find the programs through a helper that resolves `target/<profile>/<name>` from the test binary's own location, failing with a clear message if one is missing.
+- **Test programs.** Integration tests that need `perch-testprogs` run after `cargo build -p perch-testprogs` with the same `--target` and the same `test-hooks` setting as the test run that follows (CI does this before each test run, because `perch-testprogs` links `perch`), and find the programs through a helper that resolves `target/<profile>/<name>` from the test binary's own location, failing with a clear message if one is missing.
 - **Short socket paths in tests.** Every test sets its own `PERCH_RUNTIME_DIR` under `/tmp`.
 
 ## The build contract
@@ -25,7 +25,7 @@ Status: draft for review, revision 5. This plan implements [design.md](design.md
 - **Target mapping**: `x86_64-unknown-linux-gnu` and `x86_64-unknown-linux-musl` to Zig `x86_64-linux-musl`; `aarch64-unknown-linux-gnu` and `aarch64-unknown-linux-musl` to `aarch64-linux-musl`; `aarch64-apple-darwin` to `aarch64-macos.11.0`; `x86_64-apple-darwin` to `x86_64-macos.11.0`. `perch-vt` needs no libc of its own, so a musl Zig object links into a gnu Rust binary for tests and fuzzing. Anything else fails with a message.
 - **Flags**: `-Doptimize=ReleaseSafe -Dcpu=baseline -Dsimd=false -Dvt-features=-kitty-graphics`. `-Dcpu=baseline` keeps release binaries running on old cluster CPUs. The `ghostty-vt` module takes `vt-features` too, so kitty graphics, and its image storage, are compiled out; M1's selftest confirms it.
 - **The static library**: `perch-vt/build.zig` builds it as Ghostty builds its own static library: position-independent code (`pic = true`, because Rust links position-independent executables on Linux), `bundle_compiler_rt = true` and `bundle_ubsan_rt = true`. `build.rs` sets `MACOSX_DEPLOYMENT_TARGET=11.0` for the Rust side so both halves target the same macOS. The duplicate-symbol scan is `nm` on the final binary with no strong symbol defined twice.
-- **Caches and outputs**: `zig build` runs with `--cache-dir $OUT_DIR/zig-cache`, `--prefix $OUT_DIR/zig-out`, and `ZIG_LOCAL_PKG_DIR=$OUT_DIR/zig-pkg`, so nothing is written inside `perch-vt/`. Zig 0.17 unpacks packages into that local directory. The global cache (`$ZIG_GLOBAL_CACHE_DIR` if set, else Zig's default) holds the package tarballs. CI sets it and caches it, keyed by the hash of `build.zig.zon`.
+- **Caches and outputs**: `build.rs` runs `zig build` with `$OUT_DIR` as its working directory, `--build-file <absolute path>/perch-vt/build.zig`, `--cache-dir $OUT_DIR/zig-cache`, `--prefix $OUT_DIR/zig-out`, and `ZIG_LOCAL_PKG_DIR=zig-pkg`. The package directory must be relative: Ghostty's `build.zig.zon` has path dependencies (`./pkg/zlib` and others), and Zig rejects them when the local package directory is absolute. Relative to the working directory, Zig 0.17 unpacks packages into `$OUT_DIR/zig-pkg`, and nothing is written inside `perch-vt/` (a review confirmed this form on the pinned Ghostty). The global cache (`$ZIG_GLOBAL_CACHE_DIR` if set, else Zig's default) holds the package tarballs. CI sets it and caches it, keyed by the hash of `build.zig.zon`.
 - **Rebuilds**: `cargo:rerun-if-changed` for everything under `perch-vt/` (which the build never writes to) and `cargo:rerun-if-env-changed` for `PERCH_ZIG`, `ZIG_GLOBAL_CACHE_DIR` and the `test-hooks` feature.
 - **Network**: Zig fetches Ghostty and its packages on the first build. CI's package cache keeps builds working when the package hosts are slow or down.
 
@@ -34,7 +34,7 @@ Local checks of the musl and darwin-x64 builds are not possible with this laptop
 ## Repository layout
 
 ```text
-Cargo.toml                       workspace; rust-version = "1.86"; release profile keeps panic = "unwind"
+Cargo.toml                       workspace; rust-version = "1.95"; release profile keeps panic = "unwind"
 deny.toml, NOTICE
 crates/perch/                    library (src/lib.rs) and binary (src/main.rs)
   build.rs                       the build contract above
@@ -49,7 +49,7 @@ crates/perch/                    library (src/lib.rs) and binary (src/main.rs)
 crates/perch-testprogs/          dsr-timer, stdin-recorder, reedline-prompt, model-dump, exit-with, fd-lister
 perch-vt/                        Zig library: build.zig, build.zig.zon, zig-packages.toml, zig-toolchain.toml, src/, tests
 fuzz/                            cargo-fuzz crate, outside the workspace
-tests/fidelity/                  Node harness (@xterm/headless 5.5.0 and 6.0.0, @xterm/addon-unicode11)
+tests/fidelity/                  Node harness (xterm-headless 5.3.0-beta.61, @xterm/headless 5.5.0 and 6.0.0, each with its Unicode 11 addon)
 tests/linux/                     Dockerfiles and scripts for host checks
 scripts/                         spdx-check, zig-package-check
 editors/vscode/                  extension: src/core/ (plain logic), src/vscode/ (adapter)
@@ -98,7 +98,7 @@ Branch `docs/design`: `docs/design.md`, `docs/plan.md`, `docs/research/`, `docs/
 
 - `restore.rs`: prologue and epilogue from the mode table, the `full` and `screen` restores around `perch_vt_restore` with 2027 written before content, the hold-back rule, the very-long-sequence rule, and the partial-model restore (notice and resize nudge).
 - `perch-testprogs model-dump`: runs an action script (JSON: `feed` chunks, `resize`, `restore {mode, size, scrollback}`, `exit_alt {mode}`) through the tracker and `perch-vt`, and writes each restore's bytes and `perch-vt`'s view of the expected state.
-- **Fixtures are recordings.** Each fixture is a recorded byte stream plus an action script under `tests/fidelity/fixtures/`, made once by `tests/fidelity/record.sh` (which runs R, zsh, fish, `vim`, `less` and a reedline program under `script` on a maintainer machine) and committed. CI only replays them, so it needs none of those programs. The recordings are also the fuzz seed corpus.
+- **Fixtures are committed files.** Each fixture is a byte stream plus an action script under `tests/fidelity/fixtures/`. Program fixtures are recordings made once by `tests/fidelity/record.sh`, which runs R, zsh, fish, `vim`, `less` and a reedline program under `script` on a maintainer machine. Synthetic fixtures (kitty stacks, 2027, resizes, DECSTR, RIS, oversized sequences, split UTF-8) are generated by committed scripts in `tests/fidelity/gen/`. CI only replays the files, so it needs none of those programs. They are also the fuzz seed corpus.
 - `tests/fidelity`, Node 22, run with three versions of the headless xterm.js, installed side by side under npm aliases and pinned in the harness lockfile with the Unicode 11 addon release that matches each: `xterm-headless` 5.3.0-beta.61 (what VS Code 1.82, Perch's minimum, ships), `@xterm/headless` 5.5.0, and `@xterm/headless` 6.0.0. Oracles:
   - **xterm.js at the same size**: terminal A gets the original stream, B gets the restore. For an ordinary full restore, the whole buffers, scrollback included, must match cell for cell (characters, colors, attributes, hyperlinks), with the cursor and the modes `IModes` exposes. Then both get the program's own exit from the alternate screen, then more output, and must still match. Where the design limits history (the client's scrollback rows, the 4 MiB cap), B's scrollback must equal the newest part of A's that fits those limits. Where the restore byte cap applies, the check is that B received the prologue, the notice and the resize nudge, and nothing else.
   - **A second `perch-vt` terminal** for what xterm.js does not implement or expose: the kitty stacks, both saved cursors, modes outside `IModes`, palette. Self-referential, and the PR says so.
@@ -232,6 +232,10 @@ Targets: `tracker` (M2b), `restore` (M2c), `frame_decode` (M3b). On every PR, CI
 - **logind in CI containers.** If GitHub's runners cannot run it, that check becomes local-only, stated in its PR.
 
 ## Review history
+
+### Revision 6
+
+From Sonnet's review of revision 5 (Sol found it ready): `zig build` runs from `$OUT_DIR` with `--build-file` and a relative `ZIG_LOCAL_PKG_DIR`, because an absolute one breaks Ghostty's path dependencies, as Sonnet's test showed; the layout's MSRV says 1.95; test programs are built with the test run's target and features; synthetic fixtures come from committed generator scripts.
 
 ### Revision 5
 
