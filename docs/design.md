@@ -1,6 +1,6 @@
 # Perch design
 
-Status: agreed by Sonnet and Terra, revision 6. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: agreed by Sonnet and Terra, revision 7. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -154,9 +154,9 @@ Republishing cannot bring back files that other programs owned in the old direct
   "host": "login2",
   "createdAt": "2026-10-29T15:04:05Z",
   "supervisorPid": 41200,
-  "supervisorStart": 1761750245123,
+  "supervisorStart": "linux:81234567",
   "pid": 41201,
-  "pidStart": 1761750245130,
+  "pidStart": "linux:81234570",
   "perchVersion": "0.1.0",
   "protocol": { "min": 1, "max": 1 },
   "state": "starting",
@@ -165,7 +165,7 @@ Republishing cannot bring back files that other programs owned in the old direct
 }
 ```
 
-`state` is `starting` (published, program not started yet), `running`, `exited` or `lost`. `supervisorStart` and `pidStart` are the processes' start times as the kernel reports them (`/proc/<pid>/stat` on Linux, `proc_pidinfo` on macOS), used to tell a process from a later one that reuses its PID. `kind` is free text. The extension knows `r`, `stata` and `shell` and shows anything else as a generic program. `owner` is the extension ID that created the session, or absent. `annotations` is a string map that owners use to find their own wiring. Perch does not interpret it. Annotations are visible to every extension through the API, so owners keep secrets in their own 0600 files in the session directory, not in annotations.
+`state` is `starting` (published, program not started yet), `running`, `exited` or `lost`. `supervisorStart` and `pidStart` are opaque strings that identify when each process started, compared only for equality, to tell a process from a later one that reuses its PID. On Linux they hold the raw start time in clock ticks since boot (field 22 of `/proc/<pid>/stat`, parsed after the last `)`), on macOS the `pbi_start_tvsec` and `pbi_start_tvusec` pair from `proc_pidinfo`. Both are exact, so a value read again always matches. `kind` is free text. The extension knows `r`, `stata` and `shell` and shows anything else as a generic program. `owner` is the extension ID that created the session, or absent. `annotations` is a string map that owners use to find their own wiring. Perch does not interpret it. Annotations are visible to every extension through the API, so owners keep secrets in their own 0600 files in the session directory, not in annotations.
 
 Fields that change often (attached or not, last output time, memory) are not stored. `list` asks the supervisor.
 
@@ -266,7 +266,7 @@ The emulator sits behind a small internal interface (`feed`, `resize`, `cursor`,
 
 **Model input.** avt takes characters, and the PTY produces bytes. An incremental UTF-8 decoder sits in front of avt. It holds up to 3 bytes of an incomplete character between reads and turns invalid bytes into U+FFFD, one per maximal invalid sequence. Its pending bytes are part of a restore's tail (below). The model assumes UTF-8. A program writing another encoding still reaches the terminal unchanged while attached, but its restored screen shows replacement characters.
 
-The mode and query parser (below) reads the same bytes in the same order. Each read is processed in one pass: the parser finds the byte offsets of queries, the model is fed up to each query before Perch answers it, so DSR 6 reports the cursor where the program asked. RIS (`ESC c`) and DECSTR (`ESC [!p`) reset the parser's modes as they reset the model.
+The mode and query parser (below) reads the same decoded characters in the same order, and keeps the byte offset of each. Each read is processed in one pass: the parser finds the offsets of queries, the model is fed up to each query before Perch answers it, so DSR 6 reports the cursor where the program asked. RIS (`ESC c`) and DECSTR (`ESC [!p`) reset the parser's modes as they reset the model.
 
 **Snapshot boundary.** A restore is always taken where both parsers are at rest: the mode parser in its ground state and the UTF-8 decoder holding no partial character. If a restore is due while the program is in the middle of a sequence, the supervisor feeds the model only up to the end of that sequence, takes the snapshot there, and sends the rest of that read as live output after the restore. avt's `dump()` then has no unfinished-sequence tail, and nothing is sent twice.
 
@@ -301,7 +301,7 @@ A **full restore**, after the prologue:
 
 A `screen` restore does the same without steps 2 and 3.
 
-**Input modes.** avt tracks cursor keys, origin, autowrap, cursor visibility, insert mode, character sets and the alternate screen. Its parser drops other private modes, so a small parser of Perch's own (the `vte` crate, Apache-2.0 or MIT) tracks the rest: bracketed paste (2004), mouse reporting (9, 1000, 1002, 1003) and encodings (1005, 1006, 1015, 1016), focus reporting (1004), alternate scroll (1007), synchronized output (2026), modifyOtherKeys (`CSI > 4 ; n m`), application keypad (`ESC =` and `ESC >`), the kitty keyboard flags stack for each screen (`CSI > u` push, `CSI < u` pop, `CSI = u` set, up to 16 entries each), the window title (OSC 0 and 2), the working directory (OSC 7), and whether the program is inside a control string. On RIS it resets everything. On DECSTR it resets what xterm.js resets: the modes above except title and working directory. The same parser finds terminal queries.
+**Input modes.** avt tracks cursor keys, origin, autowrap, cursor visibility, insert mode, character sets and the alternate screen. Its parser drops other private modes, so a small parser of Perch's own tracks the rest. It implements the same DEC state machine as avt's parser and reads the same decoded characters from the UTF-8 decoder, so the two agree on where every sequence starts and ends, including C1 controls that arrive UTF-8 encoded (U+009B is CSI to avt, to xterm.js and to Perch). The `vte` crate was considered and rejected because it treats such C1 characters differently. The parser tracks: bracketed paste (2004), mouse reporting (9, 1000, 1002, 1003) and encodings (1005, 1006, 1015, 1016), focus reporting (1004), alternate scroll (1007), synchronized output (2026), modifyOtherKeys (`CSI > 4 ; n m`), application keypad (`ESC =` and `ESC >`), the kitty keyboard flags stack for each screen (`CSI > u` push, `CSI < u` pop, `CSI = u` set, up to 16 entries each), the window title (OSC 0 and 2), the working directory (OSC 7), and whether the program is inside a control string. On RIS it resets everything. On DECSTR it resets what xterm.js resets: the modes above except title and working directory. The same parser finds terminal queries.
 
 **Fidelity contract.** After a full restore into xterm.js, at the client's size:
 
@@ -324,7 +324,7 @@ Programs ask the terminal questions by writing escape sequences and reading the 
 
 - Ownership passes to a client when the supervisor enqueues that client's restore. Snapshots are taken at a ground state, or else the unfinished sequence belongs to the supervisor (see [Restore on attach](#restore-on-attach)), so no query straddles the change. Every query the program wrote before that point is answered by the supervisor and is not in the restore, which is built from the model. Every query after that point reaches the client in its live output, and the real terminal answers.
 - With no client, or a lagging client, the supervisor answers each query as it parses it.
-- The supervisor keeps a list of queries forwarded to the live client and not yet answered. Each entry records the query's kind, its position in the client's output (the offset of its last byte), and, for DSR 6, the cursor position at the moment of the query. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same `vte` parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
+- The supervisor keeps a list of queries forwarded to the live client and not yet answered. Each entry records the query's kind, its position in the client's output (the offset of its last byte), and, for DSR 6, the cursor position at the moment of the query. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
 - When the supervisor drops output after a stall, outstanding queries whose position falls in dropped frames never reached the client. The supervisor answers them at once, using the recorded cursor position.
 - Before it detaches a client or lets another take over, the supervisor reads whatever that client has already sent, without blocking, and processes it as normal input. It then answers every query still outstanding, using the recorded positions, and from then on discards input from that client. A reply the old terminal sends later never reaches the program.
 - A query the live client leaves unanswered for 2 seconds is dropped from the list without an answer, as with a real terminal that does not support it.
@@ -581,7 +581,7 @@ New risks this design adds:
 Some claims depend on behavior that only a test can settle. The plan's first milestone covers the riskiest ones.
 
 - The fidelity contract and every transition in [Terminal queries](#terminal-queries) and [Flow control](#flow-control), in a headless xterm.js and in tmux: split UTF-8, invalid bytes, partial and unterminated control strings, RIS and DECSTR, kitty push and pop on both screens, queries split across reads, keystrokes interleaved with delayed replies, takeover during a restore, stalls during live output and during a restore, and attaches at different widths.
-- That vte and avt agree on sequence boundaries (CAN, SUB, ESC inside strings, C1 bytes inside UTF-8), with a differential test.
+- That Perch's parser and avt's agree on sequence boundaries (CAN, SUB, ESC inside strings, C1 characters inside UTF-8), with a differential test.
 - How xterm.js, Terminal.app, iTerm and tmux handle DECSTR, `ESC [3J` and `ESC [?1049l` when already on the primary screen.
 - Raven's console (reedline) at a prompt while detached, and behind a large queued send.
 - Linked variables through a symlink, for each default variable, locally and over Remote-SSH.
@@ -623,6 +623,10 @@ This mirrors Raven's layout.
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 7
+
+From the first plan review (Sonnet and Sol): Perch's mode parser is its own DEC state machine over the same decoded characters as avt, instead of `vte`, which treats UTF-8 encoded C1 controls differently from avt and xterm.js. Process start times are opaque, exact per-OS values compared for equality.
 
 ### Revision 6
 
