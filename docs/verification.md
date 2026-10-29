@@ -14,4 +14,5 @@ These checks cannot be automated in Perch's CI or were not possible where Perch 
 | Ad-hoc signature after registry download | On macOS, install the published extension from each registry and create a session. | The binary runs without a Gatekeeper prompt. | not run |
 | darwin-x64 binary | On an Intel Mac, install the darwin-x64 VSIX and create, attach to and kill a session. | Works; CI only cross-compiles this target. | not run |
 | Epilogue in other terminals | `perch attach` in Terminal.app, iTerm and tmux to a session running `vim` with mouse reporting on; detach with `Ctrl-\`. | The shell afterwards has no mouse reporting, no bracketed paste, a visible cursor and the main screen. | not run |
+| Kitty keyboard stack after restore | In kitty or Ghostty, `perch attach --restore screen` to a session where a program pushed several kitty keyboard flags (including a zero entry), then pop them one by one. | Each pop leaves the same flags as without Perch. | not run |
 | Stata | With Stata installed, run a long `do` file through Sight with Perch, close the window, reopen. | The session survives. Note whether the license seat stays held. | not run |
