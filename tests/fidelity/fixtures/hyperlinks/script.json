@@ -1,0 +1,28 @@
+{
+  "description": "OSC 8 links with and without ids, one wrapping across rows, one still open",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    30,
+    6
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 195
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          30,
+          6
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 9
+    }
+  ]
+}

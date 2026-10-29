@@ -1,0 +1,54 @@
+{
+  "description": "restores in the middle of a CSI, an OSC and a DCS",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 9
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 16
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 19
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 7
+    }
+  ]
+}

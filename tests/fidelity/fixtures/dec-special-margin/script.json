@@ -1,0 +1,28 @@
+{
+  "description": "DEC special graphics up to the right margin, leaving the cursor waiting to wrap",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    20,
+    4
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 61
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          20,
+          4
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 10
+    }
+  ]
+}

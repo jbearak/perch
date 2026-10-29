@@ -1,0 +1,53 @@
+{
+  "description": "long wrapped lines at 200 columns, restored at 80 and at 200 again",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    200,
+    20
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 4590
+    },
+    {
+      "resize": [
+        80,
+        20
+      ]
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          20
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 7
+    },
+    {
+      "resize": [
+        200,
+        20
+      ]
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          200,
+          20
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 8
+    }
+  ]
+}

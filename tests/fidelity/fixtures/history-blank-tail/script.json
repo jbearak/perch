@@ -1,0 +1,28 @@
+{
+  "description": "history ending in blank lines, kept with no row dropped or added at the screen boundary",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    40,
+    5
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 58
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          40,
+          5
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 7
+    }
+  ]
+}

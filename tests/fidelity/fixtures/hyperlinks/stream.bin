@@ -1,0 +1,3 @@
+]8;;https://example.com/a\plain link]8;;\
+]8;id=x;https://example.com/b\a link with an id that wraps across rows]8;;\
+[1;4:3;58;5;2mstyled[0m ]8;;https://example.com/open\still open and more

@@ -1,0 +1,49 @@
+{
+  "description": "grapheme clustering on with width-sensitive text, so a late 2027 would misplace the cursor",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 100
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor after the cluster",
+            "cursor": [
+              4,
+              1
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "feed": 26
+    }
+  ],
+  "known": [
+    {
+      "match": "cursor: ",
+      "where": "(xterm",
+      "reason": "xterm.js has no mode 2027, so A lays the clusters out differently; the perch-vt oracle and the named assertion check the cursor"
+    },
+    {
+      "match": "normal line 1",
+      "where": "after (",
+      "reason": "xterm.js has no mode 2027, so A lays the clusters out differently"
+    }
+  ]
+}

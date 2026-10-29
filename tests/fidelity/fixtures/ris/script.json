@@ -1,0 +1,28 @@
+{
+  "description": "RIS after the alternate screen, kitty flags, palette and title",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 74
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 6
+    }
+  ]
+}

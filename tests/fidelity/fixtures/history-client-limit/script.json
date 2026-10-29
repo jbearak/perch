@@ -1,0 +1,31 @@
+{
+  "description": "more history than the client keeps: B gets the newest rows that fit",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 5000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 31890
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 500,
+        "assert": [
+          {
+            "name": "client scrollback full",
+            "scrollback": 500
+          }
+        ]
+      }
+    }
+  ]
+}

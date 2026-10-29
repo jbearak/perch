@@ -1,0 +1,28 @@
+{
+  "description": "a progress bar redrawn in place with carriage returns and erase-line",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 1062
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 10
+    }
+  ]
+}

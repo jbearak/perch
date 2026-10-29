@@ -1,0 +1,28 @@
+{
+  "description": "a reedline-style prompt: bracketed paste, cursor queries, full-line redraws with a right prompt and a hint",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 181
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 49
+    }
+  ]
+}

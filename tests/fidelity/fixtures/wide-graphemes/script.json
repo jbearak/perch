@@ -1,0 +1,28 @@
+{
+  "description": "CJK, emoji, combining marks, and a wide character that does not fit at the right edge",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    20,
+    6
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 96
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          20,
+          6
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 3
+    }
+  ]
+}

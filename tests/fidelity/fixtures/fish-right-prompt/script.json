@@ -1,0 +1,38 @@
+{
+  "description": "a fish-style right prompt drawn with cursor movement after the left prompt (fish is not installed here, so this is synthetic)",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 152
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 4
+    }
+  ]
+}

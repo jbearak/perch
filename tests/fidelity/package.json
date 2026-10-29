@@ -1,0 +1,23 @@
+{
+  "name": "perch-fidelity",
+  "private": true,
+  "description": "Restore fidelity harness: replays committed fixtures into headless xterm.js",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node run.mjs",
+    "check-deps": "node check-deps.mjs",
+    "licenses": "node check-deps.mjs --write"
+  },
+  "devDependencies": {
+    "xterm-headless-5.3": "npm:xterm-headless@5.3.0-beta.61",
+    "xterm-unicode11-5.3": "npm:xterm-addon-unicode11@0.6.0",
+    "xterm-headless-5.5": "npm:@xterm/headless@5.5.0",
+    "xterm-unicode11-5.5": "npm:@xterm/addon-unicode11@0.8.0",
+    "xterm-headless-6.0": "npm:@xterm/headless@6.0.0",
+    "xterm-unicode11-6.0": "npm:@xterm/addon-unicode11@0.9.0"
+  }
+}

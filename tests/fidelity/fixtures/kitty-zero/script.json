@@ -1,0 +1,47 @@
+{
+  "description": "only zeros pushed: the restore writes no stack, and later pops stay at zero",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 21
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "kitty4": true,
+        "assert": [
+          {
+            "name": "all zero",
+            "kitty": {
+              "screen": "primary",
+              "flags": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "feed": 10
+    }
+  ]
+}
