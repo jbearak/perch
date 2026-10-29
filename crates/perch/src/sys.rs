@@ -62,6 +62,21 @@ pub mod errno {
 // ---------------------------------------------------------------------------
 // Identity
 
+/// This process's peak resident memory in bytes. `ru_maxrss` is in
+/// kilobytes on Linux and in bytes on macOS.
+pub fn max_rss_bytes() -> u64 {
+    let mut ru = MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `ru` is valid to write and zeroed if the call fails.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) };
+    // SAFETY: zero-initialized, and filled in by getrusage on success.
+    let max = unsafe { ru.assume_init() }.ru_maxrss as u64;
+    if cfg!(target_os = "macos") {
+        max
+    } else {
+        max * 1024
+    }
+}
+
 /// The real user ID.
 pub fn getuid() -> u32 {
     // SAFETY: getuid cannot fail.
