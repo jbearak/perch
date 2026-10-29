@@ -64,6 +64,12 @@ pub fn check(case: &Case) -> Result<(), String> {
     if model.mode(2027, false) == Some(true) && text_before_2027(case)? {
         return Ok(());
     }
+    // Known gap: after malformed UTF-8, Ghostty can keep a control (DEL, a
+    // C1) inside a cell's cluster. Written back, a terminal reads it as a
+    // control rather than text, so it cannot round-trip.
+    if cells_hold_controls(&model)? {
+        return Ok(());
+    }
     if unwritable_cursor(&model)? {
         return Ok(());
     }
@@ -171,6 +177,18 @@ pub fn check(case: &Case) -> Result<(), String> {
         kept,
         false,
     )
+}
+
+fn cells_hold_controls(model: &Model) -> Result<bool, String> {
+    let v = dump_state(model)?;
+    Ok(["primary", "alternate"].iter().any(|s| {
+        v["screens"][s]["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|r| {
+                r[0].as_str()
+                    .is_some_and(|t| t.chars().any(|c| c.is_control()))
+            })
+        })
+    }))
 }
 
 fn dump_state(model: &Model) -> Result<serde_json::Value, String> {
