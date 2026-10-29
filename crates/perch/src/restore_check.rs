@@ -172,23 +172,30 @@ fn history_rows(model: &Model) -> Result<u64, String> {
         .unwrap_or(0))
 }
 
-/// Whether the model held any text when 2027 was first turned on, found by
+/// Whether the model held any text at a moment 2027 was turned on (at
+/// the start, or again after RIS or a reset turned it off), found by
 /// feeding the stream to a probe a byte at a time (Ghostty ignores some
 /// bytes inside a CSI, so the bytes alone cannot say).
 fn text_before_2027(case: &Case) -> Result<bool, String> {
     let err = |e| format!("perch-vt: {e:?}");
     let mut probe =
         Model::new(case.model.0, case.model.1, SCROLLBACK, SCROLLBACK_BYTES).map_err(err)?;
+    let mut on = false;
     for b in case.stream {
         probe.feed(&[*b], 0);
-        if probe.mode(2027, false) == Some(true) {
+        let now = probe.mode(2027, false) == Some(true);
+        if now && !on {
             let v = dump_state(&probe)?;
-            let rows = v["screens"]["primary"]["rows"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            return Ok(rows.iter().any(|r| r[0] != "" || r[2] != ""));
+            let text = ["primary", "alternate"].iter().any(|s| {
+                v["screens"][s]["rows"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r[0] != "" || r[2] != ""))
+            });
+            if text {
+                return Ok(true);
+            }
         }
+        on = now;
     }
     Ok(false)
 }
