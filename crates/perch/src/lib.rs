@@ -14,6 +14,7 @@ pub mod model;
 pub mod procinfo;
 pub mod proto;
 pub mod queries;
+pub mod restore;
 pub mod runtime;
 pub mod selfinstall;
 pub mod supervisor;
