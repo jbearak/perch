@@ -27,3 +27,11 @@ Design revision 9 uses a Zig library of Perch's own (`perch-vt`) over Ghostty's 
 - A Zig program importing `ghostty-vt` builds and runs on macOS 26.
 - After `line one`, `line two`, `$ vim` and then `ESC[?1049h ESC[2J ESC[H ~ vim screen ~`, the active screen is the alternate one, and `ScreenFormatter` on `screens.get(.primary)` with cursor and style extras writes `line one\r\nline two\r\n$ vim ESC[4;1H ESC[0m`. The C interface cannot format the inactive screen; this can.
 - `ScreenFormatter.Content` has a `none` case for state without content, and `cursor_origin` handles origin mode.
+
+## SIMD and cross-compiling
+
+Same probe, extended to time parsing of mixed SGR and non-ASCII text, built `ReleaseSafe`:
+
+- `-Dsimd=true`: 354 MB/s. `-Dsimd=false`: 400 MB/s (macOS arm64).
+- With `-Dsimd=false`, `zig build -Dtarget=` produced a static x86-64 musl ELF, a static arm64 musl ELF and an x86-64 Mach-O. The arm64 musl build ran on `rockylinux:8` and `alpine:3` (about 290 MB/s under colima).
+- Not yet checked: linking a `perch-vt` static library into a Rust binary for each target.
