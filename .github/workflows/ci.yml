@@ -151,6 +151,8 @@ jobs:
           zig fmt --check build.zig build.zig.zon src
           zig build test --summary all
           zig build test --summary all -Dtest-observer=true
+          # Debug builds parse a byte at a time; the shipped build does not.
+          zig build test --summary all -Doptimize=ReleaseSafe
 
   checks:
     name: SPDX, Zig packages, cargo deny
