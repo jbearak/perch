@@ -87,7 +87,7 @@ The double fork changes a process's parent and session. It does not move it out 
 ### Supervisor robustness
 
 - The terminal model is optional. Every call into it (feed, resize, dump, history) and into the mode parser runs under `catch_unwind`, and the release build keeps `panic = "unwind"`. If either panics, the supervisor marks the model as failed, logs it, and carries on with passthrough. Restore then shows a notice and asks the program to redraw with SIGWINCH, and detached query answers stop. A model bug must never cost the user their R session.
-- The supervisor never stops reading the PTY master. Writing to a slow client never blocks the loop. See [Flow control](#flow-control).
+- Writing to a client never blocks the loop. A slow client can slow the program down, as any terminal can, but a client that has stopped reading holds it up for at most 5 seconds. See [Flow control](#flow-control).
 
 ## Files and sockets
 
