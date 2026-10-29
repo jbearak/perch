@@ -3,7 +3,14 @@
 //! Perch: persistent terminal sessions.
 
 pub mod cli;
+pub mod flow;
+pub mod input;
+pub mod queries;
+pub mod transport;
 pub mod vt_ffi;
+
+#[cfg(test)]
+mod scenarios;
 
 /// Perch's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

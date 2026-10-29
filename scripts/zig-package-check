@@ -18,12 +18,20 @@ trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"' EXIT
 mkdir "$work/global"
 
 cd "$work"
-ZIG_GLOBAL_CACHE_DIR="$work/global" ZIG_LOCAL_PKG_DIR=zig-pkg "$zig" build \
+# Every run fetches from scratch, so retry a few times on network errors.
+attempt=1
+until ZIG_GLOBAL_CACHE_DIR="$work/global" ZIG_LOCAL_PKG_DIR=zig-pkg "$zig" build \
     --build-file "$root/perch-vt/build.zig" \
     --cache-dir "$work/cache" \
     --prefix "$work/out" \
     -Doptimize=ReleaseSafe -Dcpu=baseline -Dsimd=false -Dvt-features=-kitty-graphics \
     "$@"
+do
+    [ $attempt -lt 3 ] || exit 1
+    attempt=$((attempt + 1))
+    echo "zig build failed; retrying (attempt $attempt of 3)" >&2
+    sleep 10
+done
 
 status=0
 for pkg in $(ls zig-pkg); do

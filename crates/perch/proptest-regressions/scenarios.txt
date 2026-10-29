@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d3c2301c26a07e900920be8be958d0681f6269e7688e8c097a3ae3051322d3b7 # shrinks to ops = [Attach(Some(0), None), ClientReads(30), Output(1, Some(Da1)), Advance(0), Output(1, None)]
+cc ce9790ff6203d69ab927f18077d4368fc0f93695768d9cba8c7361e03bb27a2c # shrinks to ops = [Attach(Some(0), Some(1)), ClientReads(18446744073709551615), Output(1, Some(Dsr5)), Output(1, Some(Dsr5)), Advance(1)]
+cc b63edb49d5810fe7ff634b519e1f1500190f68ed561d803ea21c2c2b78e9962d # shrinks to ops = [Attach(Some(173), Some(123)), ClientReads(18446744073709551615), Output(1, Some(Dsr5)), Output(1, Some(Dsr5)), Advance(173), ReadClient, Advance(123)]
+cc 33913d0c797847e3a3c64555d05ed750e5a09646f2d7e2f44e6cf4612ea54fd5 # shrinks to ops = [Attach(Some(470), Some(104)), ClientReads(27), Output(1, Some(Dsr5)), Advance(470), Type([120]), Advance(104)]
