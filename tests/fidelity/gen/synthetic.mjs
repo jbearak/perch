@@ -122,7 +122,7 @@ fixture('wide-graphemes', {
     '😀😃😄 ok\r\n',
     'abcdefghijklmnopqrs中x\r\n',
     'abcdefghijklmnopqr中',
-    restore({ size: [20, 6] }),
+    restore({ size: [20, 6], assert: [{ name: 'a wide character that did not fit moved to the next row', line: [3, '中x'] }, { name: 'cursor waits to wrap after the wide character at the edge', cursor: [20, 4] }] }),
     'z\r\n',
   ],
 });
@@ -134,7 +134,7 @@ fixture('hyperlinks', {
     `${OSC}8;;https://example.com/a${ST}plain link${OSC}8;;${ST}\r\n`,
     `${OSC}8;id=x;https://example.com/b${ST}a link with an id that wraps across rows${OSC}8;;${ST}\r\n`,
     `${CSI}1;4:3;58;5;2mstyled${CSI}0m ${OSC}8;;https://example.com/open${ST}still open`,
-    restore({ size: [30, 6] }),
+    restore({ size: [30, 6], assert: [{ name: 'open link continues', line: [3, 'styled still open and more'], after: true }] }),
     ' and more',
   ],
 });
@@ -146,7 +146,7 @@ fixture('dec-special-margin', {
     `${ESC}(0lqqqqqqqqqqqqqqqqqk\r\n`,
     `x ${ESC}(B text ${ESC}(0x\r\n`,
     `mqqqqqqqqqqqqqqqqqqj`,
-    restore({ size: [20, 4] }),
+    restore({ size: [20, 4], assert: [{ name: 'pending wrap at the margin', cursor: [20, 2] }, { name: 'next print wraps', line: [3, 'wrapped'], after: true }] }),
     `${ESC}(Bwrapped`,
   ],
 });
@@ -156,7 +156,7 @@ fixture('progress-bar', {
   parts: [
     'downloading\r\n',
     ...Array.from({ length: 21 }, (_, i) => `\r${CSI}K[${'#'.repeat(i * 2)}${' '.repeat(40 - i * 2)}] ${i * 5}%`),
-    restore({}),
+    restore({ assert: [{ name: 'bar at 100%', line: [1, `[${'#'.repeat(40)}] 100%`] }, { name: 'bar replaced', line: [1, 'done'], after: true }] }),
     `\r${CSI}Kdone\r\n`,
   ],
 });
@@ -171,7 +171,7 @@ fixture('decstr', {
     `${CSI}?6h${CSI}5;10r${CSI}?1h${CSI}4h${CSI}1;7m${ESC}(0${CSI}?25l`,
     `${CSI}!p`,
     'after DECSTR\r\n',
-    restore({}),
+    restore({ assert: [{ name: 'cursor visible again', contains: 'after DECSTR' }] }),
     'more\r\n',
   ],
 });
@@ -183,7 +183,7 @@ fixture('ris', {
     `${OSC}4;1;rgb:12/34/56${ST}${OSC}2;title${ST}${CSI}>3u${CSI}?1049h${CSI}?2004halt`,
     `${ESC}c`,
     'after RIS\r\n',
-    restore({}),
+    restore({ assert: [{ name: 'screen cleared by RIS', line: [0, 'after RIS'] }, { name: 'primary screen after RIS', buffer: 'normal' }] }),
     'more\r\n',
   ],
 });
@@ -207,7 +207,7 @@ fixture('partial-sequences', {
   parts: [
     'start ',
     `${CSI}3`,
-    restore({}),
+    restore({ assert: [{ name: 'held CSI completes red', line: [0, 'start red '], after: true }] }),
     `1mred${CSI}0m ${OSC}2;ti`,
     restore({}),
     `tle${ST} ${ESC}Pq#0;2;0;0;0`,
@@ -218,7 +218,7 @@ fixture('partial-sequences', {
 
 fixture('invalid-bytes', {
   description: 'invalid UTF-8, stray continuation bytes and C1 bytes at ground',
-  parts: [Buffer.from('a\xffb\xc3(c\x80d\xe2\x82e\x9bf\xc2\x9b31mg\r\n', 'latin1'), restore({}), 'h\r\n'],
+  parts: [Buffer.from('a\xffb\xc3(c\x80d\xe2\x82e\x9bf\xc2\x9b31mg\r\n', 'latin1'), restore({ assert: [{ name: 'model replaces invalid bytes', model_line: ['primary', 0, 'a\ufffdb\ufffd(c\ufffdd\ufffde\ufffdf31mg'] }] }), 'h\r\n'],
   known: [{ match: 'normal line', reason: 'Ghostty and xterm.js decode invalid UTF-8 and UTF-8 encoded C1 differently; not covered by the contract' }],
 });
 
@@ -264,7 +264,7 @@ fixture('resize-200-80-200', {
     lines(40, (i) => `${i} ${'word '.repeat(10 + (i % 30))}`),
     '\r\n',
     { resize: [80, 20] },
-    restore({ size: [80, 20] }),
+    restore({ size: [80, 20], assert: [{ name: 'cursor at the left after the reflow', cursor_x: 0 }] }),
     'at 80\r\n',
     { resize: [200, 20] },
     restore({ size: [200, 20] }),
@@ -285,14 +285,14 @@ fixture('history-4mib', {
   parts: [
     { repeat: { text: `${Array.from({ length: 200 }, (_, i) => `${CSI}38;2;${i};${(i * 7) % 256};${(i * 13) % 256}m${String.fromCharCode(97 + (i % 26))}`).join('')}${CSI}0m\r\n`, count: 1500 } },
     'tail\r\n',
-    restore({ size: [200, 24], scrollback: 10000 }),
+    restore({ size: [200, 24], scrollback: 10000, assert: [{ name: 'history cut to 4 MiB', scrollback_below: 1500 }] }),
   ],
 });
 
 fixture('history-blank-tail', {
   description: 'history ending in blank lines, kept with no row dropped or added at the screen boundary',
   size: [40, 5],
-  parts: [lines(12, (i) => (i < 6 ? `text ${i}` : '')), restore({ size: [40, 5] }), 'after\r\n'],
+  parts: [lines(12, (i) => (i < 6 ? `text ${i}` : '')), restore({ size: [40, 5], assert: [{ name: 'blank history rows kept', scrollback: 7 }] }), 'after\r\n'],
 });
 
 fixture('restore-byte-cap', {
@@ -359,7 +359,7 @@ fixture('reedline-redraw', {
     `${CSI}?25l${CSI}1;1H${CSI}J${CSI}32m~/thesis${CSI}0m ${CSI}1;72H${CSI}2m12:00:01${CSI}0m${CSI}1;10H> ${CSI}?25h`,
     `${CSI}?25l${CSI}1;10H${CSI}K> x <- 1${CSI}1;72H${CSI}2m12:00:01${CSI}0m${CSI}1;18H${CSI}?25h`,
     `${CSI}?25l${CSI}1;18H${CSI}90m:10${CSI}0m${CSI}1;18H${CSI}?25h`,
-    restore({}),
+    restore({ assert: [{ name: 'cursor before the hint', cursor: [17, 0] }, { name: 'bracketed paste on', model_mode: ['?2004', true] }] }),
     `\r\n${CSI}?2004l[1] 1\r\n${CSI}?2004h${CSI}6n${CSI}32m~/thesis${CSI}0m > `,
   ],
 });
@@ -371,7 +371,7 @@ fixture('fish-right-prompt', {
     'echo hi',
     `\r\n${OSC}133;C${ST}hi\r\n${OSC}133;D;0${ST}`,
     `${OSC}133;A${ST}${CSI}1mjmb${CSI}0m@host ~/p> ${CSI}s${CSI}70G${CSI}33m(main)${CSI}0m${CSI}u`,
-    restore({}),
+    restore({ assert: [{ name: 'right prompt drawn', line: [2, `jmb@host ~/p>${' '.repeat(56)}(main)`] }, { name: 'cursor after the left prompt', cursor: [14, 2] }] }),
     restore({ mode: 'screen' }),
     'ls\r\n',
   ],

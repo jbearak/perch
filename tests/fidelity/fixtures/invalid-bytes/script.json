@@ -18,7 +18,17 @@
           80,
           24
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "model replaces invalid bytes",
+            "model_line": [
+              "primary",
+              0,
+              "a�b�(c�d�e�f31mg"
+            ]
+          }
+        ]
       }
     },
     {

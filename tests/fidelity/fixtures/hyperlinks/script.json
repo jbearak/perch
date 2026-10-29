@@ -18,7 +18,17 @@
           30,
           6
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "open link continues",
+            "line": [
+              3,
+              "styled still open and more"
+            ],
+            "after": true
+          }
+        ]
       }
     },
     {

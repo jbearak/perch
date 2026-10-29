@@ -18,7 +18,13 @@
           40,
           5
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "blank history rows kept",
+            "scrollback": 7
+          }
+        ]
       }
     },
     {

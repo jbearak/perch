@@ -18,7 +18,23 @@
           80,
           24
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "right prompt drawn",
+            "line": [
+              2,
+              "jmb@host ~/p>                                                        (main)"
+            ]
+          },
+          {
+            "name": "cursor after the left prompt",
+            "cursor": [
+              14,
+              2
+            ]
+          }
+        ]
       }
     },
     {

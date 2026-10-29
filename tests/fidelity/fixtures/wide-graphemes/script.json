@@ -18,7 +18,23 @@
           20,
           6
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "a wide character that did not fit moved to the next row",
+            "line": [
+              3,
+              "中x"
+            ]
+          },
+          {
+            "name": "cursor waits to wrap after the wide character at the edge",
+            "cursor": [
+              20,
+              4
+            ]
+          }
+        ]
       }
     },
     {

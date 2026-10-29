@@ -24,7 +24,13 @@
           200,
           24
         ],
-        "scrollback": 10000
+        "scrollback": 10000,
+        "assert": [
+          {
+            "name": "history cut to 4 MiB",
+            "scrollback_below": 1500
+          }
+        ]
       }
     }
   ]

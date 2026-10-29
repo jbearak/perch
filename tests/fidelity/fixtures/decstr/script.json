@@ -18,7 +18,13 @@
           80,
           24
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor visible again",
+            "contains": "after DECSTR"
+          }
+        ]
       }
     },
     {

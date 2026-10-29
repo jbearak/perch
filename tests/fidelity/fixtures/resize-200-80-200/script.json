@@ -24,7 +24,13 @@
           80,
           20
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor at the left after the reflow",
+            "cursor_x": 0
+          }
+        ]
       }
     },
     {

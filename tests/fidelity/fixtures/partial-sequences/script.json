@@ -18,7 +18,17 @@
           80,
           24
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "held CSI completes red",
+            "line": [
+              0,
+              "start red "
+            ],
+            "after": true
+          }
+        ]
       }
     },
     {

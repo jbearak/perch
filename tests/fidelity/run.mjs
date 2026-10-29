@@ -243,6 +243,12 @@ function assertion(as, ctx) {
     return JSON.stringify(got) === JSON.stringify(as.cursor) ? null : `cursor ${JSON.stringify(got)}`;
   }
   if ('buffer' in as) return snap.active === as.buffer ? null : `buffer ${snap.active}`;
+  if ('cursor_x' in as) return snap.cursor.x === as.cursor_x ? null : `cursor x ${snap.cursor.x}`;
+  if ('contains' in as) {
+    const buf = t.buffer.active;
+    for (let y = 0; y < buf.length; y++) if (buf.getLine(y).translateToString(true).includes(as.contains)) return null;
+    return `no line contains ${JSON.stringify(as.contains)}`;
+  }
   if ('line' in as) {
     const [y, text] = as.line;
     const buf = t.buffer.active;
@@ -252,6 +258,14 @@ function assertion(as, ctx) {
   if ('scrollback' in as) {
     const got = t.buffer.normal.length - t.rows;
     return got === as.scrollback ? null : `scrollback ${got}`;
+  }
+  if ('scrollback_below' in as) {
+    const got = t.buffer.normal.length - t.rows;
+    return got > 0 && got < as.scrollback_below ? null : `scrollback ${got}`;
+  }
+  if ('model_mode' in as) {
+    const [mode, value] = as.model_mode;
+    return ctx.expected.modes[mode] === value ? null : `model mode ${mode} is ${ctx.expected.modes[mode]}`;
   }
   if ('kitty' in as) {
     const got = ctx.expected.screens[as.kitty.screen].kitty;

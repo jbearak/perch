@@ -18,7 +18,23 @@
           80,
           24
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor before the hint",
+            "cursor": [
+              17,
+              0
+            ]
+          },
+          {
+            "name": "bracketed paste on",
+            "model_mode": [
+              "?2004",
+              true
+            ]
+          }
+        ]
       }
     },
     {

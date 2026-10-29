@@ -18,7 +18,24 @@
           20,
           4
         ],
-        "scrollback": 1000
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "pending wrap at the margin",
+            "cursor": [
+              20,
+              2
+            ]
+          },
+          {
+            "name": "next print wraps",
+            "line": [
+              3,
+              "wrapped"
+            ],
+            "after": true
+          }
+        ]
       }
     },
     {

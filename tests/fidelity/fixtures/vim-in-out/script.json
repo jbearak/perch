@@ -1,0 +1,54 @@
+{
+  "description": "vim-in-out: recorded by record.sh at 80x24, restored before the program's own exit",
+  "recorded_by": "record.sh",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 3478
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "in vim on the alternate screen",
+            "buffer": "alternate"
+          },
+          {
+            "name": "back on the primary screen after vim",
+            "buffer": "normal",
+            "after": true
+          },
+          {
+            "name": "output after vim",
+            "contains": "more output",
+            "after": true
+          }
+        ]
+      }
+    },
+    {
+      "feed": null
+    }
+  ]
+}

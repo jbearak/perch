@@ -1,0 +1,49 @@
+{
+  "description": "r-prompt: recorded by record.sh at 80x24, restored before the program's own exit",
+  "recorded_by": "record.sh",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 4343
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor after the R prompt",
+            "cursor_x": 2
+          },
+          {
+            "name": "output after R exits",
+            "contains": "after R",
+            "after": true
+          }
+        ]
+      }
+    },
+    {
+      "feed": null
+    }
+  ]
+}
