@@ -490,6 +490,15 @@ pub fn fd_is_open(fd: RawFd) -> bool {
     unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
 }
 
+/// Whether `fd` is an open socket.
+pub fn fd_is_socket(fd: RawFd) -> bool {
+    // SAFETY: a zeroed stat is valid and fstat fills it.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &raw mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFSOCK
+    }
+}
+
 /// `dup2`. Usable after `fork`.
 pub fn dup2(from: RawFd, to: RawFd) -> io::Result<()> {
     // SAFETY: plain syscall.
@@ -604,6 +613,25 @@ pub fn write_all(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
         buf = &buf[n..];
     }
     Ok(())
+}
+
+/// The size of a memory page.
+pub fn page_size() -> u64 {
+    // SAFETY: plain call.
+    let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if n > 0 { n as u64 } else { 4096 }
+}
+
+/// Limits this process's address space (`RLIMIT_AS`), so an allocation
+/// past it fails. Linux only: macOS does not enforce it.
+#[cfg(target_os = "linux")]
+pub fn limit_address_space(bytes: u64) -> io::Result<()> {
+    let lim = libc::rlimit {
+        rlim_cur: bytes as libc::rlim_t,
+        rlim_max: bytes as libc::rlim_t,
+    };
+    // SAFETY: a valid rlimit.
+    cvt(unsafe { libc::setrlimit(libc::RLIMIT_AS, &raw const lim) }).map(drop)
 }
 
 /// `ftruncate`.
@@ -1047,6 +1075,22 @@ impl Termios {
     pub fn icanon(&self) -> bool {
         self.0.c_lflag & libc::ICANON != 0
     }
+
+    /// Raw mode, as `cfmakeraw` sets it: no echo, no line editing, no
+    /// signals from keys, no output processing.
+    pub fn set_raw(&mut self) {
+        // SAFETY: a valid termios.
+        unsafe {
+            libc::cfmakeraw(&raw mut self.0);
+        }
+    }
+}
+
+/// `tcgetpgrp`: the foreground process group of a terminal, read through
+/// its master or slave.
+pub fn tcgetpgrp(fd: RawFd) -> io::Result<i32> {
+    // SAFETY: plain call.
+    cvt(unsafe { libc::tcgetpgrp(fd) })
 }
 
 /// `tcgetattr`.
@@ -1128,6 +1172,9 @@ pub fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
 /// What `proc_pidinfo(PROC_PIDTBSDINFO)` says about a process.
 #[cfg(target_os = "macos")]
 pub struct BsdInfo {
+    /// The process's name: its full name if the kernel kept one, else the
+    /// truncated command name.
+    pub name: String,
     pub ruid: u32,
     pub start_sec: u64,
     pub start_usec: u64,
@@ -1144,7 +1191,20 @@ pub fn proc_bsd_info(pid: i32) -> Option<BsdInfo> {
         let mut info: libc::proc_bsdinfo = std::mem::zeroed();
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
         let n = libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size);
+        let text = |raw: &[c_char]| {
+            let bytes: Vec<u8> = raw
+                .iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c as u8)
+                .collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let name = match text(&info.pbi_name) {
+            n if n.is_empty() => text(&info.pbi_comm),
+            n => n,
+        };
         (n == size).then_some(BsdInfo {
+            name,
             ruid: info.pbi_ruid,
             start_sec: info.pbi_start_tvsec,
             start_usec: info.pbi_start_tvusec,
@@ -1171,5 +1231,45 @@ pub fn list_all_pids() -> Vec<i32> {
         pids.truncate(got as usize);
         pids.retain(|&p| p > 0);
         pids
+    }
+}
+
+/// A process's resident memory in bytes, from `proc_pid_rusage`.
+#[cfg(target_os = "macos")]
+pub fn proc_resident_bytes(pid: i32) -> Option<u64> {
+    // SAFETY: a zeroed rusage_info_v0 is valid; the call fills it.
+    unsafe {
+        let mut info: libc::rusage_info_v0 = std::mem::zeroed();
+        let ret = libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V0, (&raw mut info).cast());
+        (ret == 0).then_some(info.ri_resident_size)
+    }
+}
+
+/// A process's current directory, from `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
+#[cfg(target_os = "macos")]
+pub fn proc_cwd(pid: i32) -> Option<std::path::PathBuf> {
+    // SAFETY: a zeroed proc_vnodepathinfo is valid; the call fills it.
+    unsafe {
+        let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as c_int;
+        let n = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        );
+        if n != size {
+            return None;
+        }
+        // The path is MAXPATHLEN bytes, NUL-terminated; libc splits the
+        // array in rows for old compilers.
+        let raw = info.pvi_cdir.vip_path.as_flattened();
+        let bytes: Vec<u8> = raw
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        (!bytes.is_empty()).then(|| OsString::from_vec(bytes).into())
     }
 }
