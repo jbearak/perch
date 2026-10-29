@@ -69,6 +69,7 @@ unsafe extern "C" {
         out: *mut RawBytes,
     ) -> c_int;
     fn perch_vt_tail(vt: *mut RawVt, history_rows: u32, out: *mut RawBytes) -> c_int;
+    fn perch_vt_dump(vt: *mut RawVt, out: *mut RawBytes) -> c_int;
     fn perch_vt_bytes_free(out: *mut RawBytes);
     fn perch_vt_title(vt: *mut RawVt, len: *mut usize) -> *const u8;
     fn perch_vt_pwd(vt: *mut RawVt, len: *mut usize) -> *const u8;
@@ -342,6 +343,19 @@ impl Model {
         };
         // SAFETY: the model is live and `out` is valid to write.
         VtError::check(unsafe { perch_vt_tail(self.ptr(), history_rows, &mut out) })?;
+        Ok(take_bytes(out))
+    }
+
+    /// The model's state as JSON, for tests: both screens' cursors, saved
+    /// cursors, character sets and kitty stacks, every mode in the table,
+    /// margins, tab stops, palette and each row's text with its styles.
+    pub fn dump(&self) -> Result<Vec<u8>, VtError> {
+        let mut out = RawBytes {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+        // SAFETY: the model is live and `out` is valid to write.
+        VtError::check(unsafe { perch_vt_dump(self.ptr(), &mut out) })?;
         Ok(take_bytes(out))
     }
 

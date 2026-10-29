@@ -17,6 +17,7 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const modes = @import("modes.zig");
 const restore = @import("restore.zig");
+const dump = @import("dump.zig");
 const Vt = @import("Vt.zig");
 
 const Stream = vt.TerminalStream;
@@ -124,6 +125,17 @@ export fn perch_vt_restore(
 export fn perch_vt_tail(h: *Handle, history_rows: u32, out: *Bytes) c_int {
     out.* = .{};
     const bytes = restore.tail(gpa, &model(h).terminal, history_rows) catch
+        return @backingInt(Status.out_of_memory);
+    out.* = .{ .ptr = bytes.ptr, .len = bytes.len };
+    return @backingInt(Status.ok);
+}
+
+/// The model's state as JSON, for tests: both screens' cursors, saved
+/// cursors and kitty stacks, every mode in the table, margins, tab stops,
+/// palette and each row's text. See `dump.zig`.
+export fn perch_vt_dump(h: *Handle, out: *Bytes) c_int {
+    out.* = .{};
+    const bytes = dump.dump(gpa, &model(h).terminal) catch
         return @backingInt(Status.out_of_memory);
     out.* = .{ .ptr = bytes.ptr, .len = bytes.len };
     return @backingInt(Status.ok);
@@ -378,6 +390,7 @@ test "the C interface" {
 test {
     _ = modes;
     _ = restore;
+    _ = dump;
     _ = Vt;
     _ = @import("tests.zig");
 }
