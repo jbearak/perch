@@ -306,7 +306,7 @@ A `screen` restore does the same without steps 2 and 3.
 - Each visible cell of the active screen has the model's character, foreground and background color (16, 256 or RGB), and bold, faint, italic, underline, blink, inverse and strikethrough. The cursor is where the model has it.
 - After the program leaves the alternate screen, the primary screen is the model's primary screen.
 - Every mode in the list above matches the program's last setting.
-- History has the right text and colors in the right order, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
+- History has the right text and colors in the right order, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit or 4 MiB of history, whichever is reached first. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
 
 The contract applies to `full` restores. A `screen` restore meets the first three points.
 
