@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod selfinstall;
 pub mod supervisor;
 pub mod sys;
+pub mod tracker;
 pub mod transport;
 pub mod vt_ffi;
 
