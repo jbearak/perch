@@ -6,7 +6,15 @@
 //! same bracketed-paste state. `perch-vt`'s test observer is the oracle, so
 //! this exists only with `test-hooks`. The proptest below and the `tracker`
 //! fuzz target both run it.
+//!
+//! The observer feeds Ghostty a byte at a time, so that each query knows
+//! its offset. The model process feeds it through Ghostty's bulk path
+//! instead, in the frames [`Feeder`] cuts. [`check_production`] runs that
+//! path too and holds it to the same tracker and to the observer.
 
+use std::collections::HashMap;
+
+use crate::model::feed::{Feeder, Step};
 use crate::queries::Kind;
 use crate::tracker::{Event, PasteOp, Seen, Tracker};
 use crate::vt_ffi::{Model, Observed};
@@ -55,6 +63,110 @@ pub fn check(stream: &[u8], sizes: &[usize]) -> Result<(), String> {
     Ok(())
 }
 
+/// Feeds `stream` in chunks of the given sizes through the production
+/// path: the supervisor's [`Feeder`] (held back to ground, cut at queries,
+/// with a long-sequence limit of `limit` bytes) into a model fed with
+/// Ghostty's bulk path, as the model process does. Alongside, a second
+/// model gets the same frames a byte at a time, with the observer. After
+/// every chunk:
+///
+/// - the bulk model is at ground (it is fed only up to ground), unless a
+///   long sequence is being fed through, when it agrees with the tracker;
+/// - its bracketed paste is the tracker's;
+/// - its DSR 6 replies are the observer model's, one per DSR 6 query the
+///   feeder reported, tagged with that query's frame;
+/// - the observer saw exactly the queries the feeder reported, each ending
+///   its frame.
+pub fn check_production(stream: &[u8], sizes: &[usize], limit: usize) -> Result<(), String> {
+    let mut feeder = Feeder::with_limit(limit);
+    let mut bulk = Model::new(20, 5, 100, 1 << 20).map_err(|e| format!("model: {e:?}"))?;
+    let mut bytewise = Model::new(20, 5, 100, 1 << 20).map_err(|e| format!("model: {e:?}"))?;
+    let mut fed = 0u64;
+    let mut frame_end = HashMap::new();
+    let mut sizes = sizes.iter().map(|n| (*n).max(1)).cycle();
+    let mut rest = stream;
+    let mut chunk_no = 0;
+    while !rest.is_empty() {
+        let n = sizes.next().unwrap_or(rest.len()).min(rest.len());
+        let (chunk, tail) = rest.split_at(n);
+        rest = tail;
+        let mut queries = Vec::new();
+        let mut dsr6 = Vec::new();
+        for step in feeder.push(chunk) {
+            match step {
+                Step::Frame { n, bytes } => {
+                    bulk.feed_slice(&bytes, n);
+                    bytewise.feed(&bytes, n);
+                    fed += bytes.len() as u64;
+                    frame_end.insert(n, fed);
+                }
+                Step::Query { id, kind } => {
+                    queries.push((query_kind(kind), frame_end[&id.0]));
+                    if kind == Kind::Dsr6 {
+                        dsr6.push(id.0);
+                    }
+                }
+                Step::Reset | Step::Discarded | Step::Partial => {}
+            }
+        }
+        let at = feeder.tracker().fed();
+        let fail = |what: String| Err(format!("chunk {chunk_no} ending at {at}: {what}"));
+        bulk.take_observed();
+        let seen: Vec<(u32, u64)> = bytewise
+            .take_observed()
+            .iter()
+            .filter(|o| o.kind <= Observed::DA2)
+            .map(|o| (o.kind, o.end))
+            .collect();
+        if seen != queries {
+            return fail(format!(
+                "feeder reported {queries:?}, observer saw {seen:?}"
+            ));
+        }
+        let replies = bulk.take_replies();
+        let expected = bytewise.take_replies();
+        if replies != expected {
+            return fail(format!(
+                "bulk path replied {replies:?}, byte path {expected:?}"
+            ));
+        }
+        let frames: Vec<u64> = replies.iter().map(|r| r.frame).collect();
+        if frames != dsr6 {
+            return fail(format!("replies for frames {frames:?}, DSR 6 in {dsr6:?}"));
+        }
+        let ground = if feeder.feeding_through() {
+            feeder.tracker().at_ground()
+        } else {
+            true
+        };
+        if bulk.at_ground() != ground || bytewise.at_ground() != ground {
+            return fail(format!(
+                "bulk model at ground {}, byte model {}, expected {ground}",
+                bulk.at_ground(),
+                bytewise.at_ground()
+            ));
+        }
+        let paste = bulk.mode(2004, false) == Some(true);
+        if paste != feeder.tracker().bracketed_paste() {
+            return fail(format!(
+                "bulk model bracketed paste {paste}, tracker {}",
+                feeder.tracker().bracketed_paste()
+            ));
+        }
+        chunk_no += 1;
+    }
+    Ok(())
+}
+
+fn query_kind(kind: Kind) -> u32 {
+    match kind {
+        Kind::Dsr5 => Observed::DSR5,
+        Kind::Dsr6 => Observed::DSR6,
+        Kind::Da1 => Observed::DA1,
+        Kind::Da2 => Observed::DA2,
+    }
+}
+
 /// A tracker event as the observer records it. The observer does not
 /// record RIS; its effect shows in the bracketed-paste state.
 fn observed(event: &Event) -> Option<(u32, u64)> {
@@ -85,7 +197,10 @@ pub fn check_fuzz_input(data: &[u8]) -> Result<(), String> {
     } else {
         sizes.iter().map(|b| usize::from(b % 64) + 1).collect()
     };
-    check(stream, &sizes)
+    check(stream, &sizes)?;
+    // The production path, with a long-sequence limit small enough for
+    // fuzz inputs to pass it.
+    check_production(stream, &sizes, usize::from(first / 16) * 8 + 8)
 }
 
 #[cfg(test)]
@@ -114,8 +229,40 @@ mod tests {
         ]
     }
 
+    /// Pieces for the production path: the above, and long strings and
+    /// sequences that pass a small long-sequence limit.
+    fn long_piece() -> impl Strategy<Value = Vec<u8>> {
+        #[rustfmt::skip]
+        const INTRODUCERS: &[&[u8]] = &[
+            b"\x1b]52;c;", b"\x1b]1337;", b"\x1b]2;", b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX",
+            b"\x1b[", b"\x1b[?", b"\x1b]",
+        ];
+        prop_oneof![
+            8 => piece(),
+            1 => (proptest::sample::select(INTRODUCERS), 1usize..80, any::<bool>()).prop_map(
+                |(intro, n, digits)| {
+                    let mut v = intro.to_vec();
+                    v.extend(std::iter::repeat_n(if digits { b'1' } else { b'x' }, n));
+                    v
+                }
+            ),
+        ]
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+        #[test]
+        fn production_feed_agrees_with_tracker_and_observer(
+            pieces in proptest::collection::vec(long_piece(), 0..120),
+            sizes in proptest::collection::vec(1usize..48, 1..12),
+            limit in prop_oneof![1 => Just(crate::model::feed::LONG_SEQUENCE), 2 => 4usize..64],
+        ) {
+            let stream = pieces.concat();
+            if let Err(e) = check_production(&stream, &sizes, limit) {
+                prop_assert!(false, "{e}\nstream: {stream:?}\nsizes: {sizes:?}\nlimit: {limit}");
+            }
+        }
 
         #[test]
         fn tracker_agrees_with_perch_vt(
@@ -144,6 +291,18 @@ mod tests {
             }
         }
         check_fuzz_input(b"\x03\x01\x02\x03\x1b[6n").unwrap();
+        for stream in [
+            &b"ab\x1b[6n\x1b[5n\x1b[?2004h\x1bc\x1b[6n"[..],
+            b"\x1b]52;c;QUFBQUFBQUFBQUFB\x07\x1b[6n",
+            b"\x1bPqqqqqqqqqqqqqqqq\x1b[?2004h\x1b[6n",
+            b"\x1b[1111111111111111111\n1m\x1b[6n",
+        ] {
+            for size in 1..=stream.len() {
+                for limit in [4, 8, crate::model::feed::LONG_SEQUENCE] {
+                    check_production(stream, &[size], limit).unwrap();
+                }
+            }
+        }
         check_fuzz_input(b"").unwrap();
     }
 }
