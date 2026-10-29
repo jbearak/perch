@@ -71,7 +71,7 @@ jobs:
           "$bin" version --json
           file "$bin"
           file "$bin" | grep -Eq '(statically|static-pie) linked'
-          if file "$bin" | grep -q interpreter; then
+          if file "$bin" | grep interpreter >/dev/null; then
             echo "release binary has an interpreter" >&2; exit 1
           fi
           # No strong symbol defined twice (compiler_rt from Zig and Rust's).
@@ -80,10 +80,10 @@ jobs:
             echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
           fi
           # No test hook in a release build.
-          if nm "$bin" | grep -q perch_vt_take_observed; then
+          if nm "$bin" | grep perch_vt_take_observed >/dev/null; then
             echo "release binary has perch-vt's test observer" >&2; exit 1
           fi
-          if strings "$bin" | grep -q PERCH_TEST_TIME_SCALE; then
+          if strings "$bin" | grep PERCH_TEST_TIME_SCALE >/dev/null; then
             echo "release binary has PERCH_TEST_TIME_SCALE" >&2; exit 1
           fi
       - uses: actions/upload-artifact@v4
@@ -128,7 +128,7 @@ jobs:
           if [ -n "$dups" ]; then
             echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
           fi
-          if nm "$bin" | grep -q perch_vt_take_observed; then
+          if nm "$bin" | grep perch_vt_take_observed >/dev/null; then
             echo "release binary has perch-vt's test observer" >&2; exit 1
           fi
       # macOS Intel is cross-compiled here and never run: no Intel runners.
@@ -137,7 +137,7 @@ jobs:
           set -euo pipefail
           cargo build --release -p perch --target x86_64-apple-darwin
           file target/x86_64-apple-darwin/release/perch
-          file target/x86_64-apple-darwin/release/perch | grep -q x86_64
+          file target/x86_64-apple-darwin/release/perch | grep x86_64 >/dev/null
 
   zig:
     name: perch-vt zig build test

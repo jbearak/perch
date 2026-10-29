@@ -18,7 +18,7 @@ bin="$CARGO_TARGET_DIR/$musl/release/perch"
 "$bin" version --json
 file "$bin"
 file "$bin" | grep -Eq '(statically|static-pie) linked'
-! file "$bin" | grep -q interpreter
+! file "$bin" | grep interpreter >/dev/null
 dups=$(nm --defined-only "$bin" | awk 'NF == 3 && $2 ~ /^[TDBR]$/ { print $3 }' | sort | uniq -d)
 if [ -n "$dups" ]; then
     echo "strong symbols defined more than once:" >&2
