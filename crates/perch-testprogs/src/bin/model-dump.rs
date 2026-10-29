@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! `model-dump SCRIPT OUTDIR` runs a fidelity fixture's action script
-//! through the gate (the tracker and the hold-back rules) and `perch-vt`,
-//! as the supervisor and the model process will, and writes what the
+//! through the supervisor's `Feeder` (the tracker, the hold-back rule and
+//! the 16 MiB rule) into `perch-vt`, as the supervisor does, and writes
+//! what the
 //! harness in `tests/fidelity` checks:
 //!
 //! - `restore-N.bin`: the bytes a client receives for the Nth restore:
-//!   the restore, then the bytes the gate was still holding back;
+//!   the restore, then the bytes the feeder was still holding back;
 //! - `live-N.bin`: the live output that client received after it;
 //! - `hostile.bin`: the client state every restore is also tried against
 //!   (alternate screen, margins, insert mode, an open OSC 8 and a
@@ -40,7 +41,8 @@
 //! sequence over 16 MiB that was arriving when it attached, which the
 //! supervisor withholds.
 
-use perch::restore::{self, Client, Gate, Mode};
+use perch::model::feed::{Feeder, Step};
+use perch::restore::{self, Client, Mode};
 use perch::vt_ffi::{Model, RestoreLimits};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -83,8 +85,10 @@ struct Window {
 
 struct Run {
     model: Model,
-    gate: Gate,
-    frame: u64,
+    feeder: Feeder,
+    /// Set by a long sequence fed through, cleared by RIS, as the
+    /// supervisor does.
+    partial: bool,
     window: Option<Window>,
     restores: Vec<Value>,
     out: PathBuf,
@@ -100,22 +104,27 @@ fn dump(m: &Model) -> Value {
 }
 
 impl Run {
-    /// Output as the supervisor handles it: through the gate to the model,
-    /// and live to the restored client, less what it withholds.
+    /// Output as the supervisor handles it: through the feeder to the
+    /// model, and live to the restored client, less what it withholds.
     fn feed(&mut self, mut bytes: &[u8]) {
         if self.window.as_ref().is_some_and(|w| w.withholding) {
             let mut n = 0;
-            while n < bytes.len() && self.gate.long().is_some() {
+            while n < bytes.len() && self.feeder.in_long_sequence() {
                 self.push(&bytes[n..n + 1]);
                 n += 1;
             }
             bytes = &bytes[n..];
-            if self.gate.long().is_none() {
-                if let Some(w) = &mut self.window {
-                    w.withholding = false;
-                }
-            } else {
+            if self.feeder.in_long_sequence() {
                 return;
+            }
+            // The long sequence is over. What the feeder holds now (the ESC
+            // of an ST, say) starts what follows it, so the client gets it.
+            let started = self.feeder.held().to_vec();
+            if let Some(w) = &mut self.window {
+                w.withholding = false;
+                w.live.extend_from_slice(&started);
+                w.plain.feed(&started, 0);
+                w.hostile.feed(&started, 0);
             }
         }
         self.push(bytes);
@@ -127,9 +136,13 @@ impl Run {
     }
 
     fn push(&mut self, bytes: &[u8]) {
-        for chunk in self.gate.push(bytes).chunks {
-            self.frame += 1;
-            self.model.feed(&chunk.bytes, self.frame);
+        for step in self.feeder.push(bytes) {
+            match step {
+                Step::Frame { n, bytes } => self.model.feed(&bytes, n),
+                Step::Partial => self.partial = true,
+                Step::Reset => self.partial = false,
+                Step::Query { .. } | Step::Discarded => {}
+            }
         }
     }
 
@@ -146,9 +159,9 @@ impl Run {
             rows: rw,
             scrollback_rows: r["scrollback"].as_u64().unwrap_or(1000) as u32,
         };
-        let paste = self.gate.tracker().bracketed_paste();
-        let withholding = self.gate.long().is_some();
-        let built = if self.gate.partial() {
+        let paste = self.feeder.tracker().bracketed_paste();
+        let withholding = self.feeder.in_long_sequence();
+        let built = if self.partial {
             restore::partial(client, paste)
         } else {
             let limits = RestoreLimits {
@@ -163,7 +176,7 @@ impl Run {
             restore::build_with_limits(&mut self.model, mode, client, paste, limits)
                 .expect("restore")
         };
-        let held = self.gate.held().to_vec();
+        let held = self.feeder.held().to_vec();
         let mut client_bytes = built.bytes.clone();
         client_bytes.extend_from_slice(&held);
         std::fs::write(self.out.join(format!("restore-{index}.bin")), &client_bytes)
@@ -250,8 +263,8 @@ fn run(script_path: &Path, out: &Path) {
 
     let mut run = Run {
         model: Model::new(cols, rows, scrollback, SCROLLBACK_BYTES).expect("model"),
-        gate: Gate::new(),
-        frame: 0,
+        feeder: Feeder::new(),
+        partial: false,
         window: None,
         restores: Vec::new(),
         out: out.to_path_buf(),

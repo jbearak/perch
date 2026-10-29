@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! A restore against a second `perch-vt`: a stream through the gate into a
-//! model, a restore built from it, and the restore fed to a fresh terminal
-//! at the client's size, which must then agree with the model on what the
-//! restore promises ([`restore::differences`]); and again after more output
-//! reaches both. Self-referential (both sides are Ghostty), so it finds
+//! A restore against a second `perch-vt`: a stream through the supervisor's
+//! [`Feeder`] into a model, a restore built from it, and the restore fed to
+//! a fresh terminal at the client's size, which must then agree with the
+//! model on what the restore promises ([`restore::differences`]); and again
+//! after more output reaches both. Self-referential (both sides are Ghostty), so it finds
 //! what the restore leaves out or writes in the wrong order, not where
 //! Ghostty and other terminals differ. The proptest below and the
 //! `restore` fuzz target both run it.
 
-use crate::restore::{self, Client, Gate, Mode};
+use crate::model::feed::{Feeder, Step};
+use crate::restore::{self, Client, Mode};
 use crate::vt_ffi::Model;
 
 const SCROLLBACK: u32 = 200;
@@ -19,7 +20,7 @@ const SCROLLBACK_BYTES: u64 = 1 << 20;
 #[derive(Debug, Clone)]
 pub struct Case<'a> {
     pub stream: &'a [u8],
-    /// The stream reaches the gate in two reads, split here.
+    /// The stream reaches the feeder in two reads, split here.
     pub split: usize,
     pub model: (u16, u16),
     pub client: (u16, u16),
@@ -32,17 +33,17 @@ pub fn check(case: &Case) -> Result<(), String> {
     let err = |e| format!("perch-vt: {e:?}");
     let mut model =
         Model::new(case.model.0, case.model.1, SCROLLBACK, SCROLLBACK_BYTES).map_err(err)?;
-    let mut gate = Gate::new();
+    let mut feeder = Feeder::new();
     let split = case.split.min(case.stream.len());
-    let mut frame = 0;
-    let mut feed = |model: &mut Model, gate: &mut Gate, bytes: &[u8]| {
-        for chunk in gate.push(bytes).chunks {
-            frame += 1;
-            model.feed(&chunk.bytes, frame);
+    let feed = |model: &mut Model, feeder: &mut Feeder, bytes: &[u8]| {
+        for step in feeder.push(bytes) {
+            if let Step::Frame { n, bytes } = step {
+                model.feed(&bytes, n);
+            }
         }
     };
-    feed(&mut model, &mut gate, &case.stream[..split]);
-    feed(&mut model, &mut gate, &case.stream[split..]);
+    feed(&mut model, &mut feeder, &case.stream[..split]);
+    feed(&mut model, &mut feeder, &case.stream[split..]);
 
     let client = Client {
         cols: case.client.0,
@@ -53,7 +54,7 @@ pub fn check(case: &Case) -> Result<(), String> {
         &mut model,
         case.mode,
         client,
-        gate.tracker().bracketed_paste(),
+        feeder.tracker().bracketed_paste(),
     )
     .map_err(err)?;
     if unwritable_cursor(&model)? {
@@ -65,12 +66,12 @@ pub fn check(case: &Case) -> Result<(), String> {
     compare(&model, &terminal, case.mode, "after the restore", true)?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
 
-    terminal.feed(gate.held(), 0);
+    terminal.feed(feeder.held(), 0);
     terminal.feed(case.after, 0);
-    feed(&mut model, &mut gate, case.after);
-    // While the gate holds an unfinished sequence the model is behind the
+    feed(&mut model, &mut feeder, case.after);
+    // While the feeder holds an unfinished sequence the model is behind the
     // terminal by those bytes, as it should be.
-    if !gate.held().is_empty() {
+    if !feeder.held().is_empty() {
         return Ok(());
     }
     // Re-entering the alternate screen after a restore made on the primary

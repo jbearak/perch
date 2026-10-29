@@ -111,6 +111,21 @@ impl Feeder {
         self.long == Some(Long::FeedThrough)
     }
 
+    /// Output not yet given to the model: the unfinished sequence or UTF-8
+    /// character it is waiting on. A client gets these bytes right after a
+    /// restore, then live output.
+    pub fn held(&self) -> &[u8] {
+        &self.held
+    }
+
+    /// Whether a sequence longer than the limit is arriving, dropped or fed
+    /// through. A client that attaches now must not get the rest of it,
+    /// which its terminal would print as text: its output is withheld until
+    /// this is false again.
+    pub fn in_long_sequence(&self) -> bool {
+        self.long.is_some()
+    }
+
     /// Output read from the PTY.
     pub fn push(&mut self, mut chunk: &[u8]) -> Vec<Step> {
         // The limit is checked where a held sequence would pass it, not at

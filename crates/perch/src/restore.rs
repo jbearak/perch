@@ -10,21 +10,18 @@
 //!   step 2, then what `perch_vt_restore` builds, which starts with the
 //!   modes replayed early (2027) so that they precede any content;
 //! - the partial-model restore (prologue, notice and resize nudge), which
-//!   is also the fallback when a restore passes its byte limit;
-//! - the [`Gate`] between the program's output and the model: the
-//!   hold-back rule (the model is fed only up to ground, cut at each
-//!   query) and the very-long-sequence rule.
+//!   is also the fallback when a restore passes its byte limit.
+//!
+//! What the model is fed, and what is held back from it, is
+//! [`crate::model::feed::Feeder`]'s: the bytes it holds are what a client
+//! gets right after a restore.
 
-use crate::queries::Kind;
-use crate::tracker::{Event, Seen, Tracker, Unfinished};
 use crate::vt_ffi::{ModeEntry, Model, RestoreLimits, RestoreMode, VtError, mode_table};
 
 /// The most history bytes a full restore sends, newest lines kept.
 pub const HISTORY_CAP: usize = 4 << 20;
 /// The most bytes for everything in a restore but the history.
 pub const BYTE_CAP: usize = 32 << 20;
-/// The most bytes of one unfinished sequence the gate holds back.
-pub const HOLD_LIMIT: usize = 16 << 20;
 /// Screens are clamped to this many columns and rows.
 pub const MAX_CELLS: u16 = 500;
 
@@ -265,173 +262,6 @@ pub fn partial(client: Client, bracketed_paste: bool) -> Restore {
         size: (cols, rows),
         nudge: Some(Nudge::for_size(cols, rows)),
     }
-}
-
-/// A run of output for the model, ending at ground. When `query` is set,
-/// its last byte ends that query, so the frame that carries it names it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chunk {
-    pub bytes: Vec<u8>,
-    pub query: Option<Kind>,
-}
-
-/// What one [`Gate::push`] produced.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Pushed {
-    /// Output for the model, in order.
-    pub chunks: Vec<Chunk>,
-    /// What the tracker saw.
-    pub events: Vec<Event>,
-}
-
-/// What the gate is doing with a sequence longer than [`HOLD_LIMIT`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Long {
-    /// A string Perch does not restore (APC, PM, SOS, DCS, OSC 52, 1337,
-    /// 5522): none of it reaches the model.
-    Discard,
-    /// Anything else: fed to the model as it arrives, which marks the
-    /// model partial.
-    Stream,
-}
-
-/// Stands between the program's output and the model. It feeds the model
-/// only up to the last point where the stream is at ground and holds back
-/// an unfinished sequence or UTF-8 character until it completes, cutting
-/// the model's output at the end of every query. One unfinished sequence
-/// is held back up to [`HOLD_LIMIT`] bytes; past that it is discarded or
-/// streamed by kind ([`Long`]).
-#[derive(Debug, Clone, Default)]
-pub struct Gate {
-    tracker: Tracker,
-    /// The unfinished sequence, from the last ground point.
-    held: Vec<u8>,
-    long: Option<Long>,
-    partial: bool,
-}
-
-impl Gate {
-    pub fn new() -> Gate {
-        Gate::default()
-    }
-
-    pub fn tracker(&self) -> &Tracker {
-        &self.tracker
-    }
-
-    /// Bytes held back: what a client gets right after a restore.
-    pub fn held(&self) -> &[u8] {
-        &self.held
-    }
-
-    /// Whether a sequence longer than [`HOLD_LIMIT`] is still arriving. A
-    /// client that attaches now must not get the rest of it, which its
-    /// terminal would print as text: withhold its output until the gate is
-    /// back at ground.
-    pub fn long(&self) -> Option<Long> {
-        self.long
-    }
-
-    /// Whether the model has missed output that could change the screen,
-    /// and so cannot give a consistent restore. Cleared by RIS.
-    pub fn partial(&self) -> bool {
-        self.partial
-    }
-
-    /// A fresh model after a restart has not seen earlier output.
-    pub fn mark_partial(&mut self) {
-        self.partial = true;
-    }
-
-    /// Takes the program's output as it is read.
-    pub fn push(&mut self, bytes: &[u8]) -> Pushed {
-        let mut out = Pushed::default();
-        let mut rest = bytes;
-
-        if let Some(long) = self.long {
-            // The rest of a long sequence, up to its end.
-            let mut n = 0;
-            while n < rest.len() && !self.tracker.at_ground() {
-                out.events.extend(self.tracker.feed(&rest[n..n + 1]));
-                n += 1;
-            }
-            if long == Long::Stream && n > 0 {
-                out.chunks.push(Chunk {
-                    bytes: rest[..n].to_vec(),
-                    query: None,
-                });
-            }
-            rest = &rest[n..];
-            if !self.tracker.at_ground() {
-                return out;
-            }
-            self.long = None;
-        }
-
-        // Absolute offset of the first held byte.
-        let start = self.tracker.fed() - self.held.len() as u64;
-        let events = self.tracker.feed(rest);
-        let ground = self.tracker.ground_offset();
-        if ground > start {
-            let complete_len = (ground + rest.len() as u64 - self.tracker.fed()) as usize;
-            let mut complete = std::mem::take(&mut self.held);
-            complete.extend_from_slice(&rest[..complete_len]);
-            self.held = rest[complete_len..].to_vec();
-
-            let mut from = 0;
-            for e in &events {
-                match e.seen {
-                    Seen::Query(kind) => {
-                        let to = (e.end - start) as usize;
-                        out.chunks.push(Chunk {
-                            bytes: complete[from..to].to_vec(),
-                            query: Some(kind),
-                        });
-                        from = to;
-                    }
-                    Seen::Reset => self.partial = false,
-                    Seen::Paste(_) => {}
-                }
-            }
-            if from < complete.len() {
-                out.chunks.push(Chunk {
-                    bytes: complete[from..].to_vec(),
-                    query: None,
-                });
-            }
-        } else {
-            self.held.extend_from_slice(rest);
-        }
-        out.events.extend(events);
-
-        if self.held.len() > HOLD_LIMIT {
-            let unfinished = self.tracker.unfinished();
-            if discarded(unfinished) {
-                self.held = Vec::new();
-                self.long = Some(Long::Discard);
-            } else {
-                out.chunks.push(Chunk {
-                    bytes: std::mem::take(&mut self.held),
-                    query: None,
-                });
-                self.long = Some(Long::Stream);
-                self.partial = true;
-            }
-        }
-        out
-    }
-}
-
-/// Strings that carry images, clipboard data or requests Perch does not
-/// restore.
-fn discarded(unfinished: Option<Unfinished>) -> bool {
-    matches!(
-        unfinished,
-        Some(Unfinished::Dcs | Unfinished::SosPmApc)
-            | Some(Unfinished::Osc {
-                number: Some(52 | 1337 | 5522)
-            })
-    )
 }
 
 /// How a terminal fed a restore differs from the model it was built from,
@@ -732,104 +562,5 @@ mod tests {
             scrollback_rows: 0,
         };
         assert_eq!(c.size(), (1, 500));
-    }
-
-    fn model_bytes(p: &Pushed) -> Vec<u8> {
-        p.chunks.iter().flat_map(|c| c.bytes.clone()).collect()
-    }
-
-    #[test]
-    fn gate_holds_back_to_ground_and_cuts_at_queries() {
-        let mut g = Gate::new();
-        let p = g.push(b"ab\x1b[6ncd\x1b[");
-        assert_eq!(
-            p.chunks,
-            [
-                Chunk {
-                    bytes: b"ab\x1b[6n".to_vec(),
-                    query: Some(Kind::Dsr6)
-                },
-                Chunk {
-                    bytes: b"cd".to_vec(),
-                    query: None
-                },
-            ]
-        );
-        assert_eq!(g.held(), b"\x1b[");
-        let p = g.push(b"31");
-        assert!(p.chunks.is_empty());
-        assert_eq!(g.held(), b"\x1b[31");
-        // A split UTF-8 character is held too.
-        let p = g.push(b"m\xc3");
-        assert_eq!(model_bytes(&p), b"\x1b[31m");
-        assert_eq!(g.held(), b"\xc3");
-        let p = g.push(b"\xa9\x1b[c");
-        assert_eq!(
-            p.chunks,
-            [Chunk {
-                bytes: "é\x1b[c".as_bytes().to_vec(),
-                query: Some(Kind::Da1)
-            }]
-        );
-        assert!(g.held().is_empty());
-    }
-
-    #[test]
-    fn gate_discards_long_strings_and_streams_long_csi() {
-        let filler = vec![b'A'; HOLD_LIMIT];
-
-        // An APC past the limit never reaches the model.
-        let mut g = Gate::new();
-        assert_eq!(model_bytes(&g.push(b"x\x1b_G")), b"x");
-        assert!(g.push(&filler).chunks.is_empty());
-        assert_eq!(g.long(), Some(Long::Discard));
-        assert!(g.held().is_empty());
-        assert!(g.push(b"more").chunks.is_empty());
-        let p = g.push(b"\x1b\\y");
-        assert_eq!(model_bytes(&p), b"y");
-        assert_eq!(g.long(), None);
-        assert!(!g.partial());
-
-        // OSC 52 likewise; OSC 2 streams.
-        let mut g = Gate::new();
-        g.push(b"\x1b]52;c;");
-        g.push(&filler);
-        assert_eq!(g.long(), Some(Long::Discard));
-        let mut g = Gate::new();
-        g.push(b"\x1b]2;");
-        assert_eq!(model_bytes(&g.push(&filler)).len(), 4 + HOLD_LIMIT);
-        assert_eq!(g.long(), Some(Long::Stream));
-        assert!(g.partial());
-
-        // A CSI with embedded line feeds streams and marks the model
-        // partial until RIS.
-        let mut g = Gate::new();
-        g.push(b"\x1b[1");
-        let digits = vec![b'1'; HOLD_LIMIT];
-        let p = g.push(&digits);
-        assert_eq!(model_bytes(&p).len(), 3 + HOLD_LIMIT);
-        assert!(g.partial());
-        let p = g.push(b"\n\n");
-        assert_eq!(model_bytes(&p), b"\n\n");
-        let p = g.push(b"mz");
-        assert_eq!(model_bytes(&p), b"mz");
-        assert_eq!(g.long(), None);
-        assert!(g.partial());
-        g.push(b"\x1bc");
-        assert!(!g.partial());
-    }
-
-    #[test]
-    fn gate_feeds_the_same_bytes_whatever_the_split() {
-        let stream: &[u8] =
-            b"\x1b[1;31mred\xe4\xb8\xad\x1b]8;;http://x\x07link\x1b]8;;\x07\x1b[6n\x1bPq#0\x1b\\\x1b[?2004h\xff";
-        let whole = model_bytes(&Gate::new().push(stream));
-        for cut in 0..stream.len() {
-            let mut g = Gate::new();
-            let mut got = model_bytes(&g.push(&stream[..cut]));
-            got.extend(model_bytes(&g.push(&stream[cut..])));
-            assert_eq!(got, whole, "cut at {cut}");
-            assert!(g.tracker().bracketed_paste());
-        }
     }
 }
