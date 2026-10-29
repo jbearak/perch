@@ -176,7 +176,24 @@ export fn perch_vt_prologue_table(len: *usize) [*]const modes.CEntry {
 }
 
 comptime {
-    if (Vt.observer) @export(&takeObserved, .{ .name = "perch_vt_take_observed" });
+    if (Vt.observer) {
+        @export(&takeObserved, .{ .name = "perch_vt_take_observed" });
+        @export(&feedSlice, .{ .name = "perch_vt_feed_slice" });
+        @export(&testAbort, .{ .name = "perch_vt_test_abort" });
+    }
+}
+
+/// Feed through the bulk path production builds use. Test-observer builds
+/// only.
+fn feedSlice(h: *Handle, bytes: ?[*]const u8, len: usize, frame: u64) callconv(.c) void {
+    const data = bytes orelse return;
+    model(h).feedSlice(data[0..len], frame);
+}
+
+/// A safety abort, as a Ghostty bug would cause, so tests can check that its
+/// message reaches `supervisor.log`. Test-observer builds only.
+fn testAbort() callconv(.c) noreturn {
+    @panic("perch-vt test abort");
 }
 
 /// Move up to `cap` observed queries, oldest first, into `out`, and return

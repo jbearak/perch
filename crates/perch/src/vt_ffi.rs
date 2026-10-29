@@ -77,6 +77,10 @@ unsafe extern "C" {
     fn perch_vt_prologue_table(len: *mut usize) -> *const RawModeEntry;
     #[cfg(feature = "test-hooks")]
     fn perch_vt_take_observed(vt: *mut RawVt, out: *mut Observed, cap: usize) -> usize;
+    #[cfg(feature = "test-hooks")]
+    fn perch_vt_feed_slice(vt: *mut RawVt, bytes: *const u8, len: usize, frame: u64);
+    #[cfg(feature = "test-hooks")]
+    fn perch_vt_test_abort() -> !;
 }
 
 /// A failure `perch-vt` reported, from its negative `Status`.
@@ -257,6 +261,21 @@ impl Model {
         unsafe { perch_vt_feed(self.ptr(), bytes.as_ptr(), bytes.len(), frame) }
     }
 
+    /// Feed output as the model process does: through Ghostty's bulk path.
+    /// In production builds that is what [`Model::feed`] does too; in
+    /// test-hooks builds `feed` goes a byte at a time for the observer, and
+    /// this keeps the model process, and the tests of it, on the production
+    /// path.
+    pub fn feed_slice(&mut self, bytes: &[u8], frame: u64) {
+        #[cfg(feature = "test-hooks")]
+        // SAFETY: the model is live and `bytes` is valid for its length.
+        unsafe {
+            perch_vt_feed_slice(self.ptr(), bytes.as_ptr(), bytes.len(), frame);
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        self.feed(bytes, frame);
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), VtError> {
         // SAFETY: the model is live.
         VtError::check(unsafe { perch_vt_resize(self.ptr(), cols, rows) })
@@ -382,6 +401,13 @@ impl Drop for Model {
         // SAFETY: the model is live and freed exactly once.
         unsafe { perch_vt_free(self.ptr()) }
     }
+}
+
+/// Aborts the process with a Zig safety panic, as a bug in Ghostty would.
+#[cfg(feature = "test-hooks")]
+pub fn test_abort() -> ! {
+    // SAFETY: no arguments; it does not return.
+    unsafe { perch_vt_test_abort() }
 }
 
 /// Copy bytes `perch-vt` allocated and free them.
