@@ -24,6 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fuzz build
+          fuzz/seed-restore.sh
           for target in $(cargo fuzz list); do
             cargo fuzz run "$target" -- -max_total_time=600
           done

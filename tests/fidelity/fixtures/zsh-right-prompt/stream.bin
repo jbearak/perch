@@ -1,0 +1,16 @@
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[0] right[69D[?2004heecho hello[?2004l
+hello
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[0] right[69D[?2004hpprint -P '%F{red}red%f %Bbold%b %K{blue}bg%k'[?2004l
+[31mred[39m [1mbold[0m [44mbg[49m
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[0] right[69D[?2004hlls -1 /usr | head -5[?2004l
+bin
+lib
+libexec
+local
+sbin
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[0] right[69D[?2004hffalse[?2004l
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[1] right[69D[?2004hffor i in 1 2 3; do echo "item $i"; done[?2004l
+item 1
+item 2
+item 3
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jproject % [K[60C[0] right[69D[?2004heexit[?2004l

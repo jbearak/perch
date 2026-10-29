@@ -1,0 +1,90 @@
+{
+  "description": "kitty stacks on both screens, with zero entries pushed, then pushes and pops after the restore",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 64
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "kitty4": true,
+        "assert": [
+          {
+            "name": "primary stack, zeros kept",
+            "kitty": {
+              "screen": "primary",
+              "flags": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                7
+              ]
+            }
+          },
+          {
+            "name": "alternate stack",
+            "kitty": {
+              "screen": "alternate",
+              "flags": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                5,
+                0,
+                7
+              ]
+            }
+          },
+          {
+            "name": "on the alternate screen",
+            "buffer": "alternate"
+          }
+        ]
+      }
+    },
+    {
+      "feed": 10
+    },
+    {
+      "exit_alt": {
+        "mode": 1049,
+        "then": "back\r\n"
+      }
+    },
+    {
+      "feed": 10
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "kitty4": true
+      }
+    },
+    {
+      "feed": 5
+    }
+  ]
+}

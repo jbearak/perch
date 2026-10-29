@@ -1,0 +1,50 @@
+{
+  "description": "an APC held just under 16 MiB, then a read that passes the limit and ends it: it never reaches the model",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 11
+    },
+    {
+      "fill": {
+        "byte": 65,
+        "count": 16777203
+      }
+    },
+    {
+      "feed": 109
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "the APC was dropped, not fed",
+            "feeder": {
+              "discarded": 1,
+              "fed_through": 0
+            }
+          },
+          {
+            "name": "text after it",
+            "line": [
+              1,
+              "after"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

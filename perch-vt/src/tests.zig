@@ -364,6 +364,7 @@ test "history: trimmed by rows at the client's width and by bytes" {
         const r = try restoreInto(a, .full, limits);
         defer r.deinit();
         try testing.expectEqual(@as(usize, 7), historyRows(primary(r.vt)));
+        try testing.expectEqual(@as(usize, 7), try restore.historyKept(testing.allocator, &a.terminal, limits));
         try expectHistoryTail(primary(a), primary(r.vt));
         try expectSameScreen(primary(a), primary(r.vt));
     }
@@ -376,6 +377,7 @@ test "history: trimmed by rows at the client's width and by bytes" {
         defer r.deinit();
         const kept = historyRows(primary(r.vt));
         try testing.expect(kept > 0 and kept < total);
+        try testing.expectEqual(kept, try restore.historyKept(testing.allocator, &a.terminal, limits));
         const history_len = screenStart(r.bytes) - 2 * a.terminal.rows;
         try testing.expect(history_len <= 100);
         try expectHistoryTail(primary(a), primary(r.vt));
@@ -786,6 +788,101 @@ test "insert mode does not shift the edge cell rebuilt for pending wrap" {
     try expectSameTerminal(a, r.vt);
     feedBoth(a, r.vt, "X\x1b[1;3HY");
     try expectSameTerminal(a, r.vt);
+}
+
+test "without wraparound, the edge cell rebuilt for pending wrap keeps its combining mark" {
+    const a = try newModel(2, 1);
+    defer a.destroy();
+    a.feed("\te\xcc\x81\x1b[?7l", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try expectSameTerminal(a, r.vt);
+}
+
+test "history: a wrap onto a row with a background does not color the scrolled-in row" {
+    const a = try newModel(3, 2);
+    defer a.destroy();
+    // "lqk" wraps onto a row whose first cell has a background; that row
+    // then scrolls into history.
+    a.feed("word \xe4\xb8\xadlqk\x1b[48;2;1;2;3m a\x1b[0m\r\nx\r\ny", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try expectHistoryTail(primary(a), primary(r.vt));
+    try expectSameTerminal(a, r.vt);
+}
+
+test "joins: a spacer head is followed by its wide character, or no join" {
+    // With left and right margins, the row after one ending where a wide
+    // character did not fit can start with older text.
+    const a = try newModel(4, 3);
+    defer a.destroy();
+    a.feed("\x1b[?69h0123456789\x1b[3;9s\t\xe4\xb8\xad\xe4\xb8\xad", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    // The next row's text stays on its own row, not in the spacer's column
+    // (which the restore leaves blank rather than as a spacer head).
+    for (0..3) |y| {
+        var ita = activePin(primary(a), y).rowIterator(.right_down, null);
+        var itb = activePin(primary(r.vt), y).rowIterator(.right_down, null);
+        const ra = ita.next().?;
+        const rb = itb.next().?;
+        for (0..4) |x| {
+            const ca = ra.node.page().getRowAndCell(x, ra.y).cell;
+            const cb = rb.node.page().getRowAndCell(x, rb.y).cell;
+            try testing.expectEqual(ca.codepoint(), cb.codepoint());
+        }
+    }
+}
+
+test "joins: a row the formatter skips is never joined" {
+    // A row holding only a styled blank (a wide character destroyed after
+    // it did not fit) is written as nothing.
+    const a = try newModel(2, 2);
+    defer a.destroy();
+    a.feed("\x1b[1mword \x00\x1b[10C\x1b[1K\xe4\xb8\xad\re\xcc\x81", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    const b = primary(r.vt);
+    var it = activePin(b, 1).rowIterator(.right_down, null);
+    const row = it.next().?;
+    const cell = row.node.page().getRowAndCell(0, row.y).cell;
+    try testing.expectEqual(@as(u21, 'e'), cell.codepoint());
+}
+
+test "ISO protection mode is restored, so EL keeps protected cells" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    // ESC V (SPA) protects in ISO mode, where EL leaves protected cells.
+    // (Cells protected before the restore are not: the row formatter does
+    // not write protection.)
+    a.feed("cd\x1bV", 0);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.iso, primary(r.vt).protected_mode);
+    try testing.expect(primary(r.vt).cursor.protected);
+    feedBoth(a, r.vt, "xy\x1bW\r\x1b[K");
+    try expectSameActive(primary(a), primary(r.vt));
+    // DEC mode, cursor still protected.
+    const d = try newModel(10, 2);
+    defer d.destroy();
+    d.feed("\x1b[1\"qxy", 0);
+    const s = try restoreInto(d, .screen, unlimited);
+    defer s.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.dec, primary(s.vt).protected_mode);
+    try testing.expect(primary(s.vt).cursor.protected);
+}
+
+test "2027: a row joined onto its continuation does not cluster with the cell at the edge" {
+    // A cluster cut by a malformed byte leaves a cell ending in ZWJ at the
+    // edge; the next row's emoji would attach to it instead of wrapping.
+    const a = try newModel(2, 1);
+    defer a.destroy();
+    a.feed("\x1b[?2027h\xf0\x9f\x91\xa8\xe2\x80\x8d\xe2\r\xf0\x9f\x91\xa8\x8d", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(historyRows(primary(a)), historyRows(primary(r.vt)));
+    try expectHistoryTail(primary(a), primary(r.vt));
+    try expectSameActive(primary(a), primary(r.vt));
 }
 
 test "the byte cap" {

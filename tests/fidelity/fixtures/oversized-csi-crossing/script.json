@@ -1,0 +1,65 @@
+{
+  "description": "a CSI held at exactly 16 MiB, then a line feed and its final byte in one read: fed through, and the model partial until RIS",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 11
+    },
+    {
+      "fill": {
+        "byte": 49,
+        "count": 16777213
+      }
+    },
+    {
+      "feed": 2
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "fed through",
+            "feeder": {
+              "discarded": 0,
+              "fed_through": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "feed": 9
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "complete again after RIS",
+            "line": [
+              0,
+              "clean"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

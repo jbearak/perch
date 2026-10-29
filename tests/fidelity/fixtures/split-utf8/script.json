@@ -1,0 +1,51 @@
+{
+  "description": "restores while a UTF-8 character is split, so the held bytes follow the restore",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 4
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "held character completes",
+            "line": [
+              0,
+              "café "
+            ],
+            "after": true
+          }
+        ]
+      }
+    },
+    {
+      "feed": 4
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 6
+    }
+  ]
+}

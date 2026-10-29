@@ -1,0 +1,52 @@
+{
+  "description": "invalid UTF-8, stray continuation bytes and C1 bytes at ground",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 21
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "model replaces invalid bytes",
+            "model_line": [
+              "primary",
+              0,
+              "a�b�(c�d�e�f31mg"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "feed": 3
+    }
+  ],
+  "known": [
+    {
+      "match": "normal line",
+      "reason": "Ghostty and xterm.js decode invalid UTF-8 and UTF-8 encoded C1 differently; not covered by the contract"
+    }
+  ],
+  "known_tmux": [
+    {
+      "restores": [
+        0
+      ],
+      "reason": "tmux decodes invalid UTF-8 and UTF-8 encoded C1 its own way"
+    }
+  ]
+}

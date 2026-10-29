@@ -1,0 +1,60 @@
+{
+  "description": "an APC over 16 MiB is never given to the model; a client attaching in its middle gets none of the rest",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 11
+    },
+    {
+      "fill": {
+        "byte": 65,
+        "count": 17825792
+      }
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "text after the string",
+            "line": [
+              1,
+              "after"
+            ],
+            "after": true
+          }
+        ]
+      }
+    },
+    {
+      "fill": {
+        "byte": 65,
+        "count": 1024
+      }
+    },
+    {
+      "feed": 9
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "description": "RIS after the alternate screen, kitty flags, palette and title",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 74
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "screen cleared by RIS",
+            "line": [
+              0,
+              "after RIS"
+            ]
+          },
+          {
+            "name": "primary screen after RIS",
+            "buffer": "normal"
+          }
+        ]
+      }
+    },
+    {
+      "feed": 6
+    }
+  ]
+}

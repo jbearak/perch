@@ -17,12 +17,18 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const modes = @import("modes.zig");
 const restore = @import("restore.zig");
+const dump = @import("dump.zig");
 const Vt = @import("Vt.zig");
 
 const Stream = vt.TerminalStream;
 const Handler = Stream.Handler;
 
 const gpa = std.heap.smp_allocator;
+
+/// Ghostty logs what it ignores (an invalid C0 such as the prologue's CAN at
+/// ground, a UTF-8 encoded C1) at warning level, which ReleaseSafe would
+/// print to the model process's stderr for every such byte. Only errors.
+pub const std_options: std.Options = .{ .log_level = .err };
 
 /// A model as C sees it.
 pub const Handle = opaque {};
@@ -119,11 +125,34 @@ export fn perch_vt_restore(
     return @backingInt(Status.ok);
 }
 
+/// How many history rows a full restore would send now, at the model's
+/// current size: the newest that fit `client_scrollback_rows` and
+/// `history_cap`. For tests.
+export fn perch_vt_history_kept(h: *Handle, client_scrollback_rows: u32, history_cap: usize, out: *usize) c_int {
+    out.* = restore.historyKept(gpa, &model(h).terminal, .{
+        .client_scrollback_rows = client_scrollback_rows,
+        .history_cap = history_cap,
+        .byte_cap = 0,
+    }) catch return @backingInt(Status.out_of_memory);
+    return @backingInt(Status.ok);
+}
+
 /// The last `history_rows` rows of history and the active screen as text
 /// with SGR, for `tail.txt`.
 export fn perch_vt_tail(h: *Handle, history_rows: u32, out: *Bytes) c_int {
     out.* = .{};
     const bytes = restore.tail(gpa, &model(h).terminal, history_rows) catch
+        return @backingInt(Status.out_of_memory);
+    out.* = .{ .ptr = bytes.ptr, .len = bytes.len };
+    return @backingInt(Status.ok);
+}
+
+/// The model's state as JSON, for tests: both screens' cursors, saved
+/// cursors and kitty stacks, every mode in the table, margins, tab stops,
+/// palette and each row's text. See `dump.zig`.
+export fn perch_vt_dump(h: *Handle, out: *Bytes) c_int {
+    out.* = .{};
+    const bytes = dump.dump(gpa, &model(h).terminal) catch
         return @backingInt(Status.out_of_memory);
     out.* = .{ .ptr = bytes.ptr, .len = bytes.len };
     return @backingInt(Status.ok);
@@ -378,6 +407,7 @@ test "the C interface" {
 test {
     _ = modes;
     _ = restore;
+    _ = dump;
     _ = Vt;
     _ = @import("tests.zig");
 }

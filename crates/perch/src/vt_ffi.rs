@@ -69,6 +69,13 @@ unsafe extern "C" {
         out: *mut RawBytes,
     ) -> c_int;
     fn perch_vt_tail(vt: *mut RawVt, history_rows: u32, out: *mut RawBytes) -> c_int;
+    fn perch_vt_dump(vt: *mut RawVt, out: *mut RawBytes) -> c_int;
+    fn perch_vt_history_kept(
+        vt: *mut RawVt,
+        client_scrollback_rows: u32,
+        history_cap: usize,
+        out: *mut usize,
+    ) -> c_int;
     fn perch_vt_bytes_free(out: *mut RawBytes);
     fn perch_vt_title(vt: *mut RawVt, len: *mut usize) -> *const u8;
     fn perch_vt_pwd(vt: *mut RawVt, len: *mut usize) -> *const u8;
@@ -343,6 +350,35 @@ impl Model {
         // SAFETY: the model is live and `out` is valid to write.
         VtError::check(unsafe { perch_vt_tail(self.ptr(), history_rows, &mut out) })?;
         Ok(take_bytes(out))
+    }
+
+    /// The model's state as JSON, for tests: both screens' cursors, saved
+    /// cursors, character sets and kitty stacks, every mode in the table,
+    /// margins, tab stops, palette and each row's text with its styles.
+    pub fn dump(&self) -> Result<Vec<u8>, VtError> {
+        let mut out = RawBytes {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+        // SAFETY: the model is live and `out` is valid to write.
+        VtError::check(unsafe { perch_vt_dump(self.ptr(), &mut out) })?;
+        Ok(take_bytes(out))
+    }
+
+    /// How many history rows a full restore would send at the model's
+    /// current size: the newest that fit the client's scrollback and the
+    /// history cap. For tests.
+    pub fn history_kept(
+        &self,
+        client_scrollback_rows: u32,
+        history_cap: usize,
+    ) -> Result<usize, VtError> {
+        let mut out = 0;
+        // SAFETY: the model is live and `out` is valid to write.
+        VtError::check(unsafe {
+            perch_vt_history_kept(self.ptr(), client_scrollback_rows, history_cap, &mut out)
+        })?;
+        Ok(out)
     }
 
     /// The window title the program set, if any.

@@ -148,42 +148,12 @@ const Builder = struct {
     /// viewport so that clearing the screen next does not erase them.
     fn writeHistory(self: *Builder) (Error || Writer.Error)!void {
         const screen = self.t.screens.get(.primary).?;
+        const kept = try historyKept(self.alloc, self.t, self.limits);
+        if (kept == 0) return;
         const total = historyRows(screen);
-        const n = @min(total, self.limits.client_scrollback_rows);
-        if (n == 0) return;
 
-        // Measure each row (and the line break before it) to find the
-        // oldest row from which the rest fits the cap.
-        const content = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(content);
-        const sep = try self.alloc.alloc(usize, n);
-        defer self.alloc.free(sep);
-        {
-            var rows: RowWriter = .{ .sep = "\r\n" };
-            var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
-            var i: usize = 0;
-            while (it.next()) |row| : (i += 1) {
-                var counter: Writer.Discarding = .init(&.{});
-                sep[i] = if (rows.prev) |prev| (if (joins(prev, row)) 0 else rows.sep.len) else 0;
-                try writeRowCells(&counter.writer, row);
-                content[i] = @intCast(counter.count);
-                rows.prev = row;
-            }
-            std.debug.assert(i == n);
-        }
-        var start = n;
-        var total_bytes: usize = 0;
-        while (start > 0) {
-            const i = start - 1;
-            const add = content[i] + if (i + 1 < n) sep[i + 1] else 0;
-            if (total_bytes + add > self.limits.history_cap) break;
-            total_bytes += add;
-            start = i;
-        }
-        if (start == n) return;
-
-        var rows: RowWriter = .{ .sep = "\r\n" };
-        var it = historyPin(screen, total - n + start).rowIterator(.right_down, historyPin(screen, total - 1));
+        var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
+        var it = historyPin(screen, total - kept).rowIterator(.right_down, historyPin(screen, total - 1));
         while (it.next()) |row| try rows.write(self.out(), row);
         try self.out().splatBytesAll("\r\n", self.t.rows);
     }
@@ -197,7 +167,7 @@ const Builder = struct {
         try writeCleanSlate(w);
         try w.writeAll("\x1b[H\x1b[2J");
         if (lastUsedRow(screen)) |last| {
-            var rows: RowWriter = .{ .sep = "\r\n" };
+            var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
             var it = activePin(screen, 0).rowIterator(.right_down, activePin(screen, last));
             while (it.next()) |row| {
                 try rows.write(w, row);
@@ -286,25 +256,122 @@ const Builder = struct {
         try writePen(w, active);
 
         // Last of all: in insert mode the edge cell printed above would have
-        // pushed the row right.
+        // pushed the row right, and without wraparound it would have been
+        // printed over itself, losing a combining mark.
         if (t.modes.get(.insert)) try w.writeAll("\x1b[4h");
+        if (!t.modes.get(.wraparound)) try w.writeAll("\x1b[?7l");
     }
 };
+
+/// How many of the newest history rows a full restore of `t` (already at
+/// the client's size) sends: as many as fit the client's scrollback and
+/// the history cap, counting the line breaks and wrap primers between them.
+pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocator.Error!usize {
+    const screen = t.screens.get(.primary).?;
+    const total = historyRows(screen);
+    const n = @min(total, limits.client_scrollback_rows);
+    if (n == 0) return 0;
+
+    // Each row's own bytes, and the bytes written between it and the row
+    // before (a line break, or a wrap primer, or nothing).
+    const content = try alloc.alloc(usize, n);
+    defer alloc.free(content);
+    const between = try alloc.alloc(usize, n);
+    defer alloc.free(between);
+    var rows: RowWriter = .{ .sep = "\r\n", .cluster = t.modes.get(.grapheme_cluster) };
+    var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
+    var i: usize = 0;
+    while (it.next()) |row| : (i += 1) {
+        var own: Writer.Discarding = .init(&.{});
+        writeRowCells(&own.writer, row) catch unreachable;
+        var all: Writer.Discarding = .init(&.{});
+        rows.write(&all.writer, row) catch unreachable;
+        content[i] = @intCast(own.count);
+        between[i] = @as(usize, @intCast(all.count)) - content[i];
+    }
+    std.debug.assert(i == n);
+
+    // The oldest row from which the rest fits the cap.
+    var start = n;
+    var bytes: usize = 0;
+    while (start > 0) {
+        const j = start - 1;
+        const add = content[j] + if (j + 1 < n) between[j + 1] else 0;
+        if (bytes + add > limits.history_cap) break;
+        bytes += add;
+        start = j;
+    }
+    return n - start;
+}
 
 /// Writes rows one after another, joining a soft-wrapped row to the next
 /// when the terminal will wrap there by itself.
 const RowWriter = struct {
     sep: []const u8,
+    /// Grapheme clustering (2027) is on.
+    cluster: bool = false,
     prev: ?Pin = null,
 
     fn write(self: *RowWriter, w: *Writer, row: Pin) Writer.Error!void {
         if (self.prev) |prev| {
-            if (!joins(prev, row)) try w.writeAll(self.sep);
+            if (!joins(prev, row)) {
+                try w.writeAll(self.sep);
+            } else if (endsBeforeWideCharacter(prev)) {
+                // Only the wide character itself wraps here.
+                if (startsWithBackground(row)) try writeWrapPrimer(w, row);
+            } else if (self.cluster or startsWithBackground(row)) {
+                // A space with the default pen makes the wrap: it joins no
+                // grapheme cluster (with 2027 a printed character can
+                // attach to the cell waiting at the edge instead of
+                // wrapping), and it scrolls in a row without a background.
+                // Then step back, so the row is written from its start,
+                // where nothing is left of it to join.
+                try w.writeAll("\x1b[0m \x08");
+            }
         }
         try writeRowCells(w, row);
         self.prev = row;
     }
 };
+
+/// Whether the row ends where a wide character did not fit, leaving the
+/// cursor before the edge rather than waiting to wrap.
+fn endsBeforeWideCharacter(row: Pin) bool {
+    const page = row.node.page();
+    const cells = page.getCells(page.getRow(row.y));
+    return cells[cells.len - 1].wide == .spacer_head;
+}
+
+/// Whether the row's first cell has a background color. Printing it is
+/// what makes the terminal wrap onto the row, and a wrap at the bottom of
+/// the screen scrolls, filling the new row with the current background.
+fn startsWithBackground(row: Pin) bool {
+    const page = row.node.page();
+    const cell = page.getCells(page.getRow(row.y))[0];
+    return switch (cell.content_tag) {
+        .bg_color_palette, .bg_color_rgb => true,
+        .codepoint, .codepoint_grapheme => cell.hasStyling() and
+            page.styles.get(page.memory, cell.style_id).bg_color != .none,
+    };
+}
+
+/// Wrap onto the row with the default pen, by printing its first
+/// character (a wide one, which wraps by itself after a spacer head), and
+/// step back over it so the row is then written as usual.
+fn writeWrapPrimer(w: *Writer, row: Pin) Writer.Error!void {
+    const page = row.node.page();
+    const cell = page.getCells(page.getRow(row.y))[0];
+    try w.writeAll("\x1b[0m");
+    if (cell.hasText()) {
+        try w.printUnicodeCodepoint(cell.codepoint());
+        if (cell.content_tag == .codepoint_grapheme) {
+            if (page.lookupGrapheme(&page.getCells(page.getRow(row.y))[0])) |cps| for (cps) |cp| try w.printUnicodeCodepoint(cp);
+        }
+    } else {
+        try w.writeByte(' ');
+    }
+    try w.writeAll(if (cell.wide == .wide) "\x08\x08" else "\x08");
+}
 
 /// One row's cells, with styles and hyperlinks, ending with both closed.
 fn writeRowCells(w: *Writer, row: Pin) Writer.Error!void {
@@ -325,7 +392,28 @@ fn joins(prev: Pin, row: Pin) bool {
     const page = row.node.page();
     const this_row = page.getRow(row.y);
     if (!this_row.wrap_continuation) return false;
-    return endsAtEdge(prev_page.getCells(prev_row)) and printsAsText(page.getCells(this_row)[0]);
+    const prev_cells = prev_page.getCells(prev_row);
+    const first = page.getCells(this_row)[0];
+    // A row ending where a wide character did not fit leaves the cursor
+    // before the edge, so only that wide character wraps by itself. With
+    // left and right margins, the continuation can start with older text.
+    if (prev_cells[prev_cells.len - 1].wide == .spacer_head and first.wide != .wide) return false;
+    // The formatter writes nothing for a row with neither text nor a
+    // background-only cell, whatever its other styles.
+    if (!rowPrints(page.getCells(this_row)) or !rowPrints(prev_cells)) return false;
+    return endsAtEdge(prev_cells) and printsAsText(first);
+}
+
+/// The formatter's test for a row it writes at all.
+fn rowPrints(cells: []const Cell) bool {
+    for (cells) |*cell| {
+        if (cell.hasText()) return true;
+        switch (cell.content_tag) {
+            .bg_color_palette, .bg_color_rgb => return true,
+            .codepoint, .codepoint_grapheme => {},
+        }
+    }
+    return false;
 }
 
 /// Whether the formatter writes this cell as a character (rather than
@@ -488,8 +576,8 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
     try w.writeAll("\x1b[0m");
 }
 
-/// Step 5.4: the live cursor's pen, hyperlink, protection and character
-/// sets, after the clean slate.
+/// Step 5.4: the live cursor's pen, hyperlink, protection (with the
+/// screen's protection mode) and character sets, after the clean slate.
 fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
     const cursor = &screen.cursor;
     try w.print("{f}", .{cursor.style.formatterVt()});
@@ -497,7 +585,16 @@ fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
         .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
         .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
     };
-    if (cursor.protected) try w.writeAll("\x1b[1\"q");
+    // The screen's most recent protection mode, which erases follow even
+    // once protection is off (ISO protects from EL and ED, DEC only from
+    // their selective forms), then the cursor's protection in it. Written
+    // last for the screen, since printing a protected edge cell above
+    // switched the mode to DEC.
+    switch (screen.protected_mode) {
+        .off => {},
+        .iso => try w.writeAll(if (cursor.protected) "\x1bV" else "\x1bV\x1bW"),
+        .dec => try w.writeAll(if (cursor.protected) "\x1b[1\"q" else "\x1b[1\"q\x1b[0\"q"),
+    }
     try writeCharsets(w, &screen.charset);
 }
 
@@ -543,13 +640,14 @@ fn writeKittyStack(w: *Writer, screen: *const Screen) Writer.Error!void {
 }
 
 /// Modes with the given replay mark, where they differ from Ghostty's
-/// default. Insert mode is left to the caller, and the mouse modes are
-/// written from the effective mouse state.
+/// default. Insert mode and wraparound are left to the caller, and the
+/// mouse modes are written from the effective mouse state.
 fn writeModes(w: *Writer, t: *const Terminal, which: modes.Replay) Writer.Error!void {
     for (modes.table) |e| {
         if (e.replay != which) continue;
         switch (e.mode) {
             .insert,
+            .wraparound,
             .mouse_event_x10,
             .mouse_event_normal,
             .mouse_event_button,

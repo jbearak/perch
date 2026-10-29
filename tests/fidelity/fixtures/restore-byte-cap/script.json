@@ -1,0 +1,26 @@
+{
+  "description": "a restore past its byte limit falls back to the prologue, the notice and the nudge",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 256
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "byte_cap": 256
+      }
+    }
+  ]
+}

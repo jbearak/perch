@@ -1,0 +1,48 @@
+{
+  "description": "zsh-right-prompt: recorded by record.sh at 80x24, restored before the program's own exit",
+  "recorded_by": "record.sh",
+  "size": [
+    80,
+    24
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 1262
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          80,
+          24
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "cursor after the left prompt",
+            "cursor_x": 10
+          },
+          {
+            "name": "right prompt kept",
+            "contains": "[1] right"
+          }
+        ]
+      }
+    },
+    {
+      "feed": null
+    }
+  ]
+}

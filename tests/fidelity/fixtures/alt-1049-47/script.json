@@ -1,0 +1,109 @@
+{
+  "description": "enter the alternate screen with 1049, leave with 47, then re-enter with 1049",
+  "generated_by": "gen/synthetic.mjs",
+  "size": [
+    40,
+    8
+  ],
+  "scrollback": 1000,
+  "stream": "stream.bin",
+  "actions": [
+    {
+      "feed": 102
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          40,
+          8
+        ],
+        "scrollback": 1000,
+        "assert": [
+          {
+            "name": "primary saved cursor",
+            "saved": {
+              "screen": "primary",
+              "at": [
+                9,
+                5
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "exit_alt": {
+        "mode": 47,
+        "then": "back"
+      }
+    },
+    {
+      "feed": 3
+    },
+    {
+      "restore": {
+        "mode": "screen",
+        "size": [
+          40,
+          8
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "feed": 16
+    },
+    {
+      "restore": {
+        "mode": "full",
+        "size": [
+          40,
+          8
+        ],
+        "scrollback": 1000
+      }
+    },
+    {
+      "exit_alt": {
+        "mode": 47,
+        "then": ""
+      }
+    },
+    {
+      "feed": 3
+    }
+  ],
+  "known": [
+    {
+      "match": "alternate",
+      "where": "restore 1 after",
+      "reason": "a restore made on the primary screen does not carry the hidden alternate screen (its contents and saved cursor), which the program finds again on re-entering it; the design restores the alternate screen only while the program is on it"
+    },
+    {
+      "match": "cursor: ",
+      "where": "restore 1 after",
+      "reason": "a restore made on the primary screen does not carry the hidden alternate screen (its contents and saved cursor), which the program finds again on re-entering it; the design restores the alternate screen only while the program is on it"
+    },
+    {
+      "match": "savedAlternate",
+      "where": "restore 1 after",
+      "reason": "a restore made on the primary screen does not carry the hidden alternate screen (its contents and saved cursor), which the program finds again on re-entering it; the design restores the alternate screen only while the program is on it"
+    },
+    {
+      "match": "alternate line",
+      "where": "restore 2 (xterm",
+      "reason": "xterm.js clears its alternate buffer when the program leaves it; Ghostty keeps it, so re-entering with 47 shows the old contents in the model and the restore"
+    }
+  ],
+  "known_tmux": [
+    {
+      "restores": [
+        1,
+        2
+      ],
+      "reason": "tmux keeps one saved cursor for both screens, so ESC 8 after the program leaves the alternate screen goes elsewhere in the original; Ghostty and xterm.js keep one per screen and agree with the restore"
+    }
+  ]
+}
