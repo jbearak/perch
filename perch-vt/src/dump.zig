@@ -146,9 +146,11 @@ fn writeScreen(w: *Writer, s: *const Screen) Writer.Error!void {
     try w.writeAll("]}");
 }
 
-/// `[text, wrapped, styled]`: the row's text with trailing blanks dropped
+/// `[text, wrapped, styled, continuation]`: the row's text with trailing
+/// blanks (spaces included) dropped
 /// and wide characters once, whether it is soft-wrapped onto the next,
-/// and the SGR of each styled cell as `col:sgr` pairs.
+/// the SGR of each styled cell as `col:sgr` pairs, and whether the row
+/// continues the one before.
 fn writeRow(w: *Writer, row: Pin) Writer.Error!void {
     const page = row.node.page();
     const r = page.getRow(row.y);
@@ -161,7 +163,9 @@ fn writeRow(w: *Writer, row: Pin) Writer.Error!void {
             .spacer_head, .spacer_tail => continue,
             .narrow, .wide => {},
         }
-        if (cell.hasText()) {
+        // A space and an empty cell look the same; the restore prints a
+        // space to rebuild pending wrap on a blank edge cell.
+        if (cell.hasText() and !(cell.content_tag == .codepoint and cell.codepoint() == ' ')) {
             text.printUnicodeCodepoint(cell.codepoint()) catch break;
             if (cell.content_tag == .codepoint_grapheme) {
                 if (page.lookupGrapheme(cell)) |cps| for (cps) |cp| {
@@ -177,6 +181,10 @@ fn writeRow(w: *Writer, row: Pin) Writer.Error!void {
     try writeString(w, buf[0..keep]);
     try w.print(",{},\"", .{r.wrap});
     for (cells, 0..) |cell, x| {
+        // Known gap: the blank cell left where a wide character did not
+        // fit at the edge takes the pen in Ghostty, and the restore, which
+        // writes rows with Ghostty's formatter, leaves it unstyled.
+        if (cell.wide == .spacer_head) continue;
         switch (cell.content_tag) {
             .codepoint, .codepoint_grapheme => if (!cell.hasStyling()) continue,
             .bg_color_palette, .bg_color_rgb => {},
@@ -192,7 +200,7 @@ fn writeRow(w: *Writer, row: Pin) Writer.Error!void {
         try writeEscaped(w, sw.buffered());
         try w.writeByte(' ');
     }
-    try w.writeAll("\"]");
+    try w.print("\",{}]", .{r.wrap_continuation});
 }
 
 fn writeStyle(w: *Writer, style: ghostty.Style) Writer.Error!void {

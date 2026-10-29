@@ -286,8 +286,10 @@ const Builder = struct {
         try writePen(w, active);
 
         // Last of all: in insert mode the edge cell printed above would have
-        // pushed the row right.
+        // pushed the row right, and without wraparound it would have been
+        // printed over itself, losing a combining mark.
         if (t.modes.get(.insert)) try w.writeAll("\x1b[4h");
+        if (!t.modes.get(.wraparound)) try w.writeAll("\x1b[?7l");
     }
 };
 
@@ -299,12 +301,46 @@ const RowWriter = struct {
 
     fn write(self: *RowWriter, w: *Writer, row: Pin) Writer.Error!void {
         if (self.prev) |prev| {
-            if (!joins(prev, row)) try w.writeAll(self.sep);
+            if (!joins(prev, row)) {
+                try w.writeAll(self.sep);
+            } else if (startsWithBackground(row)) {
+                try writeWrapPrimer(w, row);
+            }
         }
         try writeRowCells(w, row);
         self.prev = row;
     }
 };
+
+/// Whether the row's first cell has a background color. Printing it is
+/// what makes the terminal wrap onto the row, and a wrap at the bottom of
+/// the screen scrolls, filling the new row with the current background.
+fn startsWithBackground(row: Pin) bool {
+    const page = row.node.page();
+    const cell = page.getCells(page.getRow(row.y))[0];
+    return switch (cell.content_tag) {
+        .bg_color_palette, .bg_color_rgb => true,
+        .codepoint, .codepoint_grapheme => cell.hasStyling() and
+            page.styles.get(page.memory, cell.style_id).bg_color != .none,
+    };
+}
+
+/// Wrap onto the row with the default pen, by printing its first
+/// character, and step back over it so the row is then written as usual.
+fn writeWrapPrimer(w: *Writer, row: Pin) Writer.Error!void {
+    const page = row.node.page();
+    const cell = page.getCells(page.getRow(row.y))[0];
+    try w.writeAll("\x1b[0m");
+    if (cell.hasText()) {
+        try w.printUnicodeCodepoint(cell.codepoint());
+        if (cell.content_tag == .codepoint_grapheme) {
+            if (page.lookupGrapheme(&page.getCells(page.getRow(row.y))[0])) |cps| for (cps) |cp| try w.printUnicodeCodepoint(cp);
+        }
+    } else {
+        try w.writeByte(' ');
+    }
+    try w.writeAll(if (cell.wide == .wide) "\x08\x08" else "\x08");
+}
 
 /// One row's cells, with styles and hyperlinks, ending with both closed.
 fn writeRowCells(w: *Writer, row: Pin) Writer.Error!void {
@@ -325,7 +361,28 @@ fn joins(prev: Pin, row: Pin) bool {
     const page = row.node.page();
     const this_row = page.getRow(row.y);
     if (!this_row.wrap_continuation) return false;
-    return endsAtEdge(prev_page.getCells(prev_row)) and printsAsText(page.getCells(this_row)[0]);
+    const prev_cells = prev_page.getCells(prev_row);
+    const first = page.getCells(this_row)[0];
+    // A row ending where a wide character did not fit leaves the cursor
+    // before the edge, so only that wide character wraps by itself. With
+    // left and right margins, the continuation can start with older text.
+    if (prev_cells[prev_cells.len - 1].wide == .spacer_head and first.wide != .wide) return false;
+    // The formatter writes nothing for a row with neither text nor a
+    // background-only cell, whatever its other styles.
+    if (!rowPrints(page.getCells(this_row)) or !rowPrints(prev_cells)) return false;
+    return endsAtEdge(prev_cells) and printsAsText(first);
+}
+
+/// The formatter's test for a row it writes at all.
+fn rowPrints(cells: []const Cell) bool {
+    for (cells) |*cell| {
+        if (cell.hasText()) return true;
+        switch (cell.content_tag) {
+            .bg_color_palette, .bg_color_rgb => return true,
+            .codepoint, .codepoint_grapheme => {},
+        }
+    }
+    return false;
 }
 
 /// Whether the formatter writes this cell as a character (rather than
@@ -543,13 +600,14 @@ fn writeKittyStack(w: *Writer, screen: *const Screen) Writer.Error!void {
 }
 
 /// Modes with the given replay mark, where they differ from Ghostty's
-/// default. Insert mode is left to the caller, and the mouse modes are
-/// written from the effective mouse state.
+/// default. Insert mode and wraparound are left to the caller, and the
+/// mouse modes are written from the effective mouse state.
 fn writeModes(w: *Writer, t: *const Terminal, which: modes.Replay) Writer.Error!void {
     for (modes.table) |e| {
         if (e.replay != which) continue;
         switch (e.mode) {
             .insert,
+            .wraparound,
             .mouse_event_x10,
             .mouse_event_normal,
             .mouse_event_button,

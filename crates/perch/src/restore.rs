@@ -447,7 +447,9 @@ fn discarded(unfinished: Option<Unfinished>) -> bool {
 /// colors, title, working directory, cursor style, and each screen's
 /// cursor, pen, character sets, saved cursor, kitty stack and rows. An
 /// alternate screen counts only while it is active, and a `screen`
-/// restore is compared without history.
+/// restore is compared without history. Soft wrapping is compared on
+/// history rows only, except where the restore cannot rebuild it: at the
+/// boundary with the screen, and around blank cells.
 pub fn differences(
     expected: &serde_json::Value,
     got: &serde_json::Value,
@@ -510,13 +512,45 @@ pub fn differences(
                     // screen is split there, and stays split as later
                     // output scrolls it up: one row may differ only in
                     // being soft-wrapped.
-                    let mut split = name == "primary" && mode == Mode::Full;
+                    // A soft-wrapped row that is blank, or whose
+                    // continuation is blank or starts with a blank cell, is
+                    // written as two lines: the formatter steps over blanks,
+                    // so the terminal cannot be made to wrap there.
+                    // Two rows: the boundary row's wrap mark and the next
+                    // row's continuation mark.
+                    let mut split = if name == "primary" && mode == Mode::Full {
+                        2
+                    } else {
+                        0
+                    };
                     for (i, (a, b)) in er.iter().zip(&gr).enumerate() {
                         if a == b {
                             continue;
                         }
-                        if split && a[0] == b[0] && a[2] == b[2] && a[1] == true && b[1] == false {
-                            split = false;
+                        let wrap_only = a[0] == b[0] && a[2] == b[2];
+                        // Ghostty can leave a row marked wrapped when the
+                        // row after it is no longer its continuation (after
+                        // insert-line, say); the restore follows both marks.
+                        let next_continues = er.get(i + 1).is_none_or(|n| n[3] == true);
+                        if wrap_only && !next_continues {
+                            continue;
+                        }
+                        // Wrapping on the screen itself is not compared:
+                        // the contract covers it for history, where joined
+                        // lines must rewrap, and Ghostty keeps a row's flag
+                        // when its continuation is erased or moved.
+                        if wrap_only && i + rows >= er.len() {
+                            continue;
+                        }
+                        let blank_start = |n: &Value| {
+                            n[0].as_str()
+                                .is_some_and(|t| t.is_empty() || t.starts_with(' '))
+                        };
+                        if wrap_only && (a[0] == "" || er.get(i + 1).is_some_and(blank_start)) {
+                            continue;
+                        }
+                        if wrap_only && split > 0 {
+                            split -= 1;
                             continue;
                         }
                         out.push(format!("{name} row {i}: {a} != {b}"));

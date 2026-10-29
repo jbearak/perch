@@ -149,9 +149,10 @@ function compareXterm(A, B, { mode, history }) {
 function compareModel(expected, B, { mode }) {
   const out = [];
   const screens = expected.screens;
-  const primary = screens.primary.rows.map((r) => r[0]);
+  // The model's rows drop trailing spaces; so does this comparison.
+  const primary = screens.primary.rows.map((r) => r[0].trimEnd());
   let want = primary;
-  let got = B.normal.map((l) => l.text);
+  let got = B.normal.map((l) => l.text.trimEnd());
   if (mode === 'screen') {
     want = want.slice(want.length - expected.rows);
     got = got.slice(got.length - B.rows);
@@ -163,8 +164,8 @@ function compareModel(expected, B, { mode }) {
     if (want[i] !== got[i]) out.push(`normal row ${i}: model ${JSON.stringify(want[i])} != ${JSON.stringify(got[i])}`);
   }
   if (expected.active === 'alternate') {
-    const alt = screens.alternate.rows.map((r) => r[0]);
-    const galt = (B.alternate ?? []).map((l) => l.text);
+    const alt = screens.alternate.rows.map((r) => r[0].trimEnd());
+    const galt = (B.alternate ?? []).map((l) => l.text.trimEnd());
     for (let i = 0; i < Math.max(alt.length, galt.length); i++) {
       if (alt[i] !== galt[i]) out.push(`alternate row ${i}: model ${JSON.stringify(alt[i])} != ${JSON.stringify(galt[i])}`);
     }

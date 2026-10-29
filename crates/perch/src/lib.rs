@@ -15,6 +15,8 @@ pub mod procinfo;
 pub mod proto;
 pub mod queries;
 pub mod restore;
+#[cfg(feature = "test-hooks")]
+pub mod restore_check;
 pub mod runtime;
 pub mod selfinstall;
 pub mod supervisor;
