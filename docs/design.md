@@ -1,6 +1,6 @@
 # Perch design
 
-Status: draft for review, revision 3. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: draft for review, revision 4. This document turns [brief.md](brief.md) into decisions. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -65,7 +65,7 @@ The PTY is created with the window size and termios of the terminal `perch new` 
 
 **When `perch new` is going to attach** (the default, and how the extension creates every session), the supervisor forks the program only after that client's attach handshake. The program's first output then goes to a live terminal, and its startup queries are answered by the real terminal, not by Perch. If the attach handshake has not arrived 30 seconds after readiness (the creating process died, or the user closed the terminal at once), the supervisor removes its directory and exits without starting the program.
 
-The program runs in a new session with the PTY slave as its controlling terminal. Before `exec`, the child closes every descriptor except 0, 1 and 2, plus one close-on-exec pipe back to the supervisor, and restores default signal dispositions. If `exec` fails, the child writes the error to the pipe. If it succeeds, the pipe closes with nothing written. Only then does the supervisor record `state: "running"`. An exec failure ends the session at once with the error, which the attached creator prints.
+The program runs in a new session with the PTY slave as its controlling terminal. The supervisor records the creator's umask and working directory (or `--cwd`) before changing its own. Before `exec`, the child restores that umask, changes to that directory, clears the signal mask, restores default signal dispositions, and closes every descriptor except 0, 1 and 2, plus one close-on-exec pipe back to the supervisor. Resource limits and niceness are inherited from the creator unchanged. If `exec` fails, the child writes the error to the pipe. If it succeeds, the pipe closes with nothing written. Only then does the supervisor record `state: "running"`. An exec failure ends the session at once with the error, which the attached creator prints.
 
 `running` means the program started. It does not mean the program is ready for input. Readiness that matters to an integration, such as Raven's console socket accepting connections, is the integration's own check.
 
@@ -228,19 +228,23 @@ The cost is a second PTY hop, which tmux, dtach and abduco all have too.
 
 **Conditional attach.** `attach --if-detached` asks the supervisor to attach only if no client is live, decided atomically inside the supervisor. Automatic restores use it, so two windows restoring at once cannot take a session from each other. User-initiated opens take over, after confirmation when needed.
 
-**Detach.** Closing the terminal detaches. So does `perch detach` from inside the session, and the detach key `Ctrl-\`, the dtach and abduco default. `Ctrl-\` sends SIGQUIT in a cooked terminal, which kills R with a core dump, so intercepting it removes a hazard. `--detach-key none` turns it off.
+**Detach.** Closing the terminal detaches. So does `perch detach` from inside the session, and, in the CLI, the detach key `Ctrl-\`, the dtach and abduco default. `Ctrl-\` sends SIGQUIT in a cooked terminal, which kills R with a core dump, so intercepting it there removes a hazard. The extension passes `--detach-key none`, because closing the terminal already detaches, and Neovim users need `Ctrl-\ Ctrl-N`. The client recognizes the key in its legacy byte form and in the CSI-u forms that the kitty keyboard protocol and modifyOtherKeys produce.
 
 **Nesting.** Inside a session `PERCH_SESSION_ID` is set. `perch attach` refuses to attach a session to itself.
 
 ### Flow control
 
-A client can stop reading: a frozen window, a dead SSH link, or VS Code's pty host pausing output it has not had acknowledged. The program must not stall because of that, so:
+A client can read slowly (xterm.js parses far slower than `cat` writes) or stop reading altogether (a frozen window, a dead SSH link, VS Code's pty host pausing output it has not had acknowledged). The first should slow the program down, as any terminal does. The second must not stall the program. So:
 
-- The supervisor always reads the PTY master and feeds the model, whether or not anyone is reading.
-- Each client has an output queue capped at 4 MiB. If a write would block, output waits in the queue. Restore frames count against the same cap, and history in a full restore is trimmed to fit, so a restore can never overflow the queue by itself.
-- Output frames carry an epoch number. If the queue overflows, the supervisor drops every queued frame of the current epoch, marks the client as lagging and starts a new epoch. Bytes that were already written to the socket cannot be recalled, and they may end in the middle of an escape sequence or a UTF-8 character. That is what the restore prologue handles.
-- When the client's socket is writable again, the supervisor sends a **resync**: the restore prologue and the current screen, with no history (see below). The terminal already has the history. Then live output resumes in the new epoch. mosh resynchronizes in a similar way.
-- More than 3 resyncs in 60 seconds means this client cannot keep up with this program. The supervisor detaches it with the reason `too_slow`. The client says so and offers to reattach.
+- Each client has an output queue of whole frames, capped at 4 MiB.
+- **Slow client: backpressure.** While the queue is full but the client's socket is still accepting bytes, the supervisor stops reading the PTY master, as dtach and a plain terminal would. The program blocks on its next write until the client catches up.
+- **Stalled client: drop and resync.** If the socket accepts no bytes for 5 seconds, the client is stalled. The supervisor finishes nothing it has not started: the frame partly written to the socket stays, so framing is never broken, and every frame not yet started is dropped. The supervisor marks the client as lagging, resumes reading the PTY into the model, and starts a new epoch. When the socket is writable again, it sends a resync (below) and resumes live output.
+- So the program waits at most 5 seconds for a client that has stopped reading.
+- Bytes already written before a drop may end inside an escape sequence or a UTF-8 character. The restore prologue handles that.
+- 3 stalls within 10 minutes means this client cannot keep up. The supervisor detaches it with the reason `too_slow`, and the client says so and offers to reattach.
+- `perch attach` reads frames from the socket only as fast as it can write them to its own terminal, and never buffers more than one frame. Otherwise flow control would move into the client's memory and the supervisor would never see the lag.
+
+Restores are sent as a sequence of ordinary output frames, so a large one is chunked like any output. Their size is bounded: the screen is clamped to 1000 by 1000 cells and at most 250,000 cells, and history in a full restore is trimmed so the whole restore fits in the 4 MiB queue.
 
 ### Restore on attach
 
@@ -256,41 +260,52 @@ A client can stop reading: a frozen window, a dead SSH link, or VS Code's pty ho
 
 The emulator sits behind a small internal interface (`feed`, `resize`, `cursor`, `screen`, `history`), so libghostty-vt or another emulator can replace it later. libghostty-vt is the most complete candidate, but it is pre-1.0 and needs Zig in the build for six targets. avt is pinned to an exact version.
 
-**History** is avt's own primary-screen scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines, about 20 MB at 120 columns. History lines reflow when the size changes. History is rebuilt from cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
+**History** is avt's own primary-screen scrollback. Its length is set when the session is created: the extension passes `terminal.integrated.scrollback` (VS Code's default is 1,000 lines), and the CLI defaults to 1,000. The ceiling is 10,000 lines and a budget of 1.2 million cells, about 20 MB, whichever is smaller at the session's width. At 120 columns both allow 10,000 lines. History lines reflow when the size changes. History is rebuilt from cells, not replayed from raw output, so it never contains queries, clipboard writes (OSC 52), shell integration marks or cursor-movement sequences.
 
 **Model input.** avt takes characters, and the PTY produces bytes. An incremental UTF-8 decoder sits in front of avt. It holds up to 3 bytes of an incomplete character between reads and turns invalid bytes into U+FFFD, one per maximal invalid sequence. Its pending bytes are part of a restore's tail (below). The model assumes UTF-8. A program writing another encoding still reaches the terminal unchanged while attached, but its restored screen shows replacement characters.
 
 The mode and query parser (below) reads the same bytes in the same order. Each read is processed in one pass: the parser finds the byte offsets of queries, the model is fed up to each query before Perch answers it, so DSR 6 reports the cursor where the program asked. RIS (`ESC c`) and DECSTR (`ESC [!p`) reset the parser's modes as they reset the model.
 
-**Two kinds of restore.**
+**Snapshot boundary.** A restore is always taken where both parsers are at rest: the mode parser in its ground state and the UTF-8 decoder holding no partial character. If a restore is due while the program is in the middle of a sequence, the supervisor feeds the model only up to the end of that sequence, takes the snapshot there, and sends the rest of that read as live output after the restore. avt's `dump()` then has no unfinished-sequence tail, and nothing is sent twice.
 
-- A **full restore** is sent on every attach, including a takeover back into a terminal that was showing this session before.
-- A **resync** is sent to a client that fell behind (see [Flow control](#flow-control)).
+If the program stays in the middle of a sequence for 1 second with no further output, the supervisor takes the snapshot anyway. avt's dump then ends with the start of the unfinished sequence, written with 8-bit C1 introducers (for example U+009B for CSI). Perch rewrites those to 7-bit (`ESC [`, `ESC ]`, `ESC P`) because terminals other than xterm.js may not accept C1, and appends the decoder's partial bytes. The live bytes that follow complete the sequence. One case differs: avt keeps only the introducer of an unfinished DCS, APC, PM or SOS string, not its parameters or payload. For those, Perch removes the introducer from the dump and has the mode parser swallow the rest of the string, up to its terminator, from that client's live output.
 
-Both begin with the same **prologue**, which puts any terminal into a known state:
+**Three restore modes.** The client chooses one in its attach frame.
 
-1. `CAN` (0x18), which aborts an escape sequence or control string that a dropped frame left open. If the client had written part of a UTF-8 character, the next byte ends it as a replacement character.
-2. `ESC [?1049l` to leave the alternate screen if the terminal is in it, then DECSTR (`ESC [!p`), the soft reset: scroll margins, origin mode, insert mode, character sets, SGR and cursor visibility all go back to defaults.
+- `full`: prologue, then history, then screen. The extension uses it for terminals it created, which start empty.
+- `screen`: prologue, then screen, no history, and no erasing of the terminal's scrollback. The CLI's default, because `perch attach` typed into iTerm, Terminal.app or tmux must not wipe what the user already had there.
+- `none`: used for the first attach of `perch new`. The program has not started, so there is nothing to restore.
 
-A **full restore** then:
+A **resync** after a stall is a `screen` restore. Its contract is weaker: lines that scrolled off while output was being dropped are missing from the terminal's scrollback.
 
-1. Resizes the model and then the PTY to the client's size, clamped between 1 by 1 and 1000 by 1000. If the size changed, the kernel delivers SIGWINCH and the program redraws as it would for any resize. If it did not change, Perch forces no redraw, because the model is already correct and forced redraws make some line editors print a second prompt.
+**The prologue** puts any terminal into a known state. In order:
+
+1. `CAN` (0x18), which aborts an escape sequence or control string that a dropped frame left open. A partial UTF-8 character ends as a replacement character at the next byte. `OSC 8 ; ; ST` then closes any open hyperlink.
+2. If the client may be in the alternate screen, pop its kitty keyboard stack (`CSI < 99 u`), then leave the alternate screen (`ESC [?1049l`). Pop the main screen's kitty stack too. Kitty keeps a stack per screen.
+3. DECSTR (`ESC [!p`), followed by explicit resets for terminals that implement DECSTR partly or not at all: `ESC [r`, `ESC [0m`, `ESC [4l`, `ESC [?6l`, `ESC [?7h`, `ESC [?1l`, `ESC (B`, `ESC [?25h`, `ESC >`, and `l` for the private modes 9, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004 and 2026.
+
+**Ordering around the dump.** avt's `dump()` assumes the terminal is in its default state when it draws, and it emits only the modes that differ from default, at the end. So the modes avt tracks (cursor keys, origin, autowrap, cursor visibility, insert, character sets, alternate screen) are reset by the prologue and set only by the dump. The modes only Perch tracks are set after the dump, and only those that differ from default.
+
+A **full restore**, after the prologue:
+
+1. Resizes the model and then the PTY to the client's size, clamped as above. If the size changed, the kernel delivers SIGWINCH and the program redraws as it would for any resize. If it did not change, Perch forces no redraw, because the model is already correct and forced redraws make some line editors print a second prompt.
 2. Clears the screen and the terminal's scrollback (`ESC [H ESC [2J ESC [3J`).
-3. Sends history as logical lines, with SGR codes, joining soft-wrapped rows so the terminal wraps them at its own width. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width with wide characters counted as two columns, and that fits the queue cap. Then it sends one newline per screen row, which pushes the history above the viewport. Erasing the screen in xterm.js does not move lines into scrollback, so without the newlines the next step would erase the end of the history.
-4. Homes the cursor and clears the screen (`ESC [H ESC [2J`), then sends an explicit set or reset for every mode Perch tracks, then avt's `dump()`.
-5. Sends the tail: avt's unfinished escape sequence, if any, then the UTF-8 decoder's pending bytes. The live bytes that follow complete them. avt writes the start of an unfinished sequence with 8-bit C1 introducers (for example U+009B for CSI). Perch rewrites them to 7-bit (`ESC [`, `ESC ]`, `ESC P`) because terminals other than xterm.js may not accept C1. avt keeps only the introducer of an unfinished DCS, APC, PM or SOS string, not its payload. Such a string is dropped, and the prologue's CAN has already cancelled it on the client's side.
-6. Switches the client to live passthrough.
+3. Sends history as logical lines with SGR codes, joining soft-wrapped rows so the terminal wraps them at its own width. It sends the most recent history that fits in the client's scrollback limit, counted in rows at the client's width with wide characters counted as two columns, and that fits the queue cap. Then it scrolls the history just above the viewport with newlines, so that clearing the screen next does not erase it (erasing the screen in xterm.js does not move lines into scrollback).
+4. Homes the cursor and clears the screen (`ESC [H ESC [2J`), sends avt's `dump()`, then the modes only Perch tracks.
+5. Switches the client to live passthrough.
 
-A **resync** sends the prologue, then steps 4 to 6. It sends no history, because the terminal still has it.
+A `screen` restore does the same without steps 2 and 3.
 
-**Input modes.** avt tracks cursor keys, origin, autowrap, cursor visibility and the alternate screen. Its parser drops other private modes, so a small parser of Perch's own (the `vte` crate, Apache-2.0 or MIT) tracks the rest: bracketed paste (2004), mouse reporting (9, 1000, 1002, 1003) and encodings (1005, 1006), focus reporting (1004), application keypad (`ESC =` and `ESC >`), the kitty keyboard flags stack (`CSI > u` push, `CSI < u` pop, `CSI = u` set, up to 16 entries), the window title (OSC 0 and 2) and the working directory (OSC 7). The same parser finds terminal queries.
+**Input modes.** avt tracks cursor keys, origin, autowrap, cursor visibility, insert mode, character sets and the alternate screen. Its parser drops other private modes, so a small parser of Perch's own (the `vte` crate, Apache-2.0 or MIT) tracks the rest: bracketed paste (2004), mouse reporting (9, 1000, 1002, 1003) and encodings (1005, 1006, 1015, 1016), focus reporting (1004), alternate scroll (1007), synchronized output (2026), application keypad (`ESC =` and `ESC >`), the kitty keyboard flags stack for each screen (`CSI > u` push, `CSI < u` pop, `CSI = u` set, up to 16 entries each), the window title (OSC 0 and 2), the working directory (OSC 7), and whether the program is inside a control string. On RIS it resets everything. On DECSTR it resets what xterm.js resets: the modes above except title and working directory. The same parser finds terminal queries.
 
 **Fidelity contract.** After a full restore into xterm.js, at the client's size:
 
 - Each visible cell of the active screen has the model's character, foreground and background color (16, 256 or RGB), and bold, faint, italic, underline, blink, inverse and strikethrough. The cursor is where the model has it.
 - After the program leaves the alternate screen, the primary screen is the model's primary screen.
 - Every mode in the list above matches the program's last setting.
-- History has the right text and colors in the right order, with no line duplicated or missing at the boundary with the screen, up to the client's scrollback limit.
+- History has the right text and colors in the right order, with no line duplicated or missing at the boundary with the screen and no blank row between them, up to the client's scrollback limit. A logical line that continues from history onto the top row of the screen is split there: the terminal will not rejoin it if the user later resizes.
+
+The contract applies to `full` restores. A `screen` restore meets the first three points.
 
 Not covered: grapheme clusters (avt stores one character per cell, so combining marks and joined emoji lose their extra code points), underline styles and colors, hyperlinks (OSC 8), images (sixel, kitty graphics), double-width lines, the payload of an unfinished control string, and any other terminal state neither avt nor the mode parser tracks.
 
@@ -300,14 +315,16 @@ The plan's first milestone tests this contract against xterm.js (headless), and 
 
 Programs ask the terminal questions by writing escape sequences and reading the reply from their input. With no terminal attached, nothing answers.
 
-**Who answers.** For each query, exactly one party answers.
+**Who answers.** For each query, at most one party answers.
 
-- Ownership passes to a client when the supervisor enqueues that client's full restore or resync. Every query the program wrote before that point is answered by the supervisor and is not in the restore, which is built from the model. Every query after that point reaches the client in its live output, and the real terminal answers.
-- With no client, or a lagging client, the supervisor answers as it parses each query.
-- The supervisor keeps a list of queries forwarded to the live client and not yet answered, with each query's kind and its position in the client's output. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same `vte` parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged, so a keystroke that happens to look like a reply (Shift+F3 sends `CSI 1;2 R` in some terminals) costs nothing worse than a missed answer later.
-- On a queue overflow, outstanding queries whose position falls in dropped output never reached the client. The supervisor answers them at once. Queries already written to the socket stay outstanding.
-- On detach or takeover, the supervisor answers every outstanding query at once. It discards input from a client after detaching it, so a late reply from the old terminal cannot reach the program twice.
+- Ownership passes to a client when the supervisor enqueues that client's restore. Snapshots are taken at a ground state (above), so no query straddles the change. Every query the program wrote before that point is answered by the supervisor and is not in the restore, which is built from the model. Every query after that point reaches the client in its live output, and the real terminal answers.
+- With no client, or a lagging client, the supervisor answers each query as it parses it.
+- The supervisor keeps a list of queries forwarded to the live client and not yet answered. Each entry records the query's kind, its position in the client's output, and, for DSR 6, the cursor position at the moment of the query. It recognizes the client's replies by their shape (`CSI <r>;<c> R` for DSR 6, `CSI 0 n` for DSR 5, `CSI ? ... c` for DA1, `CSI > ... c` for DA2) with the same `vte` parser running over client input, and removes the oldest outstanding query of that kind. This matching is bookkeeping only. Client input always passes to the program unchanged.
+- When the supervisor drops output after a stall, outstanding queries whose position falls in dropped frames never reached the client. The supervisor answers them at once, using the recorded cursor position.
+- Before it detaches a client or lets another take over, the supervisor reads whatever that client has already sent, without blocking, and processes it as normal input. It then answers every query still outstanding, using the recorded positions, and from then on discards input from that client. A reply the old terminal sends later never reaches the program.
 - A query the live client leaves unanswered for 2 seconds is dropped from the list without an answer, as with a real terminal that does not support it.
+
+**Limits of the guarantee.** A keystroke that has the shape of a reply (Shift+F3 sends `CSI 1;2 R` in some terminals) can be counted as the answer to an outstanding DSR 6. If the client then detaches before the terminal's real reply, that query goes unanswered and the program waits for its own timeout. Perch never sends a second reply to a query it has seen answered. Duplicate replies are worse than a missed one, because a stray reply arrives as typed text.
 
 **What it answers.**
 
@@ -380,7 +397,9 @@ perch new [options] -- <command> [args...]   start a session (attaches unless -d
     --cwd DIR  --env NAME=VALUE  --link-env NAME  --label LABEL
     --scrollback LINES (default 1000, at most 10000)  -d, --detached
 perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]
-    [--scrollback LINES]                      rows of history to replay (default 1000)
+    [--restore full|screen] [--scrollback LINES]
+                                              default --restore screen; exit 75 if
+                                              --if-detached finds a live client
 perch list [--json] [--all]                   --all includes exited and lost sessions
 perch info <session> [--json]
 perch send <session> [--text TEXT | --stdin] [--paste] [--submit]
@@ -403,11 +422,11 @@ perch version [--json]
 
 **Binary.** The extension makes sure its bundled binary is executable (mode 0755) on activation, in case a registry's archive dropped the bit. A supervisor keeps running after an update deletes the extension's directory, because the kernel keeps a running program's file alive.
 
-Users need `perch` inside sessions (`perch detach`) and over plain SSH (`perch attach` from a phone). The bundled path changes with every update, so on activation the extension copies the binary to a stable place, `<globalStorage>/bin/<os>-<arch>/perch`, by writing a temporary file and renaming it. Global storage survives updates. The `<os>-<arch>` part keeps a home directory shared between x64 and arm64 hosts working. The extension replaces the copy only with a newer version, so two editors with different Perch versions do not fight over it. It then prepends that directory to `PATH` in new terminals with `context.environmentVariableCollection`, which is stable VS Code API and writes nothing to the user's rc files. It also sets `PERCH_BIN` to the copy. The setting `perch.addToPath` (default on) turns the `PATH` change off. Users who want `perch` in plain SSH sessions add the directory, which "Perch: Show Command-Line Path" prints, to their own `PATH`.
+Users need `perch` inside sessions (`perch detach`) and over plain SSH (`perch attach` from a phone). The bundled path changes with every update, so on activation the extension copies the binary to a stable place, `<globalStorage>/bin/<os>-<arch>/perch`, by writing a temporary file and renaming it. Global storage survives updates. The `<os>-<arch>` part keeps a home directory shared between x64 and arm64 hosts working. Windows with different versions of the extension can be open at once during an update, so the copy is replaced only under an exclusive `flock` on a lock file in that directory, and only by a newer version, compared under the lock. The extension itself always runs its bundled binary, never the copy. It appends that directory to `PATH` in new terminals with `context.environmentVariableCollection`, which is stable VS Code API and writes nothing to the user's rc files. Appending means a `perch` the user installed themselves still wins. It also sets `PERCH_BIN` to the copy. The `PATH` change applies to every new terminal in the editor, not only Perch's, and the setting `perch.addToPath` (default on) and the docs say so. Users who want `perch` in plain SSH sessions add the directory, which "Perch: Show Command-Line Path" prints, to their own `PATH`.
 
-**Session list.** A "Perch" view lists every session on the host for the current user, including ones started from the CLI, whatever workspace they came from. The view's title shows the host name, so a user who lands on a different login node behind a load-balanced alias sees why their sessions are missing. Each item shows the name, a kind icon, and a description such as `R · ~/thesis · 3h · about 4.1 GB · detached`. Inline actions open and kill. Exited and lost sessions show their status, with "Show last output" and "Dismiss". The list refreshes on activation, when the window gains focus, when the view becomes visible, after the extension's own actions, and every 5 seconds while the view is visible. A status bar item shows the number of detached sessions and opens a quick pick.
+**Session list.** A "Perch" view lists every session on the host for the current user, including ones started from the CLI, whatever workspace they came from. The view's title shows the host name, so a user who lands on a different login node behind a load-balanced alias sees why their sessions are missing. Each item shows the name, a kind icon, and a description such as `R · ~/thesis · 3h · about 4.1 GB · detached`. Inline actions open and kill. Exited and lost sessions show their status, with "Show last output" and "Dismiss". The list refreshes on activation, when the window gains focus, when the view becomes visible, after the extension's own actions, and every 5 seconds while the view is visible. While the view is hidden it still refreshes every 30 seconds, which is how `onDidEndSession` and the status bar count notice a session that ended overnight. A status bar item shows the number of detached sessions and opens a quick pick.
 
-**Open.** Opening a session creates a terminal running `perch attach <id> --label <label>`, named after the session. If another client is attached, the extension asks first: "R: thesis is open in another window. Move it here?" Opening never changes the workspace.
+**Open.** Opening a session creates a terminal running `perch attach <id> --label <label> --restore full --detach-key none`, named after the session. If another client is attached, the extension asks first: "R: thesis is open in another window. Move it here?" Opening never changes the workspace.
 
 **Kill** asks for confirmation in a modal that shows name, kind, working directory, age and memory, as the brief requires.
 
@@ -431,8 +450,8 @@ Every session the extension creates starts inside a VS Code terminal, so the pro
 Perch terminals are created with `isTransient: true`, so VS Code does not revive them itself. That avoids duplicates and terminals revived with stale environments. Instead:
 
 - **On activation, adopt first.** Any terminal in `vscode.window.terminals` that Perch recognizes from its `creationOptions` is adopted as-is. After an extension host restart, those terminals and their attach processes are still alive.
-- **Then restore.** In a window with a workspace, the extension keeps the IDs of sessions attached there in `workspaceState`. For each one still running and not already adopted, it runs `perch attach --if-detached`. If the session is attached by a client with this workspace's key, that may be the previous incarnation of this window still exiting during a reload, so the extension retries for up to 3 seconds. If it is still attached after that, or attached from another workspace, the user is working with it elsewhere and the extension leaves it there. Restore never takes a session from a live client. Empty windows have no workspace state, so they restore nothing. The setting `perch.restoreTerminals` (default on) turns restoring off.
-- **What counts as closed.** When a Perch terminal closes, `exitStatus.reason` says why. `User` and `Process` remove the session from the restore set. `Shutdown` keeps it.
+- **Then restore.** In a window with a workspace, the extension keeps the IDs of sessions attached there in `workspaceState`. For each one still running and not already adopted, it checks `perch info` first, without opening a terminal. If the session is detached, it opens a terminal running `perch attach --if-detached --restore full`. The flag guards the race with another window: if a client got there first, the attach exits with code 75, the extension closes that terminal quietly, and the session stays in the restore set. If the session is attached by a client with this workspace's key, that may be the previous incarnation of this window still exiting during a reload. Pending restores are retried on each list refresh for 60 seconds after activation, and then dropped for this activation. A session attached from another workspace is left where it is. Restore never takes a session from a live client. Empty windows have no workspace state, so they restore nothing. The setting `perch.restoreTerminals` (default on) turns restoring off.
+- **What counts as closed.** When a Perch terminal closes, `exitStatus.reason` says why. `User`, and `Process` with any code but 75, remove the session from the restore set. `Shutdown` keeps it.
 
 ### API for other extensions
 
@@ -509,8 +528,8 @@ These changes belong in Raven and Sight, not in Perch. They are listed so that P
 
 - **Launch.** Start the console with `command: [raven, 'console', '--ipc', '{dir}/ipc', ...]` and `annotations: { 'raven.console': 'ipc' }`. For the profile picker, use `prepareLaunch`, and map terminals to sessions with `sessionForTerminal`.
 - **Sending to a detached session.** Raven picks its target R session from `listSessions({ owner: 'jbearak.raven' })`, not only from open terminals, and connects to `<dir>/ipc` directly. A session with no terminal still receives code. Raven's fallback route, which types code into the terminal today with `terminal.sendText`, uses Perch's `send` for Perch sessions, because `sendText` reaches nothing while detached. If `degraded` includes `directory-recreated`, the console socket is gone for good and the `send` route is the only one left.
-- **Descriptor files.** Raven keeps two files in the session directory, each with one writer and each replaced atomically, so writers never overwrite each other. The extension writes `raven-window.json` (plot server port and token, data viewer directory). R's bootstrap profile writes `raven-r.json` (R session ID, httpgd URL and token) whenever the device starts. Both are mode 0600. The bootstrap profile reads the port and token from `raven-window.json` at every request, falling back to the environment. Secrets stay out of annotations.
-- **Adoption.** On activation, Raven calls `terminals()` and `listSessions`. On every `onDidAttach` for a Raven session, and for each session found at activation, it writes `raven-window.json`, registers the console socket and reads `raven-r.json` to re-register the httpgd device. Adoption is idempotent, so running it twice, or from two windows, does no harm. No code is sent to R.
+- **Descriptor files.** Raven keeps two files in the session directory, each replaced atomically. R's side and the editor's side never write the same file. The editor writes `raven-window.json` (plot server port and token, data viewer directory), and the window that writes it is the one that receives plots and data viewers. Only two events make a window write it: Perch attaches a terminal in that window (`onDidAttach`, including restore and adoption of a terminal there), or the user sends code from that window to a detached session. A window that merely lists a session never writes it. If two windows race, the later write wins, and that is the window the user acted in last. R's bootstrap profile writes `raven-r.json` (R session ID, httpgd URL and token) whenever the device starts. Both are mode 0600. The bootstrap profile reads the port and token from `raven-window.json` at every request, falling back to the environment. Secrets stay out of annotations.
+- **Adoption.** On activation, Raven calls `terminals()` and `listSessions`. For each Raven terminal in this window, and on every later `onDidAttach`, it writes `raven-window.json`, registers the console socket and reads `raven-r.json` to re-register the httpgd device. Detached sessions found by `listSessions` are only recorded as possible targets. Adoption is idempotent. No code is sent to R.
 - **Detached plots.** While no window is connected, R's posts to the plot server fail. Because R records the httpgd URL in `raven-r.json` whenever the device starts, a window that adopts the session later finds plots made while detached.
 - **Cleanup.** Raven currently deletes the console socket's directory (`fs.rm(dirname(socket), { recursive: true })`) and calls `markSessionEnded` when an R terminal closes. For a Perch-backed terminal, closing means detaching. Raven must skip both and clean up on `onDidEndSession`.
 
@@ -547,9 +566,24 @@ From the brief, with where this design handles each:
 New risks this design adds:
 
 - **avt is pre-1.0 and changes fast.** Perch pins an exact version and keeps the emulator behind its interface. The fidelity tests catch regressions on upgrade.
-- **Memory for history.** History costs about 2 KB per line at 120 columns. At the default 1,000 lines that is about 2 MB per session; at the 10,000-line ceiling, about 20 MB.
+- **Memory for history.** History costs about 17 bytes per cell. At the default 1,000 lines and 120 columns that is about 2 MB per session. The cell budget caps it at about 20 MB.
 - **Restore fidelity is bounded by the contract above.** Programs using kitty graphics or other state outside the tracked set may not come back exactly.
 - **Host policy can end sessions.** Documented, detected by `perch doctor` where possible, and not fixable by Perch in v1.
+
+## What the plan must verify
+
+Some claims depend on behavior that only a test can settle. The plan's first milestone covers the riskiest ones.
+
+- The fidelity contract and every transition in [Terminal queries](#terminal-queries) and [Flow control](#flow-control), in a headless xterm.js and in tmux: split UTF-8, invalid bytes, partial and unterminated control strings, RIS and DECSTR, kitty push and pop on both screens, queries split across reads, keystrokes interleaved with delayed replies, takeover during a restore, stalls during live output and during a restore, and attaches at different widths.
+- That vte and avt agree on sequence boundaries (CAN, SUB, ESC inside strings, C1 bytes inside UTF-8), with a differential test.
+- How xterm.js, Terminal.app, iTerm and tmux handle DECSTR, `ESC [3J` and `ESC [?1049l` when already on the primary screen.
+- Raven's console (reedline) at a prompt while detached, and behind a large queued send.
+- Linked variables through a symlink, for each default variable, locally and over Remote-SSH.
+- Survival across window close, SSH drop, VS Code server restart and update, and logout with `KillUserProcesses` on and off.
+- `flock` on directories and the systemd-tmpfiles skip, on Linux.
+- `creationOptions.shellArgs` on terminals created before the current extension host, and on terminals from a profile provider.
+- Installation from both registries for each local and remote combination, and that the darwin binaries need no more than an ad-hoc signature.
+- That `PERCH_SESSION_ID` inherited by a process that left the session is checked with `getsid` before Perch trusts it.
 
 ## Deferred from v1
 
@@ -578,6 +612,22 @@ This mirrors Raven's layout.
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 4
+
+From the third review by Sonnet and Terra:
+
+- Flow control now applies backpressure to a slow client and drops output only after a 5-second stall, and then only whole unsent frames. `too_slow` counts stalls. `perch attach` never buffers more than a frame.
+- Restores are taken at a parser ground state, so avt's dump has no tail to duplicate and no query straddles the change of ownership. The 1-second fallback, C1 rewriting and control-string swallowing are specified.
+- Three restore modes. The CLI no longer erases scrollback by default, and the first attach of `perch new` restores nothing.
+- The prologue resets everything Perch or avt tracks, for terminals with and without DECSTR. Modes avt tracks are set only by its dump; Perch's own modes follow it. Kitty stacks are per screen.
+- Query rules spell out reading a departing client's pending input, recorded cursor positions, and the one case left unanswered.
+- The program gets back the creator's umask, directory and signal mask.
+- Restore checks `info` before opening a terminal, uses exit code 75 for a lost race, and retries for 60 seconds.
+- Raven's window descriptor is written only by the window the user acted in.
+- `PATH` is appended, the copy is replaced under a lock, and the extension runs its bundled binary. The extension turns off the detach key.
+- History has a cell budget. `onDidEndSession` has a 30-second cadence while the view is hidden.
+- Added the list of claims the plan must verify.
 
 ### Revision 3
 
