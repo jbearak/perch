@@ -347,6 +347,34 @@ pub fn rename_noreplace_at(dir: BorrowedFd<'_>, from: &OsStr, to: &OsStr) -> io:
     }
 }
 
+/// `symlinkat`: creates `name` inside `dir` pointing at `target`.
+pub fn symlink_at(target: &OsStr, dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    let t = cstr(target)?;
+    let n = cstr(name)?;
+    // SAFETY: valid C strings.
+    cvt(unsafe { libc::symlinkat(t.as_ptr(), dir.as_raw_fd(), n.as_ptr()) }).map(drop)
+}
+
+/// `readlinkat`: where the symlink `name` inside `dir` points.
+pub fn read_link_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<OsString> {
+    let n = cstr(name)?;
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: valid C string; the buffer's length is passed.
+    let len = unsafe {
+        libc::readlinkat(
+            dir.as_raw_fd(),
+            n.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if len < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(len as usize);
+    Ok(OsString::from_vec(buf))
+}
+
 /// `unlinkat`; `dir_entry` removes a directory.
 pub fn unlink_at(dir: BorrowedFd<'_>, name: &OsStr, dir_entry: bool) -> io::Result<()> {
     let n = cstr(name)?;
@@ -1309,4 +1337,11 @@ pub fn proc_cwd(pid: i32) -> Option<std::path::PathBuf> {
             .collect();
         (!bytes.is_empty()).then(|| OsString::from_vec(bytes).into())
     }
+}
+
+/// The longest socket path `bind` and `connect` take, without the NUL.
+pub fn max_socket_path() -> usize {
+    // SAFETY: a zeroed sockaddr_un is valid.
+    let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_path.len() - 1
 }

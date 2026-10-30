@@ -13,7 +13,7 @@ use crate::client::Client;
 use crate::client::attach::{self, DetachKey, Options};
 use crate::proto::RestoreMode;
 use crate::runtime::{self, Entry, Housekeeping, RuntimeDir};
-use crate::{procinfo, sys};
+use crate::{env_links, procinfo, sys};
 
 /// History rows a `full` restore sends when `--scrollback` is not given.
 pub const DEFAULT_SCROLLBACK: u32 = 1000;
@@ -117,6 +117,7 @@ pub(super) fn run(args: &[String]) -> ExitCode {
         scrollback,
         if_detached,
         detach_key: key,
+        env: env_links::client_values(&e.meta.linked_env),
     };
     drop(rt);
     ExitCode::from(attach::run(&opts))

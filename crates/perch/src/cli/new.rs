@@ -12,9 +12,9 @@ use super::attach::{default_label, parse_restore};
 use super::{Args, fail, usage_error};
 use crate::client::attach::{self, DetachKey};
 use crate::proto::RestoreMode;
-use crate::runtime;
 use crate::supervisor::{self, Config, Outcome};
 use crate::sys;
+use crate::{env_links, runtime};
 
 /// History lines kept when `--scrollback` is not given.
 pub const DEFAULT_SCROLLBACK: u32 = 1000;
@@ -32,6 +32,8 @@ struct Options {
     annotations: BTreeMap<String, String>,
     cwd: Option<String>,
     env: Vec<(String, String)>,
+    /// `--link-env`, or `None` for the default list.
+    link_env: Option<Vec<String>>,
     scrollback: Option<u32>,
     detached: bool,
     label: Option<String>,
@@ -79,7 +81,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--label" => o.label = Some(a.value(flag)?.to_owned()),
             "--detach-key" => o.detach_key = Some(DetachKey::parse(a.value(flag)?)?),
             "--restore" => o.restore = Some(parse_restore(a.value(flag)?)?),
-            "--link-env" => return Err("--link-env is not supported by this version yet".into()),
+            "--link-env" => {
+                let name = a.value(flag)?;
+                if !env_links::valid_name(name) {
+                    return Err(format!("--link-env `{name}`: not a variable name"));
+                }
+                let list = o.link_env.get_or_insert_with(Vec::new);
+                if !list.iter().any(|n| n == name) {
+                    list.push(name.to_owned());
+                }
+            }
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             _ => {
                 // The command starts here.
@@ -199,18 +210,37 @@ fn start(o: Options) -> Result<ExitCode, String> {
 
     // The creator's environment, then --env, then Perch's own variables.
     let mut env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-    let mut set = |k: OsString, v: OsString| {
+    let set = |env: &mut Vec<(OsString, OsString)>, k: OsString, v: OsString| {
         env.retain(|(n, _)| *n != k);
         env.push((k, v));
     };
     if o.cwd.is_some() {
-        set("PWD".into(), cwd.clone().into_os_string());
+        set(&mut env, "PWD".into(), cwd.clone().into_os_string());
     }
     for (k, v) in &o.env {
-        set(k.into(), expand(v)?.into());
+        set(&mut env, k.into(), expand(v)?.into());
     }
-    set("PERCH_SESSION_ID".into(), id.clone().into());
-    set("PERCH_SESSION_DIR".into(), dir.clone().into());
+    // Each linked variable that is set becomes the path of its link.
+    let names: Vec<String> = o
+        .link_env
+        .unwrap_or_else(|| env_links::DEFAULT.iter().map(|&n| n.to_owned()).collect());
+    let mut links = BTreeMap::new();
+    for name in &names {
+        let current = env
+            .iter()
+            .find(|(k, _)| k.as_os_str() == name.as_str())
+            .map(|(_, v)| v.clone());
+        if let Some(value) = current.filter(|v| !v.is_empty()) {
+            set(
+                &mut env,
+                name.into(),
+                format!("{dir}/{}/{name}", env_links::DIR).into(),
+            );
+            links.insert(name.clone(), value);
+        }
+    }
+    set(&mut env, "PERCH_SESSION_ID".into(), id.clone().into());
+    set(&mut env, "PERCH_SESSION_DIR".into(), dir.clone().into());
     let env: Vec<OsString> = env
         .into_iter()
         .map(|(k, v)| {
@@ -243,8 +273,11 @@ fn start(o: Options) -> Result<ExitCode, String> {
         termios,
         scrollback,
         attach: !o.detached,
+        links,
     };
     let sock = rt.path.join(&id).join("sock");
+    // The creator's own attach sends the values the links start with.
+    let link_values = env_links::client_values(&cfg.links.keys().cloned().collect::<Vec<_>>());
     drop(rt);
     match supervisor::start(cfg)? {
         Outcome::Running { .. } => {
@@ -266,6 +299,7 @@ fn start(o: Options) -> Result<ExitCode, String> {
                 scrollback,
                 if_detached: false,
                 detach_key: o.detach_key.unwrap_or(Some(DetachKey::DEFAULT)),
+                env: link_values,
             };
             Ok(ExitCode::from(attach::run(&opts)))
         }

@@ -204,6 +204,21 @@ impl Input {
         self.queued
     }
 
+    /// Replies waiting to be written.
+    pub fn replies_waiting(&self) -> usize {
+        self.replies.len()
+    }
+
+    /// Whether an item or reply is partly written.
+    pub fn writing(&self) -> bool {
+        self.current.is_some()
+    }
+
+    /// Whether an incomplete sequence from the client is held.
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
     /// The bytes to write next: the rest of a partly written item, else the
     /// oldest reply, else the oldest item.
     pub fn pending(&self) -> Option<&[u8]> {

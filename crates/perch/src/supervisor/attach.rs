@@ -16,7 +16,7 @@
 //! withheld until the feeder reports where the sequence ends.
 
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
@@ -30,7 +30,7 @@ use crate::proto::{self, Attach, Attached, Detached, ErrorBody, Exited, RestoreM
 use crate::queries::QueryId;
 use crate::restore::{self, Mode, Nudge};
 use crate::transport::Transport;
-use crate::{clock, sys};
+use crate::{clock, env_links, sys};
 
 /// The most raw bytes in one output frame.
 const MAX_PAYLOAD: usize = proto::MAX_FRAME - 1;
@@ -157,6 +157,7 @@ impl Supervisor {
             "client attached ({}, restore {:?})",
             conn.label, req.restore
         ));
+        self.relink(&req.env);
         self.client = Some(Client {
             label: conn.label.clone(),
             conn,
@@ -196,6 +197,18 @@ impl Supervisor {
                 }
                 self.set_size(cols, rows);
             }
+        }
+    }
+
+    /// Points each linked variable's link at the attaching client's value.
+    fn relink(&mut self, client: &std::collections::BTreeMap<String, String>) {
+        if self.meta.linked_env.is_empty() {
+            return;
+        }
+        let targets = env_links::targets(&self.meta.linked_env, client);
+        match env_links::point(self.dir.as_fd(), &targets) {
+            Ok(()) => self.links = targets,
+            Err(e) => log(&format!("cannot re-point the linked variables: {e}")),
         }
     }
 
