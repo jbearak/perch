@@ -799,6 +799,29 @@ fn writeSavedCursor(w: *Writer, t: *const Terminal, screen: *const Screen) Write
     if (saved.protected and !carried) try writeProtect(w, t, screen);
     try writeCharsets(w, &saved.charset);
     try w.writeAll("\x1b7");
+    if (saved.pending_wrap) {
+        // The space printed for pending wrap on an empty cell is text, which
+        // a terminal without wraparound attaches a combining mark to. Saved,
+        // the cell can be emptied again (ECH also resets the row's soft
+        // wrap, so not on a wrapped row).
+        const row = activePin(screen, y);
+        const page = row.node.page();
+        const r = page.getRow(row.y);
+        const cell = page.getCells(r)[x];
+        // A cell with only a background is erased with it as the pen.
+        const bg: ?Style = switch (cell.content_tag) {
+            .codepoint, .codepoint_grapheme => if (cell.isEmpty() and !cell.hasStyling()) .{} else null,
+            .bg_color_palette => .{ .bg_color = .{ .palette = cell.content.color_palette.data } },
+            .bg_color_rgb => .{ .bg_color = .{ .rgb = .{
+                .r = cell.content.color_rgb.r,
+                .g = cell.content.color_rgb.g,
+                .b = cell.content.color_rgb.b,
+            } } },
+        };
+        if (bg) |style| if (!r.wrap and !cell.protected) {
+            try w.print("\x1b[0m{f}\x1b[X\x1b[0m", .{style.formatterVt()});
+        };
+    }
     if (saved.origin) try w.writeAll("\x1b[?6l");
 }
 

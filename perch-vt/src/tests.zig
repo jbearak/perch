@@ -1077,6 +1077,19 @@ test "a protected cursor carried to the alternate screen, the primary's waiting 
     try expectSameTerminal(a, r.vt);
 }
 
+test "a saved cursor waiting to wrap at an empty edge cell leaves it empty" {
+    // Without wraparound, a combining mark printed at the last column joins
+    // the cell under the cursor when that has text, else the one before.
+    const a = try newModel(3, 1);
+    defer a.destroy();
+    a.feed("\x1b[?2027h\x1b[?7lword \x1b[?1048h\x1b[3L ", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "e\xcc\x81");
+    try expectSameTerminal(a, r.vt);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();
