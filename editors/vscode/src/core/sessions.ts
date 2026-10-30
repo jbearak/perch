@@ -43,6 +43,14 @@ export function parseList(stdout: string): Session[] {
   return doc.sessions.filter(isObject).map(parseSession).filter((s): s is Session => s !== undefined);
 }
 
+/** Parses `perch info --json`: one session. */
+export function parseInfo(stdout: string): Session {
+  const doc: unknown = JSON.parse(stdout);
+  const s = isObject(doc) ? parseSession(doc) : undefined;
+  if (s === undefined) throw new Error('perch info --json: unexpected output');
+  return s;
+}
+
 function parseSession(v: Record<string, unknown>): Session | undefined {
   const id = str(v.id);
   const state = str(v.state);
@@ -278,7 +286,12 @@ export function stripAnsi(text: string): string {
 export function iconName(s: Session): string {
   if (s.state === 'lost' || s.state === 'unresponsive' || s.degraded.length > 0) return 'warning';
   if (s.state === 'exited') return 'circle-slash';
-  switch (s.kind) {
+  return kindIcon(s.kind);
+}
+
+/** The codicon for a kind of session. */
+export function kindIcon(kind: string): string {
+  switch (kind) {
     case 'r':
       return 'graph';
     case 'stata':
