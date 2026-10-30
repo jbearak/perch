@@ -157,7 +157,8 @@ export function errorCode(err: unknown): ApiErrorCode | undefined {
 }
 
 function endedOrMissing(stderr: string): boolean {
-  return /^perch: no session /m.test(stderr) || /^perch: session \S+ has ended/m.test(stderr);
+  // `kill` says "has already ended"; `send` and `attach` say "has ended".
+  return /^perch: no session /m.test(stderr) || /^perch: session \S+ has (already )?ended/m.test(stderr);
 }
 
 /** An Error for the API: a PerchApiError when a code fits, else the error itself. */
