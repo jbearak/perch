@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { bundledBinaryPath } from '../../core/binary';
 import type { Exports, Testing } from '../../vscode/activation';
+import type { CloseOutcome } from '../../vscode/terminals';
 
 export const extensionId = 'jbearak.perch';
 
@@ -46,4 +47,29 @@ export async function waitFor<T>(what: string, f: () => Promise<T | undefined>, 
     if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 100));
   }
+}
+
+/** `perch info <id> --json`, or undefined once the session is gone. */
+export async function info(binary: string, id: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return JSON.parse(await perch(binary, ['info', id, '--json'])) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolves with what the extension made of the next close of a terminal of `id`. */
+export function nextClose(testing: Testing, id: string, timeoutMs = 15_000): Promise<CloseOutcome> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      sub.dispose();
+      reject(new Error(`timed out waiting for the terminal of ${id} to close`));
+    }, timeoutMs);
+    const sub = testing.onDidClose((o) => {
+      if (o.id !== id) return;
+      clearTimeout(timer);
+      sub.dispose();
+      resolve(o);
+    });
+  });
 }
