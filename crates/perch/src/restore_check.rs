@@ -129,8 +129,10 @@ pub fn check(case: &Case) -> Result<(), String> {
             .is_some_and(|rows| rows.iter().any(|r| r[0] == "" && r[2] != ""))
     });
 
-    terminal.feed(feeder.held(), 0);
-    terminal.feed(case.after, 0);
+    // What reaches the terminal after the restore: the sequence the feeder
+    // held back unfinished, then the output.
+    let later = [feeder.held(), case.after].concat();
+    terminal.feed(&later, 0);
     // A byte at a time, watching the alternate-screen modes and the active
     // screen: Ghostty executes controls inside a CSI, and a mode can stay
     // set after the screen was left, so neither the bytes nor the modes
@@ -165,7 +167,7 @@ pub fn check(case: &Case) -> Result<(), String> {
     }
     // REP (`CSI n b`) repeats the last character printed, which no restore
     // carries.
-    if has_rep(case.after) || protected_cells || prompt_marks {
+    if has_rep(&later) || protected_cells || prompt_marks {
         return Ok(());
     }
     // Reverse wraparound follows the screen rows' soft-wrap marks, which
