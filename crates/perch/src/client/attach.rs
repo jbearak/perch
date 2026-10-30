@@ -310,9 +310,9 @@ fn read_frame(
         if left.is_zero() {
             return Err("the session did not answer in time".into());
         }
-        stream
-            .set_read_timeout(Some(left))
-            .map_err(|e| e.to_string())?;
+        // macOS refuses (EINVAL) once the peer has closed; the read then
+        // says so.
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut buf) {
             Ok(0) => return Err("the session closed the connection".into()),
             Ok(n) => decoder.push(&buf[..n]),
