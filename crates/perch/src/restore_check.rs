@@ -93,6 +93,7 @@ pub fn check(case: &Case) -> Result<(), String> {
         sent,
         true,
         &[],
+        false,
     )?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
     let state = dump_state(&model)?;
@@ -131,6 +132,8 @@ pub fn check(case: &Case) -> Result<(), String> {
         .filter(|r| r[0] == "")
         .flat_map(row_styles)
         .collect();
+    // Insert mode moves them along the row as text is printed before them.
+    let insert_at_restore = state["modes"]["4"] == true;
 
     // What reaches the terminal after the restore: the sequence the feeder
     // held back unfinished, then the output.
@@ -194,6 +197,7 @@ pub fn check(case: &Case) -> Result<(), String> {
         kept,
         false,
         &blank_styles,
+        insert_at_restore,
     )
 }
 
@@ -304,6 +308,7 @@ fn compare(
     history_sent: u64,
     exact: bool,
     blank_styles: &[String],
+    insert_at_restore: bool,
 ) -> Result<(), String> {
     let dump = |m: &Model| -> Result<serde_json::Value, String> {
         serde_json::from_slice(&m.dump().map_err(|e| format!("dump: {e:?}"))?)
@@ -315,7 +320,7 @@ fn compare(
     let got = dump(terminal)?;
     let diffs: Vec<String> = restore::differences(&expected, &got, mode)
         .into_iter()
-        .filter(|d| !known(&expected, d, blank_styles))
+        .filter(|d| !known(&expected, d, blank_styles, insert_at_restore))
         .filter(|d| alternate || !d.starts_with("alternate"))
         .collect();
     if diffs.is_empty() {
@@ -326,7 +331,12 @@ fn compare(
 }
 
 /// Differences the restore is known not to cover yet.
-fn known(expected: &serde_json::Value, diff: &str, blank_styles: &[String]) -> bool {
+fn known(
+    expected: &serde_json::Value,
+    diff: &str,
+    blank_styles: &[String],
+    insert_at_restore: bool,
+) -> bool {
     // A saved cursor waiting to wrap at a right margin inside the screen
     // (DECLRMM) is written without its pending wrap (deferred from M2a).
     let interior_wrap = |screen: &str| {
@@ -362,7 +372,11 @@ fn known(expected: &serde_json::Value, diff: &str, blank_styles: &[String]) -> b
         expected["modes"]["?69"] == true || expected["modes"]["?2027"] == true;
     (margins_or_clusters && same_text(diff, false))
         || same_text(diff, true)
-        || styles_left_out(diff, blank_styles)
+        || styles_left_out(
+            diff,
+            blank_styles,
+            insert_at_restore || expected["modes"]["4"] == true,
+        )
 }
 
 /// A row's `col:sgr` style entries.
@@ -377,8 +391,10 @@ fn row_styles(row: &serde_json::Value) -> Vec<String> {
 }
 
 /// Whether a row difference has the same text, wrap and continuation and
-/// the terminal lacks only styles of blank cells the restore left out.
-fn styles_left_out(diff: &str, blank_styles: &[String]) -> bool {
+/// the terminal lacks only styles of blank cells the restore left out. With
+/// `moved` (insert mode was on), those cells may have moved along the row,
+/// so each missing style takes a left-out cell's style from any column.
+fn styles_left_out(diff: &str, blank_styles: &[String], moved: bool) -> bool {
     let Some((a, b)) = row_diff(diff) else {
         return false;
     };
@@ -386,11 +402,22 @@ fn styles_left_out(diff: &str, blank_styles: &[String]) -> bool {
         return false;
     }
     let (model, got) = (row_styles(&a), row_styles(&b));
-    got.iter().all(|e| model.contains(e))
-        && model
-            .iter()
-            .filter(|e| !got.contains(e))
-            .all(|e| blank_styles.contains(e))
+    if !got.iter().all(|e| model.contains(e)) {
+        return false;
+    }
+    let sgr = |e: &String| {
+        e.split_once(':')
+            .map_or(String::new(), |(_, s)| s.to_owned())
+    };
+    let mut left: Vec<String> = blank_styles.to_vec();
+    model.iter().filter(|e| !got.contains(e)).all(|e| {
+        let i = if moved {
+            left.iter().position(|l| sgr(l) == sgr(e))
+        } else {
+            left.iter().position(|l| l == e)
+        };
+        i.map(|i| left.swap_remove(i)).is_some()
+    })
 }
 
 /// The two sides of a row difference (`... row N: [..] != [..]`), each a
@@ -472,14 +499,18 @@ mod tests {
             format!(r#"primary row 0: ["ab",false,"0:31 {s}",false] != ["ab",false,"0:31",false]"#)
         };
         // The blank cell's style, lost: known.
-        assert!(styles_left_out(&row("7:1"), &blank));
+        assert!(styles_left_out(&row("7:1"), &blank, false));
         // Another cell's style, or the same column with another style: not.
-        assert!(!styles_left_out(&row("5:1"), &blank));
-        assert!(!styles_left_out(&row("7:4"), &blank));
+        assert!(!styles_left_out(&row("5:1"), &blank, false));
+        assert!(!styles_left_out(&row("7:4"), &blank, false));
         // A mode difference is never a row difference.
-        assert!(!styles_left_out("mode ?7: true != false", &blank));
+        assert!(!styles_left_out("mode ?7: true != false", &blank, true));
         // Nothing left out at the restore: nothing excused.
-        assert!(!styles_left_out(&row("7:1"), &[]));
+        assert!(!styles_left_out(&row("7:1"), &[], false));
+        // Moved by insert mode: the same style in another column, once.
+        assert!(styles_left_out(&row("5:1"), &blank, true));
+        assert!(!styles_left_out(&row("5:1 6:1"), &blank, true));
+        assert!(!styles_left_out(&row("5:4"), &blank, true));
     }
 
     #[test]
@@ -493,7 +524,7 @@ mod tests {
             "primary cursor: [1,2] != [1,3]",
             r#"primary row 0: "ab" != "ab""#,
         ] {
-            assert!(!known(&expected, diff, &blank), "{diff}");
+            assert!(!known(&expected, diff, &blank, true), "{diff}");
         }
     }
     use proptest::prelude::*;
