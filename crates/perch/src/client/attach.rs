@@ -258,7 +258,7 @@ impl KeyScanner {
             self.held = data.split_off(j);
             // A held start keeps its first deadline.
             if self.deadline.is_none() || j > 0 {
-                self.deadline = Some(now + KEY_HOLD);
+                self.deadline = Some(now + crate::clock::scaled(KEY_HOLD));
             }
         } else {
             self.deadline = None;
@@ -673,7 +673,7 @@ fn relay(session: Session, sig_r: &OwnedFd, key: Option<DetachKey>) -> End {
             match sys::read(0, &mut buf[..INPUT_CHUNK]) {
                 Ok(0) => {
                     stdin_open = false;
-                    let rest = keys.tick(Instant::now() + KEY_HOLD);
+                    let rest = keys.tick(Instant::now() + crate::clock::scaled(KEY_HOLD));
                     if !rest.is_empty() {
                         to_sock.extend(proto::encode(kind::INPUT, &rest).expect("few"));
                     }

@@ -693,7 +693,9 @@ fn the_creator_deadline_ends_with_the_creators_attach() {
 /// briefly.
 #[test]
 fn a_detach_key_split_across_reads_still_detaches() {
-    let rt = Rt::new();
+    // Ten times the usual timers: the key hold becomes a second, so the
+    // 30 ms gap between the halves cannot outlast it on a slow runner.
+    let rt = Rt::with_scale("10");
     let (mut a, id) = new_recorder(&rt, &[]);
     a.type_bytes(b"ab\x1b[9");
     std::thread::sleep(Duration::from_millis(30));
