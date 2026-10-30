@@ -1,0 +1,283 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Release builds, the seven VSIXs, install smoke tests and, for a v* tag,
+# publishing to the Visual Studio Marketplace and Open VSX.
+#
+# - build: release binaries on native runners, each run through `new -d`,
+#   `list` and `kill`; macOS binaries ad-hoc signed. x86_64-apple-darwin is
+#   cross-compiled on the arm64 runner and never run: no Intel runners.
+# - package: six platform VSIXs (the musl binaries serve linux and alpine)
+#   and a universal one without a binary, each checked by check-vsix.mjs.
+# - smoke: each native runner installs its own VSIX and the universal one
+#   with the `code` CLI and runs the installed binary; the Linux runners run
+#   their alpine VSIX's binary in an alpine:3 container.
+# - publish: only for a pushed v* tag matching package.json's version, and
+#   only with the VSCE_PAT and OVSX_PAT secrets.
+#
+# Besides tags it runs by hand (workflow_dispatch, never publishing) and on
+# pull requests that change the packaging itself. CI (ci.yml) runs the tests;
+# this workflow builds its own release binaries and reuses them across jobs.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release-smoke.sh
+      - scripts/alpine-vsix-check.sh
+      - editors/vscode/.vscodeignore
+      - editors/vscode/release/**
+      - editors/vscode/scripts/targets.mjs
+      - editors/vscode/scripts/package.mjs
+      - editors/vscode/scripts/check-vsix.mjs
+      - editors/vscode/scripts/smoke-install.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.vsce }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            vsce: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            vsce: linux-arm64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            vsce: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VSCE_TARGET: ${{ matrix.vsce }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-zig
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      # No Rust cache: release binaries are built from scratch.
+      - name: release build
+        run: cargo build --release --locked -p perch --target "$TARGET"
+      - name: check the release binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/perch"
+          file "$bin"
+          file "$bin" | grep -E '(statically|static-pie) linked' >/dev/null
+          if file "$bin" | grep interpreter >/dev/null; then
+            echo "release binary has an interpreter" >&2; exit 1
+          fi
+          dups=$(nm --defined-only "$bin" | awk 'NF == 3 && $2 ~ /^[TDBR]$/ { print $3 }' | sort | uniq -d)
+          if [ -n "$dups" ]; then
+            echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
+          fi
+          if nm "$bin" | grep perch_vt_take_observed >/dev/null; then
+            echo "release binary has perch-vt's test observer" >&2; exit 1
+          fi
+          if strings "$bin" | grep PERCH_TEST_TIME_SCALE >/dev/null; then
+            echo "release binary has PERCH_TEST_TIME_SCALE" >&2; exit 1
+          fi
+      # macOS Intel is cross-compiled here and never run: no Intel runners.
+      - name: cross-build x86_64-apple-darwin (not run)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked -p perch --target x86_64-apple-darwin
+      - name: check and ad-hoc sign the release binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          for t in "$TARGET" x86_64-apple-darwin; do
+            bin="target/$t/release/perch"
+            file "$bin"
+            dups=$(nm -g -U "$bin" | awk 'NF == 3 { print $3 }' | sort | uniq -d)
+            if [ -n "$dups" ]; then
+              echo "strong symbols defined more than once:" >&2; echo "$dups" >&2; exit 1
+            fi
+            if nm "$bin" | grep perch_vt_take_observed >/dev/null; then
+              echo "release binary has perch-vt's test observer" >&2; exit 1
+            fi
+            if strings "$bin" | grep PERCH_TEST_TIME_SCALE >/dev/null; then
+              echo "release binary has PERCH_TEST_TIME_SCALE" >&2; exit 1
+            fi
+            # Replaces the linker's signature with a real ad-hoc one.
+            codesign --force --sign - "$bin"
+            codesign --verify --verbose "$bin"
+            codesign --display --verbose "$bin" 2>&1 | grep 'flags=0x2(adhoc)'
+          done
+          file target/x86_64-apple-darwin/release/perch | grep x86_64 >/dev/null
+      - name: new -d, list, kill
+        run: scripts/release-smoke.sh "target/$TARGET/release/perch"
+      - name: stage the binaries by VS Code target
+        run: |
+          set -euo pipefail
+          mkdir -p "binaries/$VSCE_TARGET"
+          cp "target/$TARGET/release/perch" "binaries/$VSCE_TARGET/perch"
+          if [ "$RUNNER_OS" = macOS ]; then
+            mkdir -p binaries/darwin-x64
+            cp target/x86_64-apple-darwin/release/perch binaries/darwin-x64/perch
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.vsce }}
+          path: binaries/
+          if-no-files-found: error
+
+  package:
+    name: Package VSIXs
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            editors/vscode/package-lock.json
+            editors/vscode/release/package-lock.json
+      - name: install
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run check-deps
+          # vsce only: no optional vsce-sign binaries, no install scripts.
+          npm ci --prefix release --omit=optional --ignore-scripts
+      - name: build the extension
+        working-directory: editors/vscode
+        run: npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: binaries
+      - name: package and check seven VSIXs
+        working-directory: editors/vscode
+        run: |
+          set -euo pipefail
+          bin=../../binaries
+          out=../../vsix
+          file "$bin"/*/perch
+          for t in darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            node scripts/package.mjs --target "$t" --binary "$bin/$t/perch" --out "$out"
+          done
+          # Node calls Alpine linux: the static musl builds serve both.
+          node scripts/package.mjs --target alpine-x64 --binary "$bin/linux-x64/perch" --out "$out"
+          node scripts/package.mjs --target alpine-arm64 --binary "$bin/linux-arm64/perch" --out "$out"
+          node scripts/package.mjs --target universal --out "$out"
+          ls -l "$out"
+          set -- "$out"/*.vsix
+          if [ $# -ne 7 ]; then echo "expected 7 VSIXs, found $#" >&2; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: vsix/*.vsix
+          if-no-files-found: error
+
+  smoke:
+    name: Install ${{ matrix.vsce }}
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            vsce: linux-x64
+            alpine: alpine-x64
+          - runner: ubuntu-24.04-arm
+            vsce: linux-arm64
+            alpine: alpine-arm64
+          - runner: macos-15
+            vsce: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: install
+        working-directory: editors/vscode
+        run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: vsix
+      - name: install this platform's VSIX and the universal one with the code CLI
+        working-directory: editors/vscode
+        run: node scripts/smoke-install.mjs --vsix-dir ../../vsix --target "${{ matrix.vsce }}"
+      - name: run the alpine VSIX's binary in alpine:3
+        if: matrix.alpine
+        env:
+          ALPINE: ${{ matrix.alpine }}
+        run: scripts/alpine-vsix-check.sh vsix/perch-"$ALPINE"-*.vsix "$ALPINE"
+      # Signature and architecture only: no Intel runner runs it.
+      - name: darwin-x64 VSIX's binary is x86_64 and ad-hoc signed (not run)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          unzip -q vsix/perch-darwin-x64-*.vsix -d "$dir"
+          bin="$dir/extension/bin/darwin-x64/perch"
+          file "$bin" | grep x86_64 >/dev/null
+          codesign --verify --verbose "$bin"
+          codesign --display --verbose "$bin" 2>&1 | grep 'flags=0x2(adhoc)'
+
+  publish:
+    name: Publish
+    needs: [package, smoke]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag and secrets
+        working-directory: editors/vscode
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./package.json").version')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2; exit 1
+          fi
+          if [ -z "$VSCE_PAT" ] || [ -z "$OVSX_PAT" ]; then
+            echo "publishing needs the VSCE_PAT and OVSX_PAT secrets" >&2; exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editors/vscode/release/package-lock.json
+      # With optional dependencies: ovsx needs @node-rs/crc32's native
+      # binding. That also fetches vsce-sign's binary, which publishing
+      # without --sign-tool or --sigzipPath never runs.
+      - name: install vsce and ovsx
+        working-directory: editors/vscode/release
+        run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: vsix
+      # Each VSIX carries its target platform in its manifest. vsce reads
+      # VSCE_PAT and ovsx reads OVSX_PAT from the environment.
+      - name: publish to the Visual Studio Marketplace
+        run: editors/vscode/release/node_modules/.bin/vsce publish --skip-duplicate --packagePath vsix/*.vsix
+      - name: publish to Open VSX
+        run: editors/vscode/release/node_modules/.bin/ovsx publish --skip-duplicate --packagePath vsix/*.vsix
