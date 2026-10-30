@@ -308,6 +308,8 @@ struct Supervisor {
     /// creator has not attached.
     creator_deadline: Option<Instant>,
     attach_mode: bool,
+    /// Turns of the poll loop, for tests that check it is idle.
+    loops: u64,
 }
 
 /// A tombstone waiting for the model's snapshot of the screen.
@@ -500,6 +502,7 @@ impl Supervisor {
             last_input: None,
             start_failure: None,
             creator_deadline: None,
+            loops: 0,
             attach_mode: cfg.attach,
         })
     }
@@ -540,6 +543,7 @@ impl Supervisor {
         self.apply_model_state();
 
         loop {
+            self.loops += 1;
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
             let master_write = self.input.pending().is_some() && !self.master_write_failed;
@@ -1202,6 +1206,7 @@ impl Supervisor {
                 "generation": self.model.generation(),
                 "state": model_state_name(self.model.state()),
                 "pwd": self.model.pwd().map(|p| String::from_utf8_lossy(p).into_owned()),
+                "loops": self.loops,
             }),
         )
     }

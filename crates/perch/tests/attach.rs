@@ -630,3 +630,93 @@ fn queries_go_to_the_live_client_and_back_to_the_supervisor_on_detach() {
     let last: Value = serde_json::from_str(rounds.lines().last().unwrap()).unwrap();
     assert_eq!(last[0]["reply"], "\u{1b}[?1;2c");
 }
+
+/// Review of M3d, S1: an unfinished sequence the feeder holds can be far
+/// over the 1 MiB frame cap; it reaches an attaching client intact, in
+/// frames under the cap, and the supervisor survives.
+#[test]
+fn a_held_sequence_over_a_frame_reaches_an_attaching_client_whole() {
+    let rt = Rt::new();
+    let (id, mut t) = new_timer_detached(&rt);
+    let n = 2_500_000;
+    t.round(&format!("text:before open:csi:{n}"));
+    for restore in ["screen", "none"] {
+        let (mut r, answer) = Recorder::attach(&rt, &id, json!({"restore": restore}));
+        assert_eq!(answer.kind, kind::ATTACHED);
+        r.until(SECS, |r| r.output.len() > n);
+        r.settle(Duration::from_millis(200));
+        let at = find(&r.output, b"\x1b[1;1;1;1\n").expect("the held sequence");
+        let body: Vec<u8> = b"1;1;1;1\n".iter().copied().cycle().take(n).collect();
+        assert_eq!(
+            &r.output[at + 2..],
+            &body[..],
+            "{restore}: held bytes intact"
+        );
+        r.close();
+        wait_attached(&rt, &id, false);
+    }
+    // Alive, and the sequence completes for the next client.
+    let (mut r, _) = Recorder::attach(&rt, &id, json!({"restore": "none"}));
+    r.until(SECS, |r| r.output.len() > n);
+    t.round("close:csi text:after");
+    r.expect(b"after\r\n");
+}
+
+/// Review of M3d, S2: once the creator has attached, the 30-second
+/// deadline for its attach is gone, and the supervisor idles.
+#[test]
+fn the_creator_deadline_ends_with_the_creators_attach() {
+    let rt = Rt::new();
+    let prog = Timer::args(&rt);
+    let mut args = vec!["new", "--"];
+    args.extend(prog.iter().map(String::as_str));
+    let _a = Pty::spawn(&rt, &args, 80, 24);
+    let id = only_session(&rt);
+    wait_attached(&rt, &id, true);
+    let loops = || {
+        let mut c = perch::client::Client::connect(&rt.dir(&id).join("sock"), "t", SECS).unwrap();
+        c.request("test-model", json!({}), SECS).unwrap()["loops"]
+            .as_u64()
+            .unwrap()
+    };
+    // Past the deadline: 30 seconds, scaled to 3.
+    std::thread::sleep(Duration::from_millis(3500));
+    let before = loops();
+    std::thread::sleep(Duration::from_secs(1));
+    let turns = loops() - before;
+    assert!(turns < 200, "{turns} turns of the poll loop in a second");
+    assert!(rt.dir(&id).exists());
+}
+
+/// Review of M3d, S3: the CSI-u forms of the detach key work when the
+/// terminal's bytes arrive in two reads, and Escape alone is held at most
+/// briefly.
+#[test]
+fn a_detach_key_split_across_reads_still_detaches() {
+    let rt = Rt::new();
+    let (mut a, id) = new_recorder(&rt, &[]);
+    a.type_bytes(b"ab\x1b[9");
+    std::thread::sleep(Duration::from_millis(30));
+    a.type_bytes(b"2;5u");
+    assert_eq!(a.exit_code(), 0);
+    wait_recorded(&rt, b"ab");
+    let mut b = Pty::spawn(&rt, &["attach", &id], 80, 24);
+    b.expect(0, b"recording");
+    wait_attached(&rt, &id, true);
+    b.type_bytes(b"\x1b[27;5");
+    std::thread::sleep(Duration::from_millis(30));
+    b.type_bytes(b";92~");
+    assert_eq!(b.exit_code(), 0);
+    // Escape alone, then an arrow key split after its ESC: forwarded
+    // unchanged and in order.
+    let mut c = Pty::spawn(&rt, &["attach", &id], 80, 24);
+    c.expect(0, b"recording");
+    wait_attached(&rt, &id, true);
+    c.type_bytes(b"\x1b");
+    wait_recorded(&rt, b"ab\x1b");
+    c.type_bytes(b"\x1b");
+    std::thread::sleep(Duration::from_millis(30));
+    c.type_bytes(b"[Az");
+    wait_recorded(&rt, b"ab\x1b\x1b[Az");
+    let _ = std::fs::remove_file(rec_path(&rt));
+}

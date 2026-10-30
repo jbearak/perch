@@ -104,6 +104,14 @@ fn restore_frames(bytes: &[u8]) -> Vec<Frame> {
         .collect()
 }
 
+/// Queues the bytes the feeder holds back as live output. An unfinished
+/// sequence can be up to 16 MiB, so it goes in frames under the cap.
+fn push_held(flow: &mut ClientFlow, held: &[u8], now: std::time::Duration) {
+    for c in held.chunks(MAX_PAYLOAD) {
+        flow.push_live(Frame::new(output_frame(c)), now);
+    }
+}
+
 /// `perch attach`'s exit status for a program's end.
 pub fn exit_status(exit: &Exit, start_failure: Option<u8>) -> u8 {
     if let Some(code) = start_failure {
@@ -165,6 +173,7 @@ impl Supervisor {
 
         // The creator's attach: the program starts now, at its size.
         if self.plan.is_some() {
+            self.creator_deadline = None;
             self.set_size(cols, rows);
             if let Err(msg) = self.spawn_program() {
                 self.start_failed_attached(msg, 1);
@@ -182,8 +191,8 @@ impl Supervisor {
                 let now = self.elapsed();
                 let c = self.client.as_mut().expect("attached");
                 c.withhold = withhold;
-                if !withhold && !held.is_empty() {
-                    c.flow.push_live(Frame::new(output_frame(&held)), now);
+                if !withhold {
+                    push_held(&mut c.flow, &held, now);
                 }
                 self.set_size(cols, rows);
             }
@@ -242,8 +251,8 @@ impl Supervisor {
         if !c.flow.restore_enqueued(epoch, restore_frames(bytes), now) {
             return;
         }
-        if !c.withhold && !held.is_empty() {
-            c.flow.push_live(Frame::new(output_frame(&held)), now);
+        if !c.withhold {
+            push_held(&mut c.flow, &held, now);
         }
         let (want_cols, want_rows) = (c.cols, c.rows);
         self.set_size(size.0, size.1);

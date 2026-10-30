@@ -117,6 +117,162 @@ impl DetachKey {
     }
 }
 
+/// How long a possible start of the detach key's CSI forms is held, waiting
+/// for the rest from a later read: as long as the supervisor holds a split
+/// reply (`input::REPLY_HOLD`).
+pub const KEY_HOLD: Duration = Duration::from_millis(100);
+
+/// The control-key modifiers of the CSI forms: Ctrl alone, or with Caps Lock
+/// or Num Lock.
+const CTRL_MODS: [&str; 4] = ["5", "69", "133", "197"];
+
+impl DetachKey {
+    /// Whether `s` is a strict prefix of one of the key's CSI forms: it
+    /// could still become the key, and is not yet.
+    ///
+    /// A lone ESC is one. It is held too, under [`KEY_HOLD`], because a key
+    /// split right after its ESC must still detach. Terminals send ESC alone
+    /// only for the Escape key, which then reaches the program at most
+    /// 100 ms late, about what vim's own `ttimeoutlen` waits to tell Escape
+    /// from a sequence.
+    fn is_prefix(&self, s: &[u8]) -> bool {
+        if s.first() != Some(&0x1b) {
+            return false;
+        }
+        if s.len() == 1 {
+            return true;
+        }
+        if s[1] != b'[' || s.len() > 24 {
+            return false;
+        }
+        let Ok(p) = std::str::from_utf8(&s[2..]) else {
+            return false;
+        };
+        if !p
+            .bytes()
+            .all(|c| c.is_ascii_digit() || c == b';' || c == b':')
+        {
+            return false;
+        }
+        let cp = self.codepoint.to_string();
+        let f: Vec<&str> = p.split(';').collect();
+        let mods_prefix = |m: &str| CTRL_MODS.iter().any(|c| c.starts_with(m));
+        let mods_done = |m: &str| CTRL_MODS.contains(&m);
+        // Kitty: CSI code[:alternates] ; mods[:event] u
+        let kitty = match &f[..] {
+            [code] => {
+                let mut subs = code.split(':');
+                let first = subs.next().unwrap_or("");
+                if code.contains(':') {
+                    first == cp
+                } else {
+                    cp.starts_with(first)
+                }
+            }
+            [code, mods] => {
+                code.split(':').next() == Some(cp.as_str()) && {
+                    let m: Vec<&str> = mods.split(':').collect();
+                    match &m[..] {
+                        [m0] => mods_prefix(m0),
+                        [m0, ev] => mods_done(m0) && matches!(*ev, "" | "1" | "2"),
+                        _ => false,
+                    }
+                }
+            }
+            _ => false,
+        };
+        // modifyOtherKeys: CSI 27 ; mods ; code ~
+        let mok = !p.contains(':')
+            && match &f[..] {
+                [a] => "27".starts_with(a),
+                [a, m] => *a == "27" && mods_prefix(m),
+                [a, m, c] => *a == "27" && mods_done(m) && cp.starts_with(c),
+                _ => false,
+            };
+        kitty || mok
+    }
+}
+
+/// What the relay does with keystrokes: finds the detach key, holding a
+/// possible start of its CSI forms at the end of a read until a later read
+/// completes or rules it out, or [`KEY_HOLD`] passes. Bytes are never
+/// reordered.
+#[derive(Debug)]
+pub struct KeyScanner {
+    key: Option<DetachKey>,
+    held: Vec<u8>,
+    deadline: Option<Instant>,
+}
+
+/// What a read of keystrokes gives.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Scanned {
+    /// Bytes for the program, in order.
+    pub forward: Vec<u8>,
+    /// The detach key came after them.
+    pub detach: bool,
+}
+
+impl KeyScanner {
+    pub fn new(key: Option<DetachKey>) -> KeyScanner {
+        KeyScanner {
+            key,
+            held: Vec::new(),
+            deadline: None,
+        }
+    }
+
+    /// Bytes read from the terminal at `now`.
+    pub fn push(&mut self, bytes: &[u8], now: Instant) -> Scanned {
+        let Some(key) = self.key else {
+            return Scanned {
+                forward: bytes.to_vec(),
+                detach: false,
+            };
+        };
+        let mut data = std::mem::take(&mut self.held);
+        data.extend_from_slice(bytes);
+        if let Some((at, _)) = key.find(&data) {
+            self.deadline = None;
+            data.truncate(at);
+            return Scanned {
+                forward: data,
+                detach: true,
+            };
+        }
+        // Only the last ESC can start a prefix: none may contain another.
+        if let Some(j) = data.iter().rposition(|&b| b == 0x1b)
+            && key.is_prefix(&data[j..])
+        {
+            self.held = data.split_off(j);
+            // A held start keeps its first deadline.
+            if self.deadline.is_none() || j > 0 {
+                self.deadline = Some(now + KEY_HOLD);
+            }
+        } else {
+            self.deadline = None;
+        }
+        Scanned {
+            forward: data,
+            detach: false,
+        }
+    }
+
+    /// Bytes held past their time, now forwarded unchanged.
+    pub fn tick(&mut self, now: Instant) -> Vec<u8> {
+        if self.deadline.is_some_and(|d| now >= d) {
+            self.deadline = None;
+            return std::mem::take(&mut self.held);
+        }
+        Vec::new()
+    }
+
+    /// When [`KeyScanner::tick`] has something to do.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+}
+
 /// What `perch attach` does.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -421,6 +577,7 @@ fn relay(session: Session, sig_r: &OwnedFd, key: Option<DetachKey>) -> End {
     let mut stdin_open = true;
     let mut sock_open = true;
     let mut detaching = false;
+    let mut keys = KeyScanner::new(key);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         // Take the next frame once the last is written.
@@ -477,8 +634,17 @@ fn relay(session: Session, sig_r: &OwnedFd, key: Option<DetachKey>) -> End {
         ];
         let read_stdin = stdin_open && !detaching && to_sock.len() < SOCKET_BACKLOG;
         fds.push(PollFd::new(0, read_stdin, false));
-        if sys::poll(&mut fds, None).is_err() {
+        let timeout = keys.deadline().map(|d| {
+            let left = d.saturating_duration_since(Instant::now());
+            left.as_millis() as u64 + u64::from(left.subsec_nanos() % 1_000_000 != 0)
+        });
+        if sys::poll(&mut fds, timeout).is_err() {
             continue;
+        }
+        // A held start of the detach key whose time is up.
+        let late = keys.tick(Instant::now());
+        if !late.is_empty() {
+            to_sock.extend(proto::encode(kind::INPUT, &late).expect("held bytes are few"));
         }
 
         for sig in take_signals(sig_r) {
@@ -494,18 +660,20 @@ fn relay(session: Session, sig_r: &OwnedFd, key: Option<DetachKey>) -> End {
         // Keystrokes.
         if read_stdin && (fds[3].readable || fds[3].hangup) {
             match sys::read(0, &mut buf[..INPUT_CHUNK]) {
-                Ok(0) => stdin_open = false,
-                Ok(n) => {
-                    let mut data = &buf[..n];
-                    if let Some(k) = key
-                        && let Some((at, _)) = k.find(data)
-                    {
-                        data = &data[..at];
-                        detaching = true;
+                Ok(0) => {
+                    stdin_open = false;
+                    let rest = keys.tick(Instant::now() + KEY_HOLD);
+                    if !rest.is_empty() {
+                        to_sock.extend(proto::encode(kind::INPUT, &rest).expect("few"));
                     }
-                    if !data.is_empty() {
+                }
+                Ok(n) => {
+                    let scanned = keys.push(&buf[..n], Instant::now());
+                    detaching = scanned.detach;
+                    if !scanned.forward.is_empty() {
                         to_sock.extend(
-                            proto::encode(kind::INPUT, data).expect("input chunks are small"),
+                            proto::encode(kind::INPUT, &scanned.forward)
+                                .expect("input chunks are small"),
                         );
                     }
                 }
@@ -616,6 +784,118 @@ mod tests {
         assert_eq!(k.find(b"\x1b[27;5;92~"), Some((0, 10)));
         assert_eq!(k.find(b"\x1b[27;5;93~"), None);
         assert_eq!(k.find(b"\x1b[A\x1b["), None);
+    }
+
+    /// Feeds `parts` as separate reads, 10 ms apart, and returns what was
+    /// forwarded, whether it detached, and what is still held.
+    fn scan(key: Option<DetachKey>, parts: &[&[u8]]) -> (Vec<u8>, bool, Vec<u8>) {
+        let mut k = KeyScanner::new(key);
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            let now = t0 + Duration::from_millis(10 * i as u64);
+            out.extend(k.tick(now));
+            let s = k.push(p, now);
+            out.extend(s.forward);
+            if s.detach {
+                return (out, true, k.held);
+            }
+        }
+        (out, false, k.held)
+    }
+
+    #[test]
+    fn every_split_of_the_csi_forms_detaches() {
+        let k = Some(DetachKey::DEFAULT);
+        for form in [&b"\x1b[92;5u"[..], b"\x1b[92;5:1u", b"\x1b[27;5;92~"] {
+            for cut in 1..form.len() {
+                let mut first = b"ab".to_vec();
+                first.extend_from_slice(&form[..cut]);
+                let (out, detach, _) = scan(k, &[&first, &form[cut..]]);
+                assert!(detach, "{form:?} cut at {cut}");
+                assert_eq!(out, b"ab", "{form:?} cut at {cut}");
+            }
+            // In three reads, every pair of cuts.
+            for a in 1..form.len() {
+                for b in a + 1..form.len() {
+                    let (out, detach, _) = scan(k, &[&form[..a], &form[a..b], &form[b..]]);
+                    assert!(detach && out.is_empty(), "{form:?} cut at {a}, {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn escape_and_arrows_are_forwarded_in_order_within_the_hold() {
+        let k = Some(DetachKey::DEFAULT);
+        // Escape alone: held, then forwarded unchanged once the hold ends.
+        let mut s = KeyScanner::new(k);
+        let t0 = Instant::now();
+        assert_eq!(s.push(b"\x1b", t0).forward, b"");
+        assert_eq!(s.deadline(), Some(t0 + KEY_HOLD));
+        assert_eq!(s.tick(t0 + KEY_HOLD - Duration::from_millis(1)), b"");
+        assert_eq!(s.tick(t0 + KEY_HOLD), b"\x1b");
+        assert_eq!(s.deadline(), None);
+        // Escape then a key: forwarded at once, in order.
+        assert_eq!(
+            scan(k, &[b"\x1b", b"j"]),
+            (b"\x1bj".to_vec(), false, vec![])
+        );
+        // An arrow key split at every point.
+        for arrow in [&b"\x1b[A"[..], b"\x1bOA", b"\x1b[1;5C"] {
+            for cut in 1..arrow.len() {
+                let (out, detach, held) = scan(k, &[&arrow[..cut], &arrow[cut..], b"x"]);
+                assert!(!detach);
+                assert!(held.is_empty(), "{arrow:?} at {cut}");
+                let mut want = arrow.to_vec();
+                want.push(b'x');
+                assert_eq!(out, want, "{arrow:?} at {cut}");
+            }
+        }
+        // A held start that keeps growing keeps its first deadline.
+        let mut s = KeyScanner::new(k);
+        s.push(b"\x1b[", t0);
+        s.push(b"9", t0 + Duration::from_millis(60));
+        assert_eq!(s.tick(t0 + KEY_HOLD), b"\x1b[9");
+    }
+
+    #[test]
+    fn only_strict_prefixes_are_held() {
+        let k = DetachKey::DEFAULT;
+        for p in [
+            &b"\x1b"[..],
+            b"\x1b[",
+            b"\x1b[9",
+            b"\x1b[92",
+            b"\x1b[92;",
+            b"\x1b[92;5",
+            b"\x1b[92;5:",
+            b"\x1b[92:124;6",
+            b"\x1b[2",
+            b"\x1b[27;",
+            b"\x1b[27;5;9",
+        ] {
+            assert!(k.is_prefix(p), "{p:?}");
+        }
+        for p in [
+            &b"x"[..],
+            b"\x1bO",
+            b"\x1b[A",
+            b"\x1b[1",
+            b"\x1b[93",
+            b"\x1b[92;7",
+            b"\x1b[92;5:3",
+            b"\x1b[27;5;8",
+            b"\x1b[27;7",
+            b"\x1b[92;5u",
+        ] {
+            assert!(!k.is_prefix(p), "{p:?}");
+        }
+        // With the key off, nothing is held.
+        assert_eq!(
+            scan(None, &[b"\x1b[92"]),
+            (b"\x1b[92".to_vec(), false, vec![])
+        );
     }
 
     #[test]
