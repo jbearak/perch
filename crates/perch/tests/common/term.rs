@@ -245,6 +245,14 @@ impl Recorder {
         self.send(kind::INPUT, bytes);
     }
 
+    /// Input that may find the connection already closed: a terminal's
+    /// late answer after the supervisor let it go.
+    pub fn late_input(&mut self, bytes: &[u8]) {
+        let _ = self
+            .stream
+            .write_all(&proto::encode(kind::INPUT, bytes).unwrap());
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.send(
             kind::RESIZE,

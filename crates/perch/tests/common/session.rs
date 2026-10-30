@@ -141,7 +141,13 @@ impl Timer {
             let text = std::fs::read_to_string(&self.out).ok()?;
             (text.lines().count() >= want).then_some(text)
         })
-        .unwrap_or_else(|| panic!("round {want} never finished"));
+        .unwrap_or_else(|| {
+            let log = self.out.with_file_name(perch::supervisor::LOG_FILE);
+            panic!(
+                "round {want} never finished; supervisor.log:\n{}",
+                std::fs::read_to_string(log).unwrap_or_default()
+            )
+        });
         let line = text.lines().nth(want - 1).unwrap();
         serde_json::from_str::<Value>(line)
             .unwrap()

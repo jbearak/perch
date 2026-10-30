@@ -669,8 +669,12 @@ impl Supervisor {
             self.client_flush(client_writable);
             self.handle_model_events();
             self.model.flush();
+            // A client let go above (too slow, say) joined `conns` after
+            // the poll set was built, at the end; it was not polled.
             for (k, c) in self.conns.iter_mut().enumerate() {
-                let p = fds[conn_base + k];
+                let Some(p) = fds.get(conn_base + k) else {
+                    break;
+                };
                 if p.readable || p.hangup {
                     read_conn(c);
                 }
