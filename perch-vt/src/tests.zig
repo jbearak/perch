@@ -1063,6 +1063,20 @@ test "a saved cursor waiting to wrap at an interior margin" {
     try expectSameTerminal(a, r.vt);
 }
 
+test "a protected cursor carried to the alternate screen, the primary's waiting to wrap at an interior margin" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    a.feed("\x1b[1\"q\x1b[?69h\x1b[1;9s\x1b[1;9H \x1b[?47h\x1b[H", 0);
+    try testing.expect(primary(a).cursor.pending_wrap);
+    try testing.expect(alternate(a).cursor.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expect(primary(r.vt).cursor.pending_wrap);
+    try testing.expectEqual(primary(a).cursor.x, primary(r.vt).cursor.x);
+    try testing.expect(alternate(r.vt).cursor.protected);
+    try expectSameTerminal(a, r.vt);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();

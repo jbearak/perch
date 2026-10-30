@@ -268,13 +268,18 @@ const Builder = struct {
         const primary = self.t.screens.get(.primary).?;
         const alt = self.t.screens.get(.alternate).?;
         // The primary cursor's place, waiting to wrap by printing this
-        // screen's own cell there.
+        // screen's own cell there: at the edge, or away from it at a right
+        // margin set there for it (which homes the cursor) and dropped
+        // again (which does not) before the copy.
         const c = &primary.cursor;
-        if (c.pending_wrap and c.x == alt.pages.cols - 1) {
+        const interior = c.pending_wrap and c.x != alt.pages.cols - 1 and c.x > 0;
+        if (c.pending_wrap and (c.x == alt.pages.cols - 1 or interior)) {
             const row = activePin(alt, c.y);
             const start = edgeStart(row, c.x);
+            if (interior) try w.print("\x1b[?69h\x1b[1;{d}s", .{c.x + 1});
             try writeCup(w, c.y, start, .{});
             try writeCell(w, row, start, false);
+            if (interior) try w.writeAll("\x1b[?69l");
         } else try writeCup(w, c.y, c.x, .{});
         try w.print("{f}", .{c.style.formatterVt()});
         try w.writeAll("\x1b[?47l");
