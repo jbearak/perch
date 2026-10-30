@@ -34,13 +34,15 @@ If a name or prefix matches more than one session, the command fails and lists t
 
 `perch help` (or `--help`, `-h`) prints a usage summary. A usage error prints the message and the summary and exits with 2.
 
+An option that takes a value accepts it as the next argument or after `=`: `--name thesis` and `--name=thesis` are the same.
+
 ### perch new
 
 ```text
 perch new [options] -- <command> [args...]
 ```
 
-Starts `<command>` in a new session. Without `-d` it then attaches the current terminal to the session, as `perch attach` does. The `--` is needed only when the command or its arguments start with `-`.
+Starts `<command>` in a new session. Without `-d` it then attaches the current terminal to the session, as `perch attach` does. The command starts at the first argument that does not begin with `-`; it and everything after it, options included, go to the program. `--` is needed only when the command's own name begins with `-`, and is always allowed.
 
 | Option | Effect |
 |--------|--------|
@@ -86,6 +88,8 @@ perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]
 ```
 
 Attaches the current terminal to a running session. Only one terminal is attached at a time. Attaching takes the session from any other terminal attached to it. That terminal prints `[perch] Opened in another window. Press Enter to take it back, or close this terminal.` and waits.
+
+A terminal also waits for Enter when it cannot keep up. If the session has output waiting and the terminal reads none of it for 5 seconds, Perch drops the waiting output and redraws the screen once the terminal reads again. After 3 such stalls within 10 minutes it detaches the terminal, which prints `[perch] This terminal could not keep up. Press Enter to attach again, or close this terminal.` In both cases Enter attaches again in the same terminal, with the `--restore` mode it was started with; the detach key leaves instead.
 
 | Option | Effect |
 |--------|--------|
@@ -179,6 +183,8 @@ memory:      about 3.2 MB
 foreground:  make (48230)
 model:       ok
 ```
+
+Lines for `owner`, each `annotation` (`annotation: key=value`) and `degraded` are added when the session has them. Fields the supervisor reports (size, last output, memory, foreground, model) appear only for a running session that answered.
 
 `memory` is the summed resident memory of the program and every process in its terminal session. Shared pages are counted once per process, so it is an estimate. `cwd` is the program's current directory if Perch can read it, else the last directory the program reported with OSC 7, else the directory it started in. `model` is the state of the screen model Perch keeps for restores: `ok`, `partial` or `failed` (see [Limits](usage.md#limits)).
 
@@ -301,7 +307,7 @@ perch 0.1.0 (Ghostty 521cf2c, selftest ok)
 | Code | Commands | Meaning |
 |------|----------|---------|
 | 0 | all | Success. For `attach` and `new`: detached, or the program exited with 0. |
-| 1 | all | An error, printed as `perch: <message>`. For `attach` and `new`: the connection to the session was lost. For `doctor`: a check failed. |
+| 1 | all | An error, printed as `perch: <message>`. For `attach` and `new`: the connection to the session was lost. For `doctor`: a check failed. For `version`: the self-test failed. |
 | 2 | all | A usage error. |
 | 3 | `send` | The input queue is full; nothing was sent. |
 | 4 | `send` | The connection dropped; the input may not have been sent. |
@@ -356,7 +362,7 @@ perch new --link-env SSH_AUTH_SOCK --link-env VSCODE_IPC_HOOK_CLI -- zsh
 
 ## JSON output
 
-Every `--json` output is one JSON value. Top-level documents carry `"schema": 1`. Fields may be added in later versions, and readers should ignore fields they do not know.
+Every `--json` output is one JSON value. `list --json` and `doctor --json` carry `"schema": 1` at the top level, as does the hidden `self-install` that the extension runs. `info --json` and `version --json` do not. Fields may be added in later versions, and readers should ignore fields they do not know.
 
 ### list --json and info --json
 
@@ -375,26 +381,26 @@ Every `--json` output is one JSON value. Top-level documents carry `"schema": 1`
 | `dir` | string | The session directory. |
 | `host` | string | The host name. |
 | `createdAt` | string | When it started, RFC 3339 in UTC. |
-| `endedAt` | string | When it ended, for `exited` and `lost`. |
+| `endedAt` | string | When it ended. Present only for `exited` and `lost`. |
 | `state` | string | `starting`, `running`, `unresponsive`, `exited` or `lost`. |
-| `exit` | object or null | How the program ended: `code`, or `signal` (such as `SIGKILL`) and `signalNumber`, or `error` if it never started. |
+| `exit` | object or null | Null while running. How the program ended: `code`, or `signal` (such as `SIGKILL`) and `signalNumber`, or `error` if it never started. Each of these is present only when it applies. |
 | `attached` | boolean | Whether a terminal is attached. |
 | `clientLabel` | string or null | The attached terminal's label. |
 | `clientPid` | number or null | The attached client's process ID, if known. |
-| `pid` | number or null | The program's process ID. |
-| `pidStart` | string or null | The program's start time, as Perch records it. |
+| `pid` | number or null | The program's process ID; null before it starts. |
+| `pidStart` | string or null | The program's start time, as Perch records it; null before it starts. |
 | `supervisorPid` | number | The supervisor's process ID. |
 | `supervisorStart` | string | The supervisor's start time. |
 | `perchVersion` | string | The version of the `perch` that started the session. |
 | `protocol` | object | `min` and `max` protocol versions the supervisor speaks. |
 | `scrollback` | number | History lines the session keeps. |
-| `linkedEnv` | string array | The names of linked variables that were set at start. |
+| `linkedEnv` | string array | The names of linked variables that were set at start. Absent if none. |
 | `degraded` | string array | Problems the session has had, such as `directory-recreated`. |
 | `rows`, `cols` | number | The terminal size. |
 | `lastOutputAt` | string or null | When the program last wrote output. |
 | `lastInputAt` | string or null | When the program last received input. |
-| `memoryBytes` | number | Resident memory of the program's terminal session, an estimate. |
-| `foreground` | object | The foreground process group: `pid` and `name`. |
+| `memoryBytes` | number or null | Resident memory of the program's terminal session, an estimate; null if Perch found no processes. |
+| `foreground` | object or null | The foreground process group: `pid` and `name`; null if there is none. |
 | `model` | string | The screen model: `ok`, `partial` or `failed`. |
 
 `rows` through `model`, and `clientLabel` and `clientPid`, come from the supervisor and are present only for a running session that answered. `attached` is always present.

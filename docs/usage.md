@@ -163,6 +163,8 @@ Other variables, such as `DISPLAY`, are not updated.
 
 **History and memory.** A session keeps at most 10,000 lines of history. The model holds about 19 MB for 10,000 lines at 120 columns, and about 62 MB at 500 columns.
 
+**Slow terminals.** A terminal that stops reading output for 5 seconds while output is waiting is skipped: Perch drops what was waiting and redraws the screen when it reads again. A terminal that stalls 3 times within 10 minutes is detached and shows `[perch] This terminal could not keep up. Press Enter to attach again, or close this terminal.` The program keeps running either way.
+
 **One terminal at a time.** Opening a session elsewhere moves it.
 
 **Programs that detach themselves.** Processes that leave the session's terminal with their own `setsid` are not killed with it.

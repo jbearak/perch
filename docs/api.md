@@ -6,11 +6,13 @@ Perch never types into a session on its own. Input reaches a session only from i
 
 ## Finding Perch
 
-Perch's extension ID is `jbearak.perch`. It is a workspace extension, so in a remote window it runs on the remote host, next to the sessions. An extension that uses it must run on the same host, which workspace extensions do.
+Perch's extension ID is `jbearak.perch`. It is a workspace extension: in a remote window it runs in the remote extension host, next to the sessions. VS Code does not pass an extension's exports between extension hosts, so an extension that uses the API must run in the same host as Perch. In a remote window that means it must run as a workspace extension too; a UI extension running locally cannot use it.
+
+Perch activates on startup, before or after your extension, and it may be installed or removed while your extension runs. Events fired before you subscribe are lost. So subscribe to the events first, then take the snapshots with `terminals()` and `listSessions()`, and make handling idempotent: an attach or end can arrive while the first listing is in flight, and the snapshot and the event then describe the same session. Look Perch up again whenever `vscode.extensions.onDidChange` fires.
 
 ```ts
 import * as vscode from 'vscode';
-import type { PerchApiV1 } from './perch-api'; // a copy of the types below
+import type { PerchApiV1, SessionInfo } from './perch-api'; // a copy of the types below
 
 const callerId = 'jbearak.sight'; // your own extension ID
 
@@ -23,11 +25,62 @@ async function getPerch(): Promise<PerchApiV1 | undefined> {
   return api;
 }
 
-// Perch may be installed or removed while your extension runs.
-context.subscriptions.push(vscode.extensions.onDidChange(() => void reconnectPerch()));
-```
+let perch: PerchApiV1 | undefined;
+let perchEvents: vscode.Disposable | undefined;
+const sessions = new Map<string, SessionInfo>(); // yours, by ID
+const terminalsBySession = new Map<string, vscode.Terminal>();
 
-Perch activates on startup. It may activate before or after your extension, so do not rely on events fired before you subscribed. Call `terminals()` and `listSessions()` when you get the API, then subscribe to the events.
+// Idempotent: called for snapshot entries and events alike.
+function seen(session: SessionInfo, terminal?: vscode.Terminal): void {
+  if (session.state === 'exited' || session.state === 'lost') return ended(session);
+  sessions.set(session.id, session);
+  if (terminal !== undefined) terminalsBySession.set(session.id, terminal);
+}
+
+function ended(session: SessionInfo): void {
+  sessions.delete(session.id);
+  terminalsBySession.delete(session.id);
+}
+
+async function connectPerch(): Promise<void> {
+  const api = await getPerch();
+  if (api === perch) return;
+  perchEvents?.dispose();
+  perchEvents = undefined;
+  sessions.clear();
+  terminalsBySession.clear();
+  perch = api;
+  if (api === undefined) return;
+  // 1. Subscribe first.
+  const endedIds = new Set<string>();
+  perchEvents = vscode.Disposable.from(
+    api.onDidAttach(({ session, terminal }) => {
+      if (session.owner === callerId) seen(session, terminal);
+    }),
+    api.onDidEndSession((session) => {
+      endedIds.add(session.id);
+      ended(session);
+    }),
+  );
+  // 2. Then take the snapshots.
+  for (const { session, terminal } of api.terminals()) {
+    if (session.owner === callerId) seen(session, terminal);
+  }
+  const listed = await api.listSessions({ owner: callerId });
+  // 3. Reconcile: an end reported while the listing ran wins over it.
+  for (const session of listed) {
+    if (!endedIds.has(session.id)) seen(session);
+  }
+}
+
+export function activate(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.extensions.onDidChange(() => void connectPerch()),
+    { dispose: () => perchEvents?.dispose() },
+  );
+  void connectPerch();
+}
+```
 
 ## getApi
 
@@ -148,7 +201,7 @@ Lists every session on the host for this user, from every workspace and every ca
 
 ### terminals
 
-The Perch terminals open in this window that have not closed, with their sessions. It is synchronous and includes terminals whose session is still starting; their `state` is `starting` until a listing shows them. Call it when you get the API: after a window reload or an extension host restart, it is how you find the terminals that already exist.
+The Perch terminals open in this window that have not closed, with their sessions. It is synchronous and includes terminals whose session is still starting; their `state` is `starting` until a listing shows them. Call it when you get the API, after subscribing to the events: after a window reload or an extension host restart, it is how you find the terminals that already exist.
 
 ### attach
 
@@ -183,7 +236,7 @@ It rejects with a `PerchApiError`:
 
 ### kill
 
-Ends the session's program and everything it started in its terminal: SIGHUP, then SIGKILL after 5 seconds, or SIGKILL at once with `force: true`. It does not ask the user. It resolves once the session has ended, and leaves no entry behind. It rejects with `no_session` if the session does not exist, and with a plain `Error` if it has already ended.
+Ends the session's program and everything it started in its terminal: SIGHUP, then SIGKILL after 5 seconds, or SIGKILL at once with `force: true`. It does not ask the user. It resolves once the session has ended, and leaves no entry behind. It rejects with `no_session` if the session does not exist or has already ended.
 
 ### annotate
 
@@ -201,7 +254,7 @@ How a window learns about an end: a session that exits while detached stays list
 
 ### Errors
 
-`PerchApiError` has a `name` of `'PerchApiError'` and a `code` from the table above. Check `err.code`, not `instanceof`, because the class is not exported. Calls other than `send` reject with a `PerchApiError` when one of the codes fits, and otherwise with the underlying `Error`.
+`PerchApiError` has a `name` of `'PerchApiError'` and a `code` from the table above. Check `err.code`, not `instanceof`, because the class is not exported. Calls other than `send` reject with a `PerchApiError` when one of the codes fits (`attach`, `kill` and `annotate` use `no_session` for a session that does not exist or has ended, and the calls that act on sessions use `unavailable` when Perch cannot run here), and otherwise with the underlying `Error`.
 
 ## Conventions
 
@@ -248,7 +301,7 @@ For R terminals from the profile picker, call `prepareLaunch` in Raven's `Termin
 
 Secrets go in these files, not in annotations.
 
-**Adoption.** When Raven gets the API, it calls `terminals()` and `listSessions()`. For each Raven terminal in this window, and on every later `onDidAttach`, it writes `raven-window.json`, registers the console socket, and reads `raven-r.json` to re-register the httpgd device. Sessions found only by `listSessions` are recorded as possible targets. Adoption sends no code to R and can run any number of times.
+**Adoption.** When Raven gets the API, it subscribes to `onDidAttach` and `onDidEndSession`, then calls `terminals()` and `listSessions()`, as in [Finding Perch](#finding-perch). For each Raven terminal in this window, and on every later `onDidAttach`, it writes `raven-window.json`, registers the console socket, and reads `raven-r.json` to re-register the httpgd device. Sessions found only by `listSessions` are recorded as possible targets. Adoption sends no code to R and can run any number of times.
 
 **Plots made while detached.** While no window is connected, R's posts to the plot server fail. Because R records the httpgd URL in `raven-r.json` whenever the device starts, a window that adopts the session later finds those plots.
 
@@ -279,7 +332,7 @@ await perch.send(session.id, `do ${quotedPath}`, { submit: true });
 
 Sends then work while the terminal is closed or attached in another window. The command is one short line, which suits `send`. On `outcome_unknown`, tell the user the command may not have run, and do not resend it.
 
-**Adoption.** When Sight gets the API, find surviving Stata sessions with `terminals()` and `listSessions({ owner: 'jbearak.sight' })`, so that the current Stata terminal survives a window reopen. Track later attaches with `onDidAttach` and ends with `onDidEndSession`.
+**Adoption.** When Sight gets the API, subscribe to `onDidAttach` and `onDidEndSession`, then find surviving Stata sessions with `terminals()` and `listSessions({ owner: 'jbearak.sight' })`, as in [Finding Perch](#finding-perch), so that the current Stata terminal survives a window reopen.
 
 **`--more--`.** Stata pauses at `--more--` when output fills the screen. A detached Stata waits there until someone attaches and presses a key, because Perch never answers it. Sight's documentation should tell users to put `set more off` in their `profile.do`.
 
