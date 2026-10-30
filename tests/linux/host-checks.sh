@@ -51,7 +51,14 @@ docker run -d --name "$name" --privileged --cgroupns=private \
 
 # systemd reports `degraded` if any unit failed; logind and sshd are what
 # matter.
-state=$(docker exec "$name" timeout 60 systemctl is-system-running --wait || true)
+# Right after `docker run` systemd's bus may not exist yet, and
+# `is-system-running --wait` then fails at once; poll until boot finishes.
+state=
+for _ in $(seq 60); do
+    state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
+    case $state in running | degraded) break ;; esac
+    sleep 1
+done
 echo "systemd: $state"
 for unit in systemd-logind.service ssh.service dbus.service; do
     if ! docker exec "$name" systemctl is-active --quiet "$unit"; then
