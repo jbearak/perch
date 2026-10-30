@@ -310,9 +310,10 @@ pub fn differences(
                     for (field, ev) in es.as_object().into_iter().flatten() {
                         let gv = &gs[field];
                         match field.as_str() {
-                            // Shell-integration state, which a restore
-                            // does not carry.
-                            "rows" | "history_rows" | "semantic_content" => {}
+                            // Shell-integration state and protected
+                            // cells, which a restore does not carry.
+                            "rows" | "history_rows" | "semantic_content" | "prompt_marks"
+                            | "protected_cells" => {}
                             // Never saved restores as the defaults at home,
                             // which is what the prologue saves.
                             "saved_cursor" if ev.is_null() && is_default_saved(gv) => {}

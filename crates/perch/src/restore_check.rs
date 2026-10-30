@@ -94,15 +94,29 @@ pub fn check(case: &Case) -> Result<(), String> {
         true,
     )?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
+    let state = dump_state(&model)?;
+    let screens = || {
+        ["primary", "alternate"]
+            .into_iter()
+            .map(|s| &state["screens"][s])
+    };
     // Known gap: cells protected before the restore (ISO or DEC) are not
     // protected in the client, because the row formatter does not write
-    // protection, so later erases treat them differently. Once the model
-    // has used protection, only the state right after the restore counts.
-    let state = dump_state(&model)?;
-    let protection_used = ["primary", "alternate"].iter().any(|s| {
-        state["screens"][s]["protected_mode"]
-            .as_str()
-            .is_some_and(|m| m != "off")
+    // protection, so later erases treat them differently, whatever the
+    // protection mode is by then (DECSTR turns the mode off, not the
+    // cells). Once the model has such cells, only the state right after
+    // the restore counts.
+    let protected_cells = screens().any(|s| s["protected_cells"] == true);
+    // Shell-integration prompt marks (OSC 133) in the cursor, rows and
+    // cells are Ghostty state the formatter does not write, and Ghostty
+    // acts on them (ED 2 at a prompt scrolls the screen into history
+    // instead of clearing it), which a client such as xterm.js does not.
+    // Marks made only after the restore reach both alike.
+    let prompt_marks = screens().any(|s| {
+        s["prompt_marks"] == true
+            || s["semantic_content"]
+                .as_str()
+                .is_some_and(|c| c != "output")
     });
 
     terminal.feed(feeder.held(), 0);
@@ -141,26 +155,7 @@ pub fn check(case: &Case) -> Result<(), String> {
     }
     // REP (`CSI n b`) repeats the last character printed, which no restore
     // carries.
-    // Shell-integration prompt marks (OSC 133) are Ghostty state the
-    // formatter does not write, and Ghostty acts on them (ED 2 at a prompt
-    // scrolls the screen into history instead of clearing it), which a
-    // client such as xterm.js does not.
-    let after_state = dump_state(&model)?;
-    let prompt_marks = [&state, &after_state].iter().any(|v| {
-        ["primary", "alternate"].iter().any(|s| {
-            v["screens"][s]["semantic_content"]
-                .as_str()
-                .is_some_and(|c| c != "output")
-        })
-    });
-    // Protection may also start only in the output after the restore, over
-    // cells protected earlier (DECSTR turns the mode off, not the cells).
-    let protection_after = ["primary", "alternate"].iter().any(|s| {
-        after_state["screens"][s]["protected_mode"]
-            .as_str()
-            .is_some_and(|m| m != "off")
-    });
-    if has_rep(case.after) || protection_used || protection_after || prompt_marks {
+    if has_rep(case.after) || protected_cells || prompt_marks {
         return Ok(());
     }
     // Reverse wraparound follows the screen rows' soft-wrap marks, which
@@ -556,6 +551,39 @@ mod tests {
             n += 1;
         }
         assert!(n > 0);
+    }
+
+    /// What the check stops at is found in the model's cells and rows, not
+    /// from its modes alone.
+    #[test]
+    fn omitted_state_is_found_in_cells() {
+        let mut m = Model::new(10, 3, SCROLLBACK, SCROLLBACK_BYTES).unwrap();
+        let flags = |m: &Model| {
+            let v = dump_state(m).unwrap();
+            let s = &v["screens"]["primary"];
+            (
+                s["protected_mode"].clone(),
+                s["protected_cells"].clone(),
+                s["prompt_marks"].clone(),
+                s["semantic_content"].clone(),
+            )
+        };
+        assert_eq!(
+            flags(&m),
+            ("off".into(), false.into(), false.into(), "output".into())
+        );
+        // DECSTR turns protection off, not the cells.
+        m.feed(b"\x1b[1\"qab\x1b[!p", 0);
+        assert_eq!(
+            flags(&m),
+            ("off".into(), true.into(), false.into(), "output".into())
+        );
+        // A prompt's row stays marked once its command's output starts.
+        m.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07\r\nout", 0);
+        assert_eq!(
+            flags(&m),
+            ("off".into(), true.into(), true.into(), "output".into())
+        );
     }
 
     #[test]
