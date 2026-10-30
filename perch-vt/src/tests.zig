@@ -885,6 +885,43 @@ test "2027: a row joined onto its continuation does not cluster with the cell at
     try expectSameActive(primary(a), primary(r.vt));
 }
 
+test "2027: cells printed apart are written apart, though the first would take in the next" {
+    // A cell ending in ZWJ left of an emoji printed earlier: written in
+    // order, the emoji would join the cell and the rest of the row would
+    // shift left.
+    const a = try newModel(8, 2);
+    defer a.destroy();
+    a.feed("\x1b[?2027hab\xf0\x9f\x91\xa8cd\r\xf0\x9f\x91\xa9\xe2\x80\x8d", 0);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try expectSameActive(primary(a), primary(r.vt));
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "xyz\r\n");
+    try expectSameActive(primary(a), primary(r.vt));
+
+    // In history, and with a row joined onto the next: the cells are fixed
+    // up after the wrap, so the cursor still waits at the edge to make it.
+    const b = try newModel(6, 2);
+    defer b.destroy();
+    b.feed("\x1b[?2027hab\xf0\x9f\x91\xa8cd\r\xf0\x9f\x91\xa9\xe2\x80\x8d\x1b[6Gefgh\r\n\n\n", 0);
+    try testing.expect(historyRows(primary(b)) >= 2);
+    const s = try restoreInto(b, .full, unlimited);
+    defer s.deinit();
+    try testing.expectEqual(historyRows(primary(b)), historyRows(primary(s.vt)));
+    try expectHistoryTail(primary(b), primary(s.vt));
+    try expectSameTerminal(b, s.vt);
+
+    // A row ending in a spacer head, whose wide character takes in the
+    // next cell.
+    const c = try newModel(5, 3);
+    defer c.destroy();
+    c.feed("\x1b[?2027habcd\xf0\x9f\x91\xa9\xf0\x9f\x91\xa8\x1b[2;1H\xf0\x9f\x91\xa9\xe2\x80\x8d\r\n\n\n", 0);
+    const u = try restoreInto(c, .full, unlimited);
+    defer u.deinit();
+    try expectHistoryTail(primary(c), primary(u.vt));
+    try expectSameTerminal(c, u.vt);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();

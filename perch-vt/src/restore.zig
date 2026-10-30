@@ -59,7 +59,11 @@ pub const Error = Allocator.Error || error{TooLarge};
 pub fn build(alloc: Allocator, t: *const Terminal, mode: Mode, limits: Limits) Error![]u8 {
     var aw: Writer.Allocating = .init(alloc);
     defer aw.deinit();
-    var b: Builder = .{ .alloc = alloc, .aw = &aw, .t = t, .limits = limits };
+    var joiner: Joiner = undefined;
+    const cluster = t.modes.get(.grapheme_cluster);
+    if (cluster) try joiner.init(alloc);
+    defer if (cluster) joiner.deinit(alloc);
+    var b: Builder = .{ .alloc = alloc, .aw = &aw, .t = t, .limits = limits, .joiner = if (cluster) &joiner else null };
     b.run(mode) catch |err| return switch (err) {
         error.WriteFailed => error.OutOfMemory,
         else => |e| e,
@@ -86,7 +90,7 @@ fn writeTail(w: *Writer, t: *const Terminal, history_rows: usize) Writer.Error!v
         const first = historyPin(primary, total_history - n);
         const last = historyPin(primary, total_history - 1);
         var it = first.rowIterator(.right_down, last);
-        while (it.next()) |row| try rows.write(w, row);
+        while (it.next()) |row| try rows.write(w, row, null);
     }
     const active = t.screens.active;
     // History and an alternate screen are not one stream of lines.
@@ -98,7 +102,7 @@ fn writeTail(w: *Writer, t: *const Terminal, history_rows: usize) Writer.Error!v
         const first = activePin(active, 0);
         const last = activePin(active, last_y);
         var it = first.rowIterator(.right_down, last);
-        while (it.next()) |row| try rows.write(w, row);
+        while (it.next()) |row| try rows.write(w, row, null);
     }
     if (rows.prev != null) try w.writeAll("\n");
 }
@@ -110,6 +114,8 @@ const Builder = struct {
     limits: Limits,
     /// Bytes of history written, which `byte_cap` does not count.
     history_len: usize = 0,
+    /// With grapheme clustering (2027), finds the cells that would cluster.
+    joiner: ?*Joiner = null,
 
     fn out(self: *Builder) *Writer {
         return &self.aw.writer;
@@ -152,9 +158,13 @@ const Builder = struct {
         if (kept == 0) return;
         const total = historyRows(screen);
 
-        var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
+        var rows: RowWriter = .{ .sep = "\r\n", .joiner = self.joiner, .rows = self.t.rows };
         var it = historyPin(screen, total - kept).rowIterator(.right_down, historyPin(screen, total - 1));
-        while (it.next()) |row| try rows.write(self.out(), row);
+        var next = it.next();
+        while (next) |row| {
+            next = it.next();
+            try rows.write(self.out(), row, next);
+        }
         try self.out().splatBytesAll("\r\n", self.t.rows);
     }
 
@@ -167,10 +177,12 @@ const Builder = struct {
         try writeCleanSlate(w);
         try w.writeAll("\x1b[H\x1b[2J");
         if (lastUsedRow(screen)) |last| {
-            var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
+            var rows: RowWriter = .{ .sep = "\r\n", .joiner = self.joiner, .rows = self.t.rows };
             var it = activePin(screen, 0).rowIterator(.right_down, activePin(screen, last));
-            while (it.next()) |row| {
-                try rows.write(w, row);
+            var next = it.next();
+            while (next) |row| {
+                next = it.next();
+                try rows.write(w, row, next);
                 try self.check();
             }
         }
@@ -278,14 +290,23 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
     defer alloc.free(content);
     const between = try alloc.alloc(usize, n);
     defer alloc.free(between);
-    var rows: RowWriter = .{ .sep = "\r\n", .cluster = t.modes.get(.grapheme_cluster) };
+    var joiner: Joiner = undefined;
+    const cluster = t.modes.get(.grapheme_cluster);
+    if (cluster) try joiner.init(alloc);
+    defer if (cluster) joiner.deinit(alloc);
+    var rows: RowWriter = .{ .sep = "\r\n", .joiner = if (cluster) &joiner else null, .rows = t.rows };
     var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
     var i: usize = 0;
-    while (it.next()) |row| : (i += 1) {
+    var next = it.next();
+    while (next) |row| : (i += 1) {
+        next = it.next();
+        // The row as the first one written, and as written after the one
+        // before (whose cells fixed up after a wrap count here).
+        var alone: RowWriter = .{ .sep = rows.sep, .joiner = rows.joiner, .rows = rows.rows };
         var own: Writer.Discarding = .init(&.{});
-        writeRowCells(&own.writer, row) catch unreachable;
+        alone.write(&own.writer, row, next) catch return error.OutOfMemory;
         var all: Writer.Discarding = .init(&.{});
-        rows.write(&all.writer, row) catch unreachable;
+        rows.write(&all.writer, row, next) catch return error.OutOfMemory;
         content[i] = @intCast(own.count);
         between[i] = @as(usize, @intCast(all.count)) - content[i];
     }
@@ -308,18 +329,42 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
 /// when the terminal will wrap there by itself.
 const RowWriter = struct {
     sep: []const u8,
-    /// Grapheme clustering (2027) is on.
-    cluster: bool = false,
+    /// Set when grapheme clustering (2027) is on.
+    joiner: ?*Joiner = null,
+    /// The screen's height.
+    rows: usize = 0,
     prev: ?Pin = null,
+    /// A row whose takers (see `Joiner`) are left to write after the wrap
+    /// onto the next, which needs the cursor waiting at the edge; and
+    /// whether that row was wrapped onto from a spacer head.
+    pending: ?struct { Pin, bool } = null,
 
-    fn write(self: *RowWriter, w: *Writer, row: Pin) Writer.Error!void {
+    /// `next` is the row that will be written after this one, if any.
+    fn write(self: *RowWriter, w: *Writer, row: Pin, next: ?Pin) Writer.Error!void {
+        const from_head = if (self.prev) |prev| joins(prev, row) and endsBeforeWideCharacter(prev) else false;
+        const wraps = if (next) |n| joins(row, n) else false;
+        const defer_taken = wraps and !endsBeforeWideCharacter(row);
+        var split = false;
+        var first = false;
+        if (self.joiner) |j| if (try j.splits(row)) {
+            first = from_head and try j.takesNext(row, 0);
+            // Fixing up a row from the one below or above needs both on
+            // the screen.
+            split = self.rows > 1 or !(defer_taken or first);
+            first = split and first;
+        };
+
         if (self.prev) |prev| {
             if (!joins(prev, row)) {
                 try w.writeAll(self.sep);
-            } else if (endsBeforeWideCharacter(prev)) {
+            } else if (from_head) {
                 // Only the wide character itself wraps here.
-                if (startsWithBackground(row)) try writeWrapPrimer(w, row);
-            } else if (self.cluster or startsWithBackground(row)) {
+                if (startsWithBackground(row) or first) try writeWrapPrimer(w, row);
+                // A taker: the next cell must be written while it is
+                // blank. (This clears the spacer head too, which
+                // `Joiner.writeTaken` makes again.)
+                if (first) try w.writeAll("\x1b[2X");
+            } else if (self.joiner != null or startsWithBackground(row)) {
                 // A space with the default pen makes the wrap: it joins no
                 // grapheme cluster (with 2027 a printed character can
                 // attach to the cell waiting at the edge instead of
@@ -329,10 +374,154 @@ const RowWriter = struct {
                 try w.writeAll("\x1b[0m \x08");
             }
         }
-        try writeRowCells(w, row);
+        if (self.pending) |pending| {
+            // Back up to the row before, now that the wrap is made, and
+            // down again to this one's start.
+            try w.writeAll("\x1b[A");
+            try self.joiner.?.writeTaken(w, pending[0], pending[1]);
+            try w.writeAll("\x1b[B\r");
+            self.pending = null;
+        }
+        if (!split) {
+            try writeRowCells(w, row);
+        } else {
+            const j = self.joiner.?;
+            try j.writeRest(w, row);
+            if (defer_taken) {
+                self.pending = .{ row, from_head };
+            } else {
+                try j.writeTaken(w, row, from_head);
+                // Back before the spacer head, where the wide character
+                // that follows wraps by itself.
+                if (wraps) try w.print("\x1b[{d}G", .{row.node.page().size.cols});
+            }
+        }
         self.prev = row;
     }
 };
+
+/// With grapheme clustering (2027), a terminal adds a printed character to
+/// the cluster in the cell to its left when they do not break, wherever the
+/// cursor came from. A program can still leave such cells apart (printing
+/// the right one first), and written in order they would join, shifting the
+/// rest of the row. Such a row is written without the cells that would take
+/// in the next ("takers"), each run after the first placed with CHA, then
+/// the takers from right to left, each while the cell to its right is in
+/// place and the one to its left (if a taker) still blank.
+///
+/// Whether two cells join is asked of a scratch terminal, so that it is
+/// Ghostty's own rule.
+const Joiner = struct {
+    t: Terminal,
+
+    fn init(self: *Joiner, alloc: Allocator) Allocator.Error!void {
+        self.t = Terminal.init(ghostty.TinyIo.init.io(), alloc, .{ .cols = 64, .rows = 1 }) catch
+            return error.OutOfMemory;
+        self.t.modes.set(.grapheme_cluster, true);
+    }
+
+    fn deinit(self: *Joiner, alloc: Allocator) void {
+        self.t.deinit(alloc);
+    }
+
+    /// Whether the row has a taker.
+    fn splits(self: *Joiner, row: Pin) Writer.Error!bool {
+        const cols = row.node.page().size.cols;
+        var x: CellCountInt = 0;
+        while (x < cols) : (x += 1) {
+            if (try self.takesNext(row, x)) return true;
+        }
+        return false;
+    }
+
+    /// Whether the cell at `x` (a narrow or wide character) takes in the
+    /// character in the cell after it when written just before.
+    fn takesNext(self: *Joiner, row: Pin, x: CellCountInt) Writer.Error!bool {
+        const page = row.node.page();
+        const cells = page.getCells(page.getRow(row.y));
+        const left = &cells[x];
+        if (!left.hasText()) return false;
+        const after = x + @as(CellCountInt, if (left.wide == .wide) 2 else 1);
+        switch (left.wide) {
+            .narrow, .wide => {},
+            .spacer_head, .spacer_tail => return false,
+        }
+        if (after >= cells.len) return false;
+        const right = &cells[after];
+        // Ghostty clusters only codepoints above U+00FF.
+        if (!right.hasText() or right.codepoint() <= 0xff) return false;
+
+        const t = &self.t;
+        t.carriageReturn();
+        t.eraseLine(.complete, false);
+        self.print(left.codepoint()) catch return error.WriteFailed;
+        if (left.content_tag == .codepoint_grapheme) {
+            if (page.lookupGrapheme(left)) |cps| for (cps) |cp| {
+                self.print(cp) catch return error.WriteFailed;
+            };
+        }
+        const start = t.screens.active.cursor.x;
+        self.print(right.codepoint()) catch return error.WriteFailed;
+        const pin = t.screens.active.pages.pin(.{ .active = .{} }).?;
+        const scratch = pin.node.page();
+        return !scratch.getCells(scratch.getRow(pin.y))[start].hasText();
+    }
+
+    fn print(self: *Joiner, cp: u21) !void {
+        // Past the scratch row's edge, nothing more can join.
+        if (self.t.screens.active.cursor.x + 2 >= self.t.cols) return;
+        try self.t.print(cp);
+    }
+
+    /// The row's cells without its takers, in runs.
+    fn writeRest(self: *Joiner, w: *Writer, row: Pin) Writer.Error!void {
+        const cols = row.node.page().size.cols;
+        var start: CellCountInt = 0;
+        var x: CellCountInt = 0;
+        while (x < cols) : (x += 1) {
+            if (!try self.takesNext(row, x)) continue;
+            if (x > start) try writeRun(w, row, start, x - 1);
+            start = x + @as(CellCountInt, if (cellAt(row, x).wide == .wide) 2 else 1);
+        }
+        if (start < cols) try writeRun(w, row, start, cols - 1);
+    }
+
+    /// The takers, right to left, from anywhere on the row. The formatter
+    /// writes no protection, and neither does this. A wide taker at the
+    /// start of a row wrapped onto from a spacer head (`from_head`) is
+    /// printed at the edge of the row above, where it wraps again and
+    /// makes the spacer head.
+    fn writeTaken(self: *Joiner, w: *Writer, row: Pin, from_head: bool) Writer.Error!void {
+        const cols = row.node.page().size.cols;
+        var x = cols;
+        while (x > 0) {
+            x -= 1;
+            if (!try self.takesNext(row, x)) continue;
+            if (x == 0 and from_head) {
+                try w.print("\x1b[A\x1b[{d}G", .{cols});
+            } else {
+                try w.print("\x1b[{d}G", .{x + 1});
+            }
+            try writeCell(w, row, x, false);
+        }
+    }
+};
+
+fn cellAt(row: Pin, x: CellCountInt) *const Cell {
+    return row.node.page().getRowAndCell(x, row.y).cell;
+}
+
+/// Columns `start` to `end` of a row, from `start` (where the cursor is
+/// for the row's first run).
+fn writeRun(w: *Writer, row: Pin, start: CellCountInt, end: CellCountInt) Writer.Error!void {
+    if (start > 0) try w.print("\x1b[{d}G", .{start + 1});
+    var f: PageFormatter = .init(row.node.page(), .vt);
+    f.start_y = row.y;
+    f.end_y = row.y;
+    f.start_x = start;
+    f.end_x = end;
+    try f.format(w);
+}
 
 /// Whether the row ends where a wide character did not fit, leaving the
 /// cursor before the edge rather than waiting to wrap.
@@ -537,6 +726,12 @@ fn edgeStart(row: Pin, x: CellCountInt) CellCountInt {
 /// Print one cell in its own style, hyperlink and protection, then reset
 /// all three. A cell with no text is printed as a space.
 fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
+    try writeCell(w, row, x, true);
+}
+
+/// Print one cell in its own style and hyperlink (and, with `protect`,
+/// protection), then reset them.
+fn writeCell(w: *Writer, row: Pin, x: CellCountInt, protect: bool) Writer.Error!void {
     const page = row.node.page();
     const cell = page.getRowAndCell(x, row.y).cell;
     const style: Style = switch (cell.content_tag) {
@@ -552,7 +747,8 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
         } } },
     };
     try w.print("{f}", .{style.formatterVt()});
-    if (cell.protected) try w.writeAll("\x1b[1\"q");
+    const protected = protect and cell.protected;
+    if (protected) try w.writeAll("\x1b[1\"q");
     var linked = false;
     if (cell.hyperlink) if (page.lookupHyperlink(cell)) |id| {
         const link = page.hyperlink_set.get(page.memory, id);
@@ -572,7 +768,7 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
         try w.writeByte(' ');
     }
     if (linked) try w.writeAll("\x1b]8;;\x1b\\");
-    if (cell.protected) try w.writeAll("\x1b[0\"q");
+    if (protected) try w.writeAll("\x1b[0\"q");
     try w.writeAll("\x1b[0m");
 }
 
