@@ -38,11 +38,15 @@ while [ -d "/proc/$pid" ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
 echo USERLAND-DONE
 '
 
+name=perch-userland-$$
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 failed=0
 for image in rockylinux:8 alpine:3; do
     echo "== $image"
     docker pull -q "$image" >/dev/null
-    name=perch-userland-$$
     docker create -t --name "$name" "$image" sh -c "$inner" >/dev/null
     docker cp "$bin" "$name:/usr/local/bin/perch"
     out=$(docker start -a "$name" 2>&1) && rc=0 || rc=$?
