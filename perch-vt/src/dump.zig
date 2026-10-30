@@ -113,7 +113,22 @@ fn writeScreen(w: *Writer, s: *const Screen) Writer.Error!void {
     // Shell-integration state (OSC 133), which restores do not carry; Ghostty
     // acts on it (ED 2 at a prompt scrolls instead of clearing).
     try w.print("}},\"semantic_content\":\"{s}\"", .{@tagName(c.semantic_content)});
-    try w.print(",\"protected_mode\":\"{s}\",\"charset\":", .{@tagName(s.protected_mode)});
+    try w.print(",\"protected_mode\":\"{s}\"", .{@tagName(s.protected_mode)});
+    // State in cells and rows that restores do not write: protection (the
+    // row formatter writes none), and shell-integration marks.
+    var protected_cells = false;
+    var prompt_marks = false;
+    var rows = s.pages.pin(.{ .screen = .{} }).?.rowIterator(.right_down, null);
+    while (rows.next()) |row| {
+        const page = row.node.page();
+        const r = page.getRow(row.y);
+        if (r.semantic_prompt != .none) prompt_marks = true;
+        for (page.getCells(r)) |cell| {
+            if (cell.protected) protected_cells = true;
+            if (cell.semantic_content != .output) prompt_marks = true;
+        }
+    }
+    try w.print(",\"protected_cells\":{},\"prompt_marks\":{},\"charset\":", .{ protected_cells, prompt_marks });
     try writeCharset(w, &s.charset);
 
     try w.writeAll(",\"saved_cursor\":");

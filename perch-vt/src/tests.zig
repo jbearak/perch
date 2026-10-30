@@ -885,6 +885,211 @@ test "2027: a row joined onto its continuation does not cluster with the cell at
     try expectSameActive(primary(a), primary(r.vt));
 }
 
+test "2027: cells printed apart are written apart, though the first would take in the next" {
+    // A cell ending in ZWJ left of an emoji printed earlier: written in
+    // order, the emoji would join the cell and the rest of the row would
+    // shift left.
+    const a = try newModel(8, 2);
+    defer a.destroy();
+    a.feed("\x1b[?2027hab\xf0\x9f\x91\xa8cd\r\xf0\x9f\x91\xa9\xe2\x80\x8d", 0);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try expectSameActive(primary(a), primary(r.vt));
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "xyz\r\n");
+    try expectSameActive(primary(a), primary(r.vt));
+
+    // In history, and with a row joined onto the next: the cells are fixed
+    // up after the wrap, so the cursor still waits at the edge to make it.
+    const b = try newModel(6, 2);
+    defer b.destroy();
+    b.feed("\x1b[?2027hab\xf0\x9f\x91\xa8cd\r\xf0\x9f\x91\xa9\xe2\x80\x8d\x1b[6Gefgh\r\n\n\n", 0);
+    try testing.expect(historyRows(primary(b)) >= 2);
+    const s = try restoreInto(b, .full, unlimited);
+    defer s.deinit();
+    try testing.expectEqual(historyRows(primary(b)), historyRows(primary(s.vt)));
+    try expectHistoryTail(primary(b), primary(s.vt));
+    try expectSameTerminal(b, s.vt);
+
+    // A row ending in a spacer head, whose wide character takes in the
+    // next cell.
+    const c = try newModel(5, 3);
+    defer c.destroy();
+    c.feed("\x1b[?2027habcd\xf0\x9f\x91\xa9\xf0\x9f\x91\xa8\x1b[2;1H\xf0\x9f\x91\xa9\xe2\x80\x8d\r\n\n\n", 0);
+    const u = try restoreInto(c, .full, unlimited);
+    defer u.deinit();
+    try expectHistoryTail(primary(c), primary(u.vt));
+    try expectSameTerminal(c, u.vt);
+}
+
+test "a protected cursor carried from the other screen, with this one's mode off" {
+    // 47, 1047 and 1049 copy the cursor, protection included, but each
+    // screen keeps its own protection mode.
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("\x1b[?1049h\x1b[1\"q\x1b[?47l", 0);
+    try testing.expectEqual(ghostty.ProtectedMode.off, primary(a).protected_mode);
+    try testing.expect(primary(a).cursor.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.off, primary(r.vt).protected_mode);
+    try testing.expect(primary(r.vt).cursor.protected);
+    try expectSameTerminal(a, r.vt);
+
+    // And a saved cursor protected that way.
+    const b = try newModel(4, 2);
+    defer b.destroy();
+    b.feed("\x1b[?1049h\x1b[1\"q\x1b[?47l\x1b7\x1b[0\"q", 0);
+    const s = try restoreInto(b, .screen, unlimited);
+    defer s.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.off, primary(s.vt).protected_mode);
+    try testing.expect(!primary(s.vt).cursor.protected);
+    try testing.expect(primary(s.vt).saved_cursor.?.protected);
+    try expectSameTerminal(b, s.vt);
+}
+
+test "a protected alternate cursor carried from the primary, with the alternate mode off" {
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("ab\x1b[1\"q\x1b[?47h\x1b7\x1b[2;2H\x1b[1m", 0);
+    try testing.expectEqual(ghostty.ProtectedMode.off, alternate(a).protected_mode);
+    try testing.expect(alternate(a).cursor.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.off, alternate(r.vt).protected_mode);
+    try testing.expectEqual(ghostty.ProtectedMode.dec, primary(r.vt).protected_mode);
+    try testing.expect(alternate(r.vt).cursor.protected);
+    try testing.expect(alternate(r.vt).saved_cursor.?.protected);
+    try expectSameTerminal(a, r.vt);
+    try testing.expectEqual(primary(a).cursor.x, primary(r.vt).cursor.x);
+    try testing.expect(primary(r.vt).cursor.protected);
+}
+
+test "the primary screen's own cursor style, with the default chosen on the alternate" {
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("\x1b[5 q\x1b[?1049h\x1b[!p\x1b[?1049l", 0);
+    try testing.expect(a.terminal.cursor.is_default);
+    try testing.expectEqual(ghostty.CursorStyle.bar, primary(a).cursor.cursor_style);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expect(r.vt.terminal.cursor.is_default);
+    try testing.expectEqual(ghostty.CursorStyle.bar, primary(r.vt).cursor.cursor_style);
+    try testing.expectEqual(a.terminal.modes.get(.cursor_blinking), r.vt.terminal.modes.get(.cursor_blinking));
+    try expectSameTerminal(a, r.vt);
+
+    // Restored on the alternate screen, the primary's comes back on leaving.
+    const b = try newModel(4, 2);
+    defer b.destroy();
+    b.feed("\x1b[5 q\x1b[?1049h\x1b[2 q", 0);
+    const u = try restoreInto(b, .full, unlimited);
+    defer u.deinit();
+    feedBoth(b, u.vt, "\x1b[?1049l");
+    try testing.expectEqual(ghostty.CursorStyle.bar, primary(u.vt).cursor.cursor_style);
+    try expectSameTerminal(b, u.vt);
+
+    // And the alternate screen given the primary's style again on entry.
+    const c = try newModel(4, 2);
+    defer c.destroy();
+    c.feed("\x1b[5 q\x1b[?1049h\x1b[!p\x1b[?1049l\x1b[?1049h", 0);
+    try testing.expectEqual(ghostty.CursorStyle.bar, alternate(c).cursor.cursor_style);
+    const v = try restoreInto(c, .full, unlimited);
+    defer v.deinit();
+    try testing.expect(v.vt.terminal.cursor.is_default);
+    try testing.expectEqual(ghostty.CursorStyle.bar, alternate(v.vt).cursor.cursor_style);
+    try testing.expectEqual(ghostty.CursorStyle.bar, primary(v.vt).cursor.cursor_style);
+    try expectSameTerminal(c, v.vt);
+}
+
+test "a DEL kept in the title" {
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("\x1b]2;x\x7fy\x07", 0);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try testing.expectEqualStrings(a.terminal.getTitle().?, r.vt.terminal.getTitle().?);
+}
+
+test "the hidden primary cursor waiting to wrap at an interior margin" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    a.feed("\x1b[?69h\x1b[3;9s\x1b[1;9H \x1b[?47h\x1b[H", 0);
+    try testing.expect(primary(a).cursor.pending_wrap);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expect(primary(r.vt).cursor.pending_wrap);
+    try testing.expectEqual(primary(a).cursor.x, primary(r.vt).cursor.x);
+    try expectSameTerminal(a, r.vt);
+}
+
+test "a protected alternate cursor restored from its saved cursor, with the alternate mode off" {
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("\x1b[1\"q\x1b[?47h\x1b7\x1b[?1049l\x1b[?47h\x1b8", 0);
+    try testing.expect(alternate(a).cursor.protected);
+    try testing.expect(!primary(a).cursor.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.off, alternate(r.vt).protected_mode);
+    try testing.expect(alternate(r.vt).cursor.protected);
+    try testing.expect(!primary(r.vt).cursor.protected);
+    try expectSameTerminal(a, r.vt);
+}
+
+test "a protected alternate saved cursor with both screens' modes off" {
+    const a = try newModel(4, 2);
+    defer a.destroy();
+    a.feed("\x1b[1\"q\x1b[?1049h\x1b7\x1b[?1049l\x1b[!p\x1b[?1049h\x1b[2;3H", 0);
+    try testing.expectEqual(ghostty.ProtectedMode.off, primary(a).protected_mode);
+    try testing.expectEqual(ghostty.ProtectedMode.off, alternate(a).protected_mode);
+    try testing.expect(alternate(a).saved_cursor.?.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expectEqual(ghostty.ProtectedMode.off, primary(r.vt).protected_mode);
+    try testing.expectEqual(ghostty.ProtectedMode.off, alternate(r.vt).protected_mode);
+    try testing.expect(alternate(r.vt).saved_cursor.?.protected);
+    try expectSameTerminal(a, r.vt);
+}
+
+test "a saved cursor waiting to wrap at an interior margin" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    a.feed("\x1b[?69h\x1b[3;9s\x1b[1;9H \x1b7\x1b[?69l\x1b[H", 0);
+    try testing.expect(primary(a).saved_cursor.?.pending_wrap);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "\x1b8x");
+    try expectSameTerminal(a, r.vt);
+}
+
+test "a protected cursor carried to the alternate screen, the primary's waiting to wrap at an interior margin" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    a.feed("\x1b[1\"q\x1b[?69h\x1b[1;9s\x1b[1;9H \x1b[?47h\x1b[H", 0);
+    try testing.expect(primary(a).cursor.pending_wrap);
+    try testing.expect(alternate(a).cursor.protected);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try testing.expect(primary(r.vt).cursor.pending_wrap);
+    try testing.expectEqual(primary(a).cursor.x, primary(r.vt).cursor.x);
+    try testing.expect(alternate(r.vt).cursor.protected);
+    try expectSameTerminal(a, r.vt);
+}
+
+test "a saved cursor waiting to wrap at an empty edge cell leaves it empty" {
+    // Without wraparound, a combining mark printed at the last column joins
+    // the cell under the cursor when that has text, else the one before.
+    const a = try newModel(3, 1);
+    defer a.destroy();
+    a.feed("\x1b[?2027h\x1b[?7lword \x1b[?1048h\x1b[3L ", 0);
+    const r = try restoreInto(a, .full, unlimited);
+    defer r.deinit();
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "e\xcc\x81");
+    try expectSameTerminal(a, r.vt);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();

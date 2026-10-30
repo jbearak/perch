@@ -59,7 +59,11 @@ pub const Error = Allocator.Error || error{TooLarge};
 pub fn build(alloc: Allocator, t: *const Terminal, mode: Mode, limits: Limits) Error![]u8 {
     var aw: Writer.Allocating = .init(alloc);
     defer aw.deinit();
-    var b: Builder = .{ .alloc = alloc, .aw = &aw, .t = t, .limits = limits };
+    var joiner: Joiner = undefined;
+    const cluster = t.modes.get(.grapheme_cluster);
+    if (cluster) try joiner.init(alloc);
+    defer if (cluster) joiner.deinit(alloc);
+    var b: Builder = .{ .alloc = alloc, .aw = &aw, .t = t, .limits = limits, .joiner = if (cluster) &joiner else null };
     b.run(mode) catch |err| return switch (err) {
         error.WriteFailed => error.OutOfMemory,
         else => |e| e,
@@ -86,7 +90,7 @@ fn writeTail(w: *Writer, t: *const Terminal, history_rows: usize) Writer.Error!v
         const first = historyPin(primary, total_history - n);
         const last = historyPin(primary, total_history - 1);
         var it = first.rowIterator(.right_down, last);
-        while (it.next()) |row| try rows.write(w, row);
+        while (it.next()) |row| try rows.write(w, row, null);
     }
     const active = t.screens.active;
     // History and an alternate screen are not one stream of lines.
@@ -98,7 +102,7 @@ fn writeTail(w: *Writer, t: *const Terminal, history_rows: usize) Writer.Error!v
         const first = activePin(active, 0);
         const last = activePin(active, last_y);
         var it = first.rowIterator(.right_down, last);
-        while (it.next()) |row| try rows.write(w, row);
+        while (it.next()) |row| try rows.write(w, row, null);
     }
     if (rows.prev != null) try w.writeAll("\n");
 }
@@ -110,6 +114,8 @@ const Builder = struct {
     limits: Limits,
     /// Bytes of history written, which `byte_cap` does not count.
     history_len: usize = 0,
+    /// With grapheme clustering (2027), finds the cells that would cluster.
+    joiner: ?*Joiner = null,
 
     fn out(self: *Builder) *Writer {
         return &self.aw.writer;
@@ -124,6 +130,9 @@ const Builder = struct {
     fn run(self: *Builder, mode: Mode) (Error || Writer.Error)!void {
         const t = self.t;
         try writeModes(self.out(), t, .early);
+        // Before anything else, since DECSTR resets what it touches.
+        if (savedCarrier(t)) try self.out().writeAll("\x1b[1\"q\x1b[?47h\x1b7\x1b[?47l\x1b[!p");
+        try writeDefaultCursorStyle(self.out(), t);
         if (mode == .full) {
             const start = self.aw.written().len;
             try self.writeHistory();
@@ -133,11 +142,29 @@ const Builder = struct {
         const primary = t.screens.get(.primary).?;
         try self.writeScreen(primary);
         if (t.screens.active_key == .alternate) {
+            // The primary screen's own cursor style, which 1049 does not
+            // copy back on leaving (see `writeDefaultCursorStyle` for the
+            // default). Step 7 writes the active screen's.
+            const style = primary.cursor.cursor_style;
+            if (!t.cursor.is_default and style != t.cursor.default_style) {
+                try self.out().print("\x1b[{d} q", .{steadyStyle(style)});
+            }
             // Mode 47 whatever mode the program used: it saves no cursor,
             // so the primary screen's saved cursor written above survives,
             // and it does not clear, so the restore clears.
             try self.out().writeAll("\x1b[?47h");
-            try self.writeScreen(t.screens.get(.alternate).?);
+            // Protection carried to the primary screen through this one
+            // (see `writeProtect`) set its mode; only DECSTR turns that
+            // off again. What else it resets is written after this.
+            const alt = t.screens.get(.alternate).?;
+            const saved_protected = if (primary.saved_cursor) |sc| sc.protected else false;
+            if (primary.protected_mode == .off and (primary.cursor.protected or saved_protected) and
+                alt.protected_mode == .off) try self.out().writeAll("\x1b[!p");
+            // 47 copied the primary screen's style; this one's, if it has
+            // the default since.
+            if (t.cursor.is_default and alt.cursor.cursor_style != primary.cursor.cursor_style and
+                alt.cursor.cursor_style == t.cursor.default_style) try self.out().writeAll("\x1b[0 q");
+            try self.writeScreen(alt);
         }
         try self.writeState();
         try self.check();
@@ -152,9 +179,13 @@ const Builder = struct {
         if (kept == 0) return;
         const total = historyRows(screen);
 
-        var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
+        var rows: RowWriter = .{ .sep = "\r\n", .joiner = self.joiner, .rows = self.t.rows };
         var it = historyPin(screen, total - kept).rowIterator(.right_down, historyPin(screen, total - 1));
-        while (it.next()) |row| try rows.write(self.out(), row);
+        var next = it.next();
+        while (next) |row| {
+            next = it.next();
+            try rows.write(self.out(), row, next);
+        }
         try self.out().splatBytesAll("\r\n", self.t.rows);
     }
 
@@ -167,23 +198,93 @@ const Builder = struct {
         try writeCleanSlate(w);
         try w.writeAll("\x1b[H\x1b[2J");
         if (lastUsedRow(screen)) |last| {
-            var rows: RowWriter = .{ .sep = "\r\n", .cluster = self.t.modes.get(.grapheme_cluster) };
+            var rows: RowWriter = .{ .sep = "\r\n", .joiner = self.joiner, .rows = self.t.rows };
             var it = activePin(screen, 0).rowIterator(.right_down, activePin(screen, last));
-            while (it.next()) |row| {
-                try rows.write(w, row);
+            var next = it.next();
+            while (next) |row| {
+                next = it.next();
+                try rows.write(w, row, next);
                 try self.check();
             }
         }
 
-        try writeSavedCursor(w, screen);
+        try writeSavedCursor(w, self.t, screen);
         try writeCleanSlate(w);
         // No margins or origin mode are set yet, so pending wrap can only
         // be rebuilt at the right edge of the screen here. The active
         // screen's cursor is written again, exactly, in step 7.
         try writeCursor(w, screen, .{}, true);
-        try writePen(w, screen);
+        const c = &screen.cursor;
+        if (screen == self.t.screens.get(.primary).? and self.t.screens.active_key == .alternate and
+            c.pending_wrap and c.x != screen.pages.cols - 1 and c.x > 0)
+        {
+            // Hidden while the alternate screen is active, this cursor is
+            // not written again in step 7, so its pending wrap away from
+            // the edge is made here, at a right margin set there for it
+            // (which homes the cursor) and dropped again (which does not).
+            const row = activePin(screen, c.y);
+            const start = edgeStart(row, c.x);
+            try w.print("\x1b[?69h\x1b[1;{d}s", .{c.x + 1});
+            try writeCup(w, c.y, start, .{});
+            try writeEdgeCell(w, screen, row, start);
+            try w.writeAll("\x1b[?69l");
+        }
+        try writePen(w, self.t, screen);
+        if (carriedProtection(self.t, screen) or carriedSaved(self.t, screen)) try self.carryProtection();
         try writeKittyStack(w, screen);
         try self.check();
+    }
+
+    /// The alternate screen's cursor protected with its mode off (see
+    /// `carriedProtection`): it can only come from the primary screen's
+    /// cursor, which 47 copies. So the primary cursor is set as the model
+    /// has it, protected in its own mode, and copied back, then this
+    /// cursor's own position and pen. Also run after carrying a saved
+    /// cursor's protection (`carriedSaved`), which left the primary
+    /// cursor as this one.
+    fn carryProtection(self: *Builder) Writer.Error!void {
+        const w = self.out();
+        const primary = self.t.screens.get(.primary).?;
+        const alt = self.t.screens.get(.alternate).?;
+        try writeCleanSlate(w);
+        if (primary.protected_mode != .off) try self.copyPrimaryCursor();
+        if (!alt.cursor.protected) {
+            try w.writeAll("\x1b[0\"q");
+        } else if (primary.protected_mode == .off or !primary.cursor.protected) {
+            // From this screen's saved cursor, protected as written above
+            // (DECRC sets the cursor's protection, not the mode), as the
+            // model's could be. It also restores origin mode, which is
+            // replayed in step 7.
+            try w.writeAll("\x1b8\x1b[?6l");
+        }
+        try writeCursor(w, alt, .{}, true);
+        try writePen(w, self.t, alt);
+    }
+
+    /// The primary cursor as the model has it, protected in the primary
+    /// screen's own mode, and copied to this one with 47.
+    fn copyPrimaryCursor(self: *Builder) Writer.Error!void {
+        const w = self.out();
+        const primary = self.t.screens.get(.primary).?;
+        const alt = self.t.screens.get(.alternate).?;
+        // The primary cursor's place, waiting to wrap by printing this
+        // screen's own cell there: at the edge, or away from it at a right
+        // margin set there for it (which homes the cursor) and dropped
+        // again (which does not) before the copy.
+        const c = &primary.cursor;
+        const interior = c.pending_wrap and c.x != alt.pages.cols - 1 and c.x > 0;
+        if (c.pending_wrap and (c.x == alt.pages.cols - 1 or interior)) {
+            const row = activePin(alt, c.y);
+            const start = edgeStart(row, c.x);
+            if (interior) try w.print("\x1b[?69h\x1b[1;{d}s", .{c.x + 1});
+            try writeCup(w, c.y, start, .{});
+            try writeCell(w, row, start, false);
+            if (interior) try w.writeAll("\x1b[?69l");
+        } else try writeCup(w, c.y, c.x, .{});
+        try w.print("{f}", .{c.style.formatterVt()});
+        try w.writeAll("\x1b[?47l");
+        try writePen(w, self.t, primary);
+        try w.writeAll("\x1b[?47h\x1b[0m");
     }
 
     /// Step 7: terminal state without content, then the active screen's
@@ -251,9 +352,12 @@ const Builder = struct {
             .{ .x = region.left, .y = region.top }
         else
             .{};
-        try writeCleanSlate(w);
+        if (carriedProtection(t, active)) {
+            // The clean slate without unprotecting what was carried over.
+            try w.writeAll("\x1b[0m\x1b(B\x0f\x1b]8;;\x1b\\");
+        } else try writeCleanSlate(w);
         try writeCursor(w, active, origin, false);
-        try writePen(w, active);
+        try writePen(w, t, active);
 
         // Last of all: in insert mode the edge cell printed above would have
         // pushed the row right, and without wraparound it would have been
@@ -278,14 +382,23 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
     defer alloc.free(content);
     const between = try alloc.alloc(usize, n);
     defer alloc.free(between);
-    var rows: RowWriter = .{ .sep = "\r\n", .cluster = t.modes.get(.grapheme_cluster) };
+    var joiner: Joiner = undefined;
+    const cluster = t.modes.get(.grapheme_cluster);
+    if (cluster) try joiner.init(alloc);
+    defer if (cluster) joiner.deinit(alloc);
+    var rows: RowWriter = .{ .sep = "\r\n", .joiner = if (cluster) &joiner else null, .rows = t.rows };
     var it = historyPin(screen, total - n).rowIterator(.right_down, historyPin(screen, total - 1));
     var i: usize = 0;
-    while (it.next()) |row| : (i += 1) {
+    var next = it.next();
+    while (next) |row| : (i += 1) {
+        next = it.next();
+        // The row as the first one written, and as written after the one
+        // before (whose cells fixed up after a wrap count here).
+        var alone: RowWriter = .{ .sep = rows.sep, .joiner = rows.joiner, .rows = rows.rows };
         var own: Writer.Discarding = .init(&.{});
-        writeRowCells(&own.writer, row) catch unreachable;
+        alone.write(&own.writer, row, next) catch return error.OutOfMemory;
         var all: Writer.Discarding = .init(&.{});
-        rows.write(&all.writer, row) catch unreachable;
+        rows.write(&all.writer, row, next) catch return error.OutOfMemory;
         content[i] = @intCast(own.count);
         between[i] = @as(usize, @intCast(all.count)) - content[i];
     }
@@ -308,18 +421,42 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
 /// when the terminal will wrap there by itself.
 const RowWriter = struct {
     sep: []const u8,
-    /// Grapheme clustering (2027) is on.
-    cluster: bool = false,
+    /// Set when grapheme clustering (2027) is on.
+    joiner: ?*Joiner = null,
+    /// The screen's height.
+    rows: usize = 0,
     prev: ?Pin = null,
+    /// A row whose takers (see `Joiner`) are left to write after the wrap
+    /// onto the next, which needs the cursor waiting at the edge; and
+    /// whether that row was wrapped onto from a spacer head.
+    pending: ?struct { Pin, bool } = null,
 
-    fn write(self: *RowWriter, w: *Writer, row: Pin) Writer.Error!void {
+    /// `next` is the row that will be written after this one, if any.
+    fn write(self: *RowWriter, w: *Writer, row: Pin, next: ?Pin) Writer.Error!void {
+        const from_head = if (self.prev) |prev| joins(prev, row) and endsBeforeWideCharacter(prev) else false;
+        const wraps = if (next) |n| joins(row, n) else false;
+        const defer_taken = wraps and !endsBeforeWideCharacter(row);
+        var split = false;
+        var first = false;
+        if (self.joiner) |j| if (try j.splits(row)) {
+            first = from_head and try j.takesNext(row, 0);
+            // Fixing up a row from the one below or above needs both on
+            // the screen.
+            split = self.rows > 1 or !(defer_taken or first);
+            first = split and first;
+        };
+
         if (self.prev) |prev| {
             if (!joins(prev, row)) {
                 try w.writeAll(self.sep);
-            } else if (endsBeforeWideCharacter(prev)) {
+            } else if (from_head) {
                 // Only the wide character itself wraps here.
-                if (startsWithBackground(row)) try writeWrapPrimer(w, row);
-            } else if (self.cluster or startsWithBackground(row)) {
+                if (startsWithBackground(row) or first) try writeWrapPrimer(w, row);
+                // A taker: the next cell must be written while it is
+                // blank. (This clears the spacer head too, which
+                // `Joiner.writeTaken` makes again.)
+                if (first) try w.writeAll("\x1b[2X");
+            } else if (self.joiner != null or startsWithBackground(row)) {
                 // A space with the default pen makes the wrap: it joins no
                 // grapheme cluster (with 2027 a printed character can
                 // attach to the cell waiting at the edge instead of
@@ -329,10 +466,154 @@ const RowWriter = struct {
                 try w.writeAll("\x1b[0m \x08");
             }
         }
-        try writeRowCells(w, row);
+        if (self.pending) |pending| {
+            // Back up to the row before, now that the wrap is made, and
+            // down again to this one's start.
+            try w.writeAll("\x1b[A");
+            try self.joiner.?.writeTaken(w, pending[0], pending[1]);
+            try w.writeAll("\x1b[B\r");
+            self.pending = null;
+        }
+        if (!split) {
+            try writeRowCells(w, row);
+        } else {
+            const j = self.joiner.?;
+            try j.writeRest(w, row);
+            if (defer_taken) {
+                self.pending = .{ row, from_head };
+            } else {
+                try j.writeTaken(w, row, from_head);
+                // Back before the spacer head, where the wide character
+                // that follows wraps by itself.
+                if (wraps) try w.print("\x1b[{d}G", .{row.node.page().size.cols});
+            }
+        }
         self.prev = row;
     }
 };
+
+/// With grapheme clustering (2027), a terminal adds a printed character to
+/// the cluster in the cell to its left when they do not break, wherever the
+/// cursor came from. A program can still leave such cells apart (printing
+/// the right one first), and written in order they would join, shifting the
+/// rest of the row. Such a row is written without the cells that would take
+/// in the next ("takers"), each run after the first placed with CHA, then
+/// the takers from right to left, each while the cell to its right is in
+/// place and the one to its left (if a taker) still blank.
+///
+/// Whether two cells join is asked of a scratch terminal, so that it is
+/// Ghostty's own rule.
+const Joiner = struct {
+    t: Terminal,
+
+    fn init(self: *Joiner, alloc: Allocator) Allocator.Error!void {
+        self.t = Terminal.init(ghostty.TinyIo.init.io(), alloc, .{ .cols = 64, .rows = 1 }) catch
+            return error.OutOfMemory;
+        self.t.modes.set(.grapheme_cluster, true);
+    }
+
+    fn deinit(self: *Joiner, alloc: Allocator) void {
+        self.t.deinit(alloc);
+    }
+
+    /// Whether the row has a taker.
+    fn splits(self: *Joiner, row: Pin) Writer.Error!bool {
+        const cols = row.node.page().size.cols;
+        var x: CellCountInt = 0;
+        while (x < cols) : (x += 1) {
+            if (try self.takesNext(row, x)) return true;
+        }
+        return false;
+    }
+
+    /// Whether the cell at `x` (a narrow or wide character) takes in the
+    /// character in the cell after it when written just before.
+    fn takesNext(self: *Joiner, row: Pin, x: CellCountInt) Writer.Error!bool {
+        const page = row.node.page();
+        const cells = page.getCells(page.getRow(row.y));
+        const left = &cells[x];
+        if (!left.hasText()) return false;
+        const after = x + @as(CellCountInt, if (left.wide == .wide) 2 else 1);
+        switch (left.wide) {
+            .narrow, .wide => {},
+            .spacer_head, .spacer_tail => return false,
+        }
+        if (after >= cells.len) return false;
+        const right = &cells[after];
+        // Ghostty clusters only codepoints above U+00FF.
+        if (!right.hasText() or right.codepoint() <= 0xff) return false;
+
+        const t = &self.t;
+        t.carriageReturn();
+        t.eraseLine(.complete, false);
+        self.print(left.codepoint()) catch return error.WriteFailed;
+        if (left.content_tag == .codepoint_grapheme) {
+            if (page.lookupGrapheme(left)) |cps| for (cps) |cp| {
+                self.print(cp) catch return error.WriteFailed;
+            };
+        }
+        const start = t.screens.active.cursor.x;
+        self.print(right.codepoint()) catch return error.WriteFailed;
+        const pin = t.screens.active.pages.pin(.{ .active = .{} }).?;
+        const scratch = pin.node.page();
+        return !scratch.getCells(scratch.getRow(pin.y))[start].hasText();
+    }
+
+    fn print(self: *Joiner, cp: u21) !void {
+        // Past the scratch row's edge, nothing more can join.
+        if (self.t.screens.active.cursor.x + 2 >= self.t.cols) return;
+        try self.t.print(cp);
+    }
+
+    /// The row's cells without its takers, in runs.
+    fn writeRest(self: *Joiner, w: *Writer, row: Pin) Writer.Error!void {
+        const cols = row.node.page().size.cols;
+        var start: CellCountInt = 0;
+        var x: CellCountInt = 0;
+        while (x < cols) : (x += 1) {
+            if (!try self.takesNext(row, x)) continue;
+            if (x > start) try writeRun(w, row, start, x - 1);
+            start = x + @as(CellCountInt, if (cellAt(row, x).wide == .wide) 2 else 1);
+        }
+        if (start < cols) try writeRun(w, row, start, cols - 1);
+    }
+
+    /// The takers, right to left, from anywhere on the row. The formatter
+    /// writes no protection, and neither does this. A wide taker at the
+    /// start of a row wrapped onto from a spacer head (`from_head`) is
+    /// printed at the edge of the row above, where it wraps again and
+    /// makes the spacer head.
+    fn writeTaken(self: *Joiner, w: *Writer, row: Pin, from_head: bool) Writer.Error!void {
+        const cols = row.node.page().size.cols;
+        var x = cols;
+        while (x > 0) {
+            x -= 1;
+            if (!try self.takesNext(row, x)) continue;
+            if (x == 0 and from_head) {
+                try w.print("\x1b[A\x1b[{d}G", .{cols});
+            } else {
+                try w.print("\x1b[{d}G", .{x + 1});
+            }
+            try writeCell(w, row, x, false);
+        }
+    }
+};
+
+fn cellAt(row: Pin, x: CellCountInt) *const Cell {
+    return row.node.page().getRowAndCell(x, row.y).cell;
+}
+
+/// Columns `start` to `end` of a row, from `start` (where the cursor is
+/// for the row's first run).
+fn writeRun(w: *Writer, row: Pin, start: CellCountInt, end: CellCountInt) Writer.Error!void {
+    if (start > 0) try w.print("\x1b[{d}G", .{start + 1});
+    var f: PageFormatter = .init(row.node.page(), .vt);
+    f.start_y = row.y;
+    f.end_y = row.y;
+    f.start_x = start;
+    f.end_x = end;
+    try f.format(w);
+}
 
 /// Whether the row ends where a wide character did not fit, leaving the
 /// cursor before the edge rather than waiting to wrap.
@@ -481,13 +762,17 @@ fn writeCleanSlate(w: *Writer) Writer.Error!void {
 
 /// Step 5.1: the saved cursor, set while this screen is active and saved
 /// with DECSC.
-fn writeSavedCursor(w: *Writer, screen: *const Screen) Writer.Error!void {
+fn writeSavedCursor(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
     const saved = screen.saved_cursor orelse return;
     const cols = screen.pages.cols;
     const x = @min(saved.x, cols - 1);
     const y = @min(saved.y, screen.pages.rows - 1);
 
     try writeCleanSlate(w);
+    // The saved cursor made protected at the start (see `savedCarrier`):
+    // DECRC sets the cursor's protection without a mode.
+    const carried = saved.protected and screen.protected_mode == .off and savedCarrier(t);
+    if (carried) try w.writeAll("\x1b8\x1b[?6l");
     // Setting origin mode homes the cursor, so it comes first. No scroll
     // region is set yet, so positions are absolute either way.
     if (saved.origin) try w.writeAll("\x1b[?6h");
@@ -495,14 +780,48 @@ fn writeSavedCursor(w: *Writer, screen: *const Screen) Writer.Error!void {
         const row = activePin(screen, y);
         const start = edgeStart(row, x);
         try writeCup(w, y, start, .{});
-        try writeEdgeCell(w, row, start);
+        try writeEdgeCell(w, screen, row, start);
+    } else if (saved.pending_wrap and x > 0) {
+        // Waiting to wrap away from the edge (at a right margin, or left
+        // there after the margins were reset): made at a right margin set
+        // there for it (which homes the cursor) and dropped again (which
+        // does not).
+        const row = activePin(screen, y);
+        const start = edgeStart(row, x);
+        try w.print("\x1b[?69h\x1b[1;{d}s", .{x + 1});
+        try writeCup(w, y, start, .{});
+        try writeEdgeCell(w, screen, row, start);
+        try w.writeAll("\x1b[?69l");
     } else {
         try writeCup(w, y, x, .{});
     }
     try w.print("{f}", .{saved.style.formatterVt()});
-    if (saved.protected) try w.writeAll("\x1b[1\"q");
+    if (saved.protected and !carried) try writeProtect(w, t, screen);
     try writeCharsets(w, &saved.charset);
     try w.writeAll("\x1b7");
+    if (saved.pending_wrap) {
+        // The space printed for pending wrap on an empty cell is text, which
+        // a terminal without wraparound attaches a combining mark to. Saved,
+        // the cell can be emptied again (ECH also resets the row's soft
+        // wrap, so not on a wrapped row).
+        const row = activePin(screen, y);
+        const page = row.node.page();
+        const r = page.getRow(row.y);
+        const cell = page.getCells(r)[x];
+        // A cell with only a background is erased with it as the pen.
+        const bg: ?Style = switch (cell.content_tag) {
+            .codepoint, .codepoint_grapheme => if (cell.isEmpty() and !cell.hasStyling()) .{} else null,
+            .bg_color_palette => .{ .bg_color = .{ .palette = cell.content.color_palette.data } },
+            .bg_color_rgb => .{ .bg_color = .{ .rgb = .{
+                .r = cell.content.color_rgb.r,
+                .g = cell.content.color_rgb.g,
+                .b = cell.content.color_rgb.b,
+            } } },
+        };
+        if (bg) |style| if (!r.wrap and !cell.protected) {
+            try w.print("\x1b[0m{f}\x1b[X\x1b[0m", .{style.formatterVt()});
+        };
+    }
     if (saved.origin) try w.writeAll("\x1b[?6l");
 }
 
@@ -516,7 +835,7 @@ fn writeCursor(w: *Writer, screen: *const Screen, origin: Origin, edge_only: boo
         const row = activePin(screen, cursor.y);
         const start = edgeStart(row, cursor.x);
         try writeCup(w, cursor.y, start, origin);
-        try writeEdgeCell(w, row, start);
+        try writeEdgeCell(w, screen, row, start);
     } else {
         try writeCup(w, cursor.y, cursor.x, origin);
     }
@@ -536,7 +855,15 @@ fn edgeStart(row: Pin, x: CellCountInt) CellCountInt {
 
 /// Print one cell in its own style, hyperlink and protection, then reset
 /// all three. A cell with no text is printed as a space.
-fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
+fn writeEdgeCell(w: *Writer, screen: *const Screen, row: Pin, x: CellCountInt) Writer.Error!void {
+    // Protecting it would set a mode on a screen whose mode is off, and
+    // the formatter writes no cell's protection anyway.
+    try writeCell(w, row, x, screen.protected_mode != .off);
+}
+
+/// Print one cell in its own style and hyperlink (and, with `protect`,
+/// protection), then reset them.
+fn writeCell(w: *Writer, row: Pin, x: CellCountInt, protect: bool) Writer.Error!void {
     const page = row.node.page();
     const cell = page.getRowAndCell(x, row.y).cell;
     const style: Style = switch (cell.content_tag) {
@@ -552,7 +879,8 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
         } } },
     };
     try w.print("{f}", .{style.formatterVt()});
-    if (cell.protected) try w.writeAll("\x1b[1\"q");
+    const protected = protect and cell.protected;
+    if (protected) try w.writeAll("\x1b[1\"q");
     var linked = false;
     if (cell.hyperlink) if (page.lookupHyperlink(cell)) |id| {
         const link = page.hyperlink_set.get(page.memory, id);
@@ -572,30 +900,97 @@ fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
         try w.writeByte(' ');
     }
     if (linked) try w.writeAll("\x1b]8;;\x1b\\");
-    if (cell.protected) try w.writeAll("\x1b[0\"q");
+    if (protected) try w.writeAll("\x1b[0\"q");
     try w.writeAll("\x1b[0m");
 }
 
 /// Step 5.4: the live cursor's pen, hyperlink, protection (with the
 /// screen's protection mode) and character sets, after the clean slate.
-fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
+fn writePen(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
     const cursor = &screen.cursor;
     try w.print("{f}", .{cursor.style.formatterVt()});
-    if (cursor.hyperlink) |link| switch (link.id) {
-        .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
-        .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
-    };
     // The screen's most recent protection mode, which erases follow even
     // once protection is off (ISO protects from EL and ED, DEC only from
     // their selective forms), then the cursor's protection in it. Written
     // last for the screen, since printing a protected edge cell above
     // switched the mode to DEC.
+    // With the mode off, a protected cursor came from the other screen.
+    // (The alternate screen's is carried by `Builder.carryProtection`.)
     switch (screen.protected_mode) {
-        .off => {},
         .iso => try w.writeAll(if (cursor.protected) "\x1bV" else "\x1bV\x1bW"),
         .dec => try w.writeAll(if (cursor.protected) "\x1b[1\"q" else "\x1b[1\"q\x1b[0\"q"),
+        .off => if (cursor.protected and screen == t.screens.get(.primary).?) try writeProtect(w, t, screen),
     }
+    // After protection, which the other screen can carry over without it.
+    if (cursor.hyperlink) |link| switch (link.id) {
+        .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
+        .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
+    };
     try writeCharsets(w, &screen.charset);
+}
+
+/// Whether `screen` is the alternate screen with its cursor protected and its
+/// protection mode off, which the restore carries from the primary screen's
+/// cursor (when that one is protected too, in a mode of its own) or from
+/// this screen's saved cursor, carried the same way (see `carriedSaved`).
+/// Otherwise the cursor is left unprotected (a known gap).
+fn carriedProtection(t: *const Terminal, screen: *const Screen) bool {
+    const primary = t.screens.get(.primary).?;
+    return screen != primary and screen.protected_mode == .off and screen.cursor.protected and
+        ((primary.cursor.protected and primary.protected_mode != .off) or carriedSaved(t, screen));
+}
+
+/// Whether `screen` is the alternate screen with its saved cursor protected
+/// and its protection mode off, which the restore carries from the primary
+/// screen's cursor, when that screen has a mode of its own.
+fn carriedSaved(t: *const Terminal, screen: *const Screen) bool {
+    const primary = t.screens.get(.primary).?;
+    const saved = screen.saved_cursor orelse return false;
+    return screen != primary and screen.protected_mode == .off and saved.protected and
+        (primary.protected_mode != .off or savedCarrier(t));
+}
+
+/// Whether the alternate screen's saved cursor, protected with both screens'
+/// protection modes off (DECSTR turned the one it came from off), is carried
+/// by a saved cursor made at the start: protected on the primary screen,
+/// copied to the alternate screen and saved there, then the primary's mode
+/// turned off again with DECSTR. Written as the restore's first step, before
+/// anything DECSTR resets. Not when the primary screen needs the alternate
+/// screen to carry its own (see `writeProtect`), which DECSTR there wipes.
+fn savedCarrier(t: *const Terminal) bool {
+    if (t.screens.active_key != .alternate) return false;
+    const primary = t.screens.get(.primary).?;
+    const alt = t.screens.get(.alternate).?;
+    const saved = alt.saved_cursor orelse return false;
+    const primary_saved = if (primary.saved_cursor) |sc| sc.protected else false;
+    return saved.protected and alt.protected_mode == .off and primary.protected_mode == .off and
+        !primary.cursor.protected and !primary_saved;
+}
+
+/// Protect the cursor in the screen's protection mode. With the mode off,
+/// the protection came from the other screen's cursor (47, 1047 and 1049
+/// copy the cursor, protection included, and leave each screen's mode), so
+/// it is set there, in that screen's mode, and copied back with 47: this
+/// screen's mode stays off, and only the hidden alternate screen's
+/// changes. The alternate screen's comes from the primary screen the same
+/// way, which leaves the primary cursor to be set again.
+fn writeProtect(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
+    switch (screen.protected_mode) {
+        .iso => try w.writeAll("\x1bV"),
+        .dec => try w.writeAll("\x1b[1\"q"),
+        .off => if (screen == t.screens.get(.primary).?) {
+            const other: ghostty.ProtectedMode = if (t.screens.get(.alternate)) |alt| alt.protected_mode else .off;
+            try w.writeAll("\x1b[?47h");
+            try w.writeAll(if (other == .iso) "\x1bV" else "\x1b[1\"q");
+            try w.writeAll("\x1b[?47l");
+        } else if (t.screens.get(.primary).?.protected_mode != .off) {
+            // The alternate screen's: carried from the primary screen's
+            // cursor, which `Builder.carryProtection` then sets back.
+            try w.writeAll("\x1b[?47l");
+            try w.writeAll(if (t.screens.get(.primary).?.protected_mode == .iso) "\x1bV" else "\x1b[1\"q");
+            try w.writeAll("\x1b[?47h");
+        },
+    }
 }
 
 /// All four designations and both invocations, so that whatever an earlier
@@ -688,10 +1083,13 @@ fn writeMode(w: *Writer, mode: ghostty.Mode, value: bool) Writer.Error!void {
     try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (value) 'h' else 'l') });
 }
 
-/// DECSCUSR. `CSI 0 SP q` gives the client its own default back when the
-/// program never chose a style.
+/// DECSCUSR for the active screen: the style the program chose, or the
+/// default where the screen has it (see `writeDefaultCursorStyle`).
 fn writeCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
-    if (t.cursor.is_default) return w.writeAll("\x1b[0 q");
+    if (t.cursor.is_default) {
+        if (t.screens.active.cursor.cursor_style == t.cursor.default_style) try w.writeAll("\x1b[0 q");
+        return;
+    }
     const blink = t.modes.get(.cursor_blinking);
     const n: u8 = switch (t.screens.active.cursor.cursor_style) {
         .block, .block_hollow => if (blink) 1 else 2,
@@ -699,6 +1097,31 @@ fn writeCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
         .bar => if (blink) 5 else 6,
     };
     try w.print("\x1b[{d} q", .{n});
+}
+
+/// The default cursor style (`CSI 0 SP q`, the client's own) selected
+/// while the primary screen keeps a style of its own, before anything is
+/// drawn. The default is selected terminal-wide but each screen
+/// keeps its own style, so the primary screen can keep a style of its own
+/// when the default was chosen on the alternate screen (1049 does not copy
+/// the cursor back), and the alternate screen gets it again on entry (47,
+/// 1047 and 1049 copy the cursor there). Rebuilt the same way: the
+/// primary's style, the default chosen on the alternate screen, and back
+/// with 1049, which also restores the saved cursor and its origin mode,
+/// all written after this. The alternate screen's is set after `?47h`.
+fn writeDefaultCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
+    if (!t.cursor.is_default) return;
+    const style = t.screens.get(.primary).?.cursor.cursor_style;
+    if (style == t.cursor.default_style) return;
+    try w.print("\x1b[{d} q\x1b[?47h\x1b[0 q\x1b[?1049l\x1b[?6l", .{steadyStyle(style)});
+}
+
+fn steadyStyle(style: ghostty.CursorStyle) u8 {
+    return switch (style) {
+        .block, .block_hollow => 2,
+        .underline => 4,
+        .bar => 6,
+    };
 }
 
 /// Whether the tab stops are Ghostty's defaults, every 8 columns, which the
@@ -712,9 +1135,10 @@ fn defaultTabstops(t: *const Terminal) bool {
 }
 
 /// Text inside an OSC, without the controls that would end or corrupt it.
+/// DEL does neither: a terminal keeps it in the string, as Ghostty did.
 fn writeOscText(w: *Writer, text: []const u8) Writer.Error!void {
     for (text) |c| {
-        if (c < 0x20 or c == 0x7f) continue;
+        if (c < 0x20) continue;
         try w.writeByte(c);
     }
 }

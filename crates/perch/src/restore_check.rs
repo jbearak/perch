@@ -92,21 +92,53 @@ pub fn check(case: &Case) -> Result<(), String> {
         true,
         sent,
         true,
+        &[],
+        false,
     )?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
+    let state = dump_state(&model)?;
+    let screens = || {
+        ["primary", "alternate"]
+            .into_iter()
+            .map(|s| &state["screens"][s])
+    };
     // Known gap: cells protected before the restore (ISO or DEC) are not
     // protected in the client, because the row formatter does not write
-    // protection, so later erases treat them differently. Once the model
-    // has used protection, only the state right after the restore counts.
-    let state = dump_state(&model)?;
-    let protection_used = ["primary", "alternate"].iter().any(|s| {
-        state["screens"][s]["protected_mode"]
-            .as_str()
-            .is_some_and(|m| m != "off")
+    // protection, so later erases treat them differently, whatever the
+    // protection mode is by then (DECSTR turns the mode off, not the
+    // cells). Once the model has such cells, only the state right after
+    // the restore counts.
+    let protected_cells = screens().any(|s| s["protected_cells"] == true);
+    // Shell-integration prompt marks (OSC 133) in the cursor, rows and
+    // cells are Ghostty state the formatter does not write, and Ghostty
+    // acts on them (ED 2 at a prompt scrolls the screen into history
+    // instead of clearing it), which a client such as xterm.js does not.
+    // Marks made only after the restore reach both alike.
+    let prompt_marks = screens().any(|s| {
+        s["prompt_marks"] == true
+            || s["semantic_content"]
+                .as_str()
+                .is_some_and(|c| c != "output")
     });
+    // Known gap: a row with no text is written as nothing, though it has
+    // styled blank cells (such as the blank left where a wide character
+    // did not fit, which a wider client finds away from the edge). Text
+    // printed on the row later leaves the styles different.
+    // The `col:sgr` entries of those cells: the only styles a row may
+    // lose for this reason. Columns stay put as later output scrolls rows.
+    let blank_styles: Vec<String> = screens()
+        .filter_map(|s| s["rows"].as_array())
+        .flatten()
+        .filter(|r| r[0] == "")
+        .flat_map(row_styles)
+        .collect();
+    // Insert mode moves them along the row as text is printed before them.
+    let insert_at_restore = state["modes"]["4"] == true;
 
-    terminal.feed(feeder.held(), 0);
-    terminal.feed(case.after, 0);
+    // What reaches the terminal after the restore: the sequence the feeder
+    // held back unfinished, then the output.
+    let later = [feeder.held(), case.after].concat();
+    terminal.feed(&later, 0);
     // A byte at a time, watching the alternate-screen modes and the active
     // screen: Ghostty executes controls inside a CSI, and a mode can stay
     // set after the screen was left, so neither the bytes nor the modes
@@ -116,12 +148,17 @@ pub fn check(case: &Case) -> Result<(), String> {
         let alternate = m.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
         [modes[0], modes[1], modes[2], alternate]
     };
+    // And reverse wraparound, at any point (DECSTR can turn it off again).
+    let reverse_wrap =
+        |m: &Model| m.mode(45, false) == Some(true) || m.mode(1045, false) == Some(true);
     let mut reenters = false;
+    let mut reverse = reverse_wrap(&model);
     let mut before = alt_modes(&model);
     for b in case.after {
         feed(&mut model, &mut feeder, &[*b]);
         let now = alt_modes(&model);
         reenters |= now.iter().zip(before).any(|(n, b)| *n && !b);
+        reverse |= reverse_wrap(&model);
         before = now;
     }
     // While the feeder holds an unfinished sequence the model is behind the
@@ -141,31 +178,12 @@ pub fn check(case: &Case) -> Result<(), String> {
     }
     // REP (`CSI n b`) repeats the last character printed, which no restore
     // carries.
-    // Shell-integration prompt marks (OSC 133) are Ghostty state the
-    // formatter does not write, and Ghostty acts on them (ED 2 at a prompt
-    // scrolls the screen into history instead of clearing it), which a
-    // client such as xterm.js does not.
-    let after_state = dump_state(&model)?;
-    let prompt_marks = [&state, &after_state].iter().any(|v| {
-        ["primary", "alternate"].iter().any(|s| {
-            v["screens"][s]["semantic_content"]
-                .as_str()
-                .is_some_and(|c| c != "output")
-        })
-    });
-    // Protection may also start only in the output after the restore, over
-    // cells protected earlier (DECSTR turns the mode off, not the cells).
-    let protection_after = ["primary", "alternate"].iter().any(|s| {
-        after_state["screens"][s]["protected_mode"]
-            .as_str()
-            .is_some_and(|m| m != "off")
-    });
-    if has_rep(case.after) || protection_used || protection_after || prompt_marks {
+    if has_rep(&later) || protected_cells || prompt_marks {
         return Ok(());
     }
     // Reverse wraparound follows the screen rows' soft-wrap marks, which
     // the restore cannot always rebuild (see `restore::differences`).
-    if model.mode(45, false) == Some(true) || model.mode(1045, false) == Some(true) {
+    if reverse {
         return Ok(());
     }
     // The rows the restore sent, plus those the output scrolled up, less
@@ -183,6 +201,8 @@ pub fn check(case: &Case) -> Result<(), String> {
         on_alternate,
         kept,
         false,
+        &blank_styles,
+        insert_at_restore,
     )
 }
 
@@ -239,12 +259,13 @@ fn text_before_2027(case: &Case) -> Result<bool, String> {
 }
 
 /// Whether `bytes` might hold a REP: a CSI with a `b` anywhere after it.
-/// Ghostty takes bytes that cannot be parameters inside a CSI, so this
-/// stays conservative.
+/// Ghostty takes bytes that cannot be parameters inside a CSI, and ignores
+/// some between ESC and `[`, so this stays conservative.
 fn has_rep(bytes: &[u8]) -> bool {
     let csi = bytes
-        .windows(2)
-        .position(|w| w == b"\x1b[")
+        .iter()
+        .position(|&c| c == 0x1b)
+        .and_then(|i| bytes[i..].iter().position(|&c| c == b'[').map(|j| i + j))
         .or_else(|| bytes.iter().position(|&c| c == 0x9b));
     csi.is_some_and(|i| bytes[i..].contains(&b'b'))
 }
@@ -259,7 +280,8 @@ fn has_rep(bytes: &[u8]) -> bool {
 /// - Pending wrap away from the right edge: at an interior right margin, or
 ///   left at the old margin's column after the margins were reset.
 ///   Rebuilding it needs a margin there, and setting margins homes the
-///   cursor. (The saved cursor's version is deferred from M2a.)
+///   cursor. (A saved cursor's, and the hidden primary screen's, are made
+///   before the program's margins are set.)
 fn unwritable_cursor(model: &Model) -> Result<bool, String> {
     let v: serde_json::Value =
         serde_json::from_slice(&model.dump().map_err(|e| format!("dump: {e:?}"))?)
@@ -280,7 +302,9 @@ fn unwritable_cursor(model: &Model) -> Result<bool, String> {
 /// `alternate`: whether the alternate screen's state counts. A restore
 /// made on the primary screen does not carry the hidden alternate screen
 /// (its contents, saved cursor and kitty stack), which the design restores
-/// only while the program is on it.
+/// only while the program is on it. `blank_styles`: the styles of blank
+/// cells the restore left out (see `check`), which rows may lack.
+#[allow(clippy::too_many_arguments)]
 fn compare(
     model: &Model,
     terminal: &Model,
@@ -289,6 +313,8 @@ fn compare(
     alternate: bool,
     history_sent: u64,
     exact: bool,
+    blank_styles: &[String],
+    insert_at_restore: bool,
 ) -> Result<(), String> {
     let dump = |m: &Model| -> Result<serde_json::Value, String> {
         serde_json::from_slice(&m.dump().map_err(|e| format!("dump: {e:?}"))?)
@@ -300,7 +326,7 @@ fn compare(
     let got = dump(terminal)?;
     let diffs: Vec<String> = restore::differences(&expected, &got, mode)
         .into_iter()
-        .filter(|d| !known(&expected, d))
+        .filter(|d| !known(&expected, d, blank_styles, insert_at_restore))
         .filter(|d| alternate || !d.starts_with("alternate"))
         .collect();
     if diffs.is_empty() {
@@ -311,20 +337,12 @@ fn compare(
 }
 
 /// Differences the restore is known not to cover yet.
-fn known(expected: &serde_json::Value, diff: &str) -> bool {
-    // A saved cursor waiting to wrap at a right margin inside the screen
-    // (DECLRMM) is written without its pending wrap (deferred from M2a).
-    let interior_wrap = |screen: &str| {
-        let sc = &expected["screens"][screen]["saved_cursor"];
-        sc["pending_wrap"] == true
-            && sc["x"].as_u64() != Some(expected["cols"].as_u64().unwrap_or(0) - 1)
-    };
-    if ["primary", "alternate"]
-        .iter()
-        .any(|s| diff.starts_with(&format!("{s}.saved_cursor")) && interior_wrap(s))
-    {
-        return true;
-    }
+fn known(
+    expected: &serde_json::Value,
+    diff: &str,
+    blank_styles: &[String],
+    insert_at_restore: bool,
+) -> bool {
     // The blank cell left at the right edge (or right margin) where a wide
     // character did not fit takes the pen in Ghostty; the restore leaves it
     // unstyled.
@@ -345,40 +363,78 @@ fn known(expected: &serde_json::Value, diff: &str) -> bool {
     // before a wide one), which moves the styles of the cells involved.
     let margins_or_clusters =
         expected["modes"]["?69"] == true || expected["modes"]["?2027"] == true;
-    (margins_or_clusters && same_text(diff, false)) || same_text(diff, true)
+    (margins_or_clusters && same_text(diff, false))
+        || same_text(diff, true)
+        || styles_left_out(
+            diff,
+            blank_styles,
+            insert_at_restore || expected["modes"]["4"] == true,
+        )
+}
+
+/// A row's `col:sgr` style entries.
+fn row_styles(row: &serde_json::Value) -> Vec<String> {
+    row[2]
+        .as_str()
+        .unwrap_or("")
+        .split(' ')
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a row difference has the same text, wrap and continuation and
+/// the terminal lacks only styles of blank cells the restore left out. With
+/// `moved` (insert mode was on), those cells may have moved along the row,
+/// so each missing style takes a left-out cell's style from any column.
+fn styles_left_out(diff: &str, blank_styles: &[String], moved: bool) -> bool {
+    let Some((a, b)) = row_diff(diff) else {
+        return false;
+    };
+    if a[0] != b[0] || a[1] != b[1] || a[3] != b[3] {
+        return false;
+    }
+    let (model, got) = (row_styles(&a), row_styles(&b));
+    if !got.iter().all(|e| model.contains(e)) {
+        return false;
+    }
+    let sgr = |e: &String| {
+        e.split_once(':')
+            .map_or(String::new(), |(_, s)| s.to_owned())
+    };
+    let mut left: Vec<String> = blank_styles.to_vec();
+    model.iter().filter(|e| !got.contains(e)).all(|e| {
+        let i = if moved {
+            left.iter().position(|l| sgr(l) == sgr(e))
+        } else {
+            left.iter().position(|l| l == e)
+        };
+        i.map(|i| left.swap_remove(i)).is_some()
+    })
+}
+
+/// The two sides of a row difference (`... row N: [..] != [..]`), each a
+/// `[text, wrapped, styled, continuation]` row; `None` for any other
+/// difference, so that row-only exceptions never excuse a mode or cursor.
+fn row_diff(diff: &str) -> Option<(serde_json::Value, serde_json::Value)> {
+    let (_, rest) = diff.split_once(": ")?;
+    let (a, b) = rest.split_once(" != ")?;
+    let a: serde_json::Value = serde_json::from_str(a).ok()?;
+    let b: serde_json::Value = serde_json::from_str(b).ok()?;
+    let row = |v: &serde_json::Value| v.as_array().is_some_and(|r| r.len() == 4);
+    (row(&a) && row(&b)).then_some((a, b))
 }
 
 /// Whether a row difference has the same text on both sides (and, with
 /// `blank`, no text at all).
 fn same_text(diff: &str, blank: bool) -> bool {
-    let Some((_, rest)) = diff.split_once(": ") else {
-        return false;
-    };
-    let Some((a, b)) = rest.split_once(" != ") else {
-        return false;
-    };
-    match (
-        serde_json::from_str::<serde_json::Value>(a),
-        serde_json::from_str::<serde_json::Value>(b),
-    ) {
-        (Ok(a), Ok(b)) => a[0] == b[0] && (!blank || a[0] == ""),
-        _ => false,
-    }
+    row_diff(diff).is_some_and(|(a, b)| a[0] == b[0] && (!blank || a[0] == ""))
 }
 
 /// Whether a row difference (`... row N: [..] != [..]`) is only in the
 /// style of the last column and the soft wrap.
 fn last_column_style_only(diff: &str, cols: u64) -> bool {
-    let Some((_, rest)) = diff.split_once(": ") else {
-        return false;
-    };
-    let Some((a, b)) = rest.split_once(" != ") else {
-        return false;
-    };
-    let (Ok(a), Ok(b)) = (
-        serde_json::from_str::<serde_json::Value>(a),
-        serde_json::from_str::<serde_json::Value>(b),
-    ) else {
+    let Some((a, b)) = row_diff(diff) else {
         return false;
     };
     let last = format!("{}:", cols.saturating_sub(1));
@@ -428,6 +484,42 @@ pub fn check_fuzz_input(data: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_left_out_blank_styles_may_be_missing() {
+        let blank = vec!["7:1".to_owned()];
+        let row = |s: &str| {
+            format!(r#"primary row 0: ["ab",false,"0:31 {s}",false] != ["ab",false,"0:31",false]"#)
+        };
+        // The blank cell's style, lost: known.
+        assert!(styles_left_out(&row("7:1"), &blank, false));
+        // Another cell's style, or the same column with another style: not.
+        assert!(!styles_left_out(&row("5:1"), &blank, false));
+        assert!(!styles_left_out(&row("7:4"), &blank, false));
+        // A mode difference is never a row difference.
+        assert!(!styles_left_out("mode ?7: true != false", &blank, true));
+        // Nothing left out at the restore: nothing excused.
+        assert!(!styles_left_out(&row("7:1"), &[], false));
+        // Moved by insert mode: the same style in another column, once.
+        assert!(styles_left_out(&row("5:1"), &blank, true));
+        assert!(!styles_left_out(&row("5:1 6:1"), &blank, true));
+        assert!(!styles_left_out(&row("5:4"), &blank, true));
+    }
+
+    #[test]
+    fn row_exceptions_never_excuse_other_differences() {
+        // Every exception on, as with margins and 2027 set.
+        let expected = serde_json::json!({ "cols": 8, "modes": { "?69": true, "?2027": true } });
+        let blank = vec!["7:1".to_owned()];
+        for diff in [
+            "mode ?7: true != false",
+            "mode ?2004: false != true",
+            "primary cursor: [1,2] != [1,3]",
+            r#"primary row 0: "ab" != "ab""#,
+        ] {
+            assert!(!known(&expected, diff, &blank, true), "{diff}");
+        }
+    }
     use proptest::prelude::*;
 
     /// Pieces that reach most of what a restore writes: text of every
@@ -556,6 +648,39 @@ mod tests {
             n += 1;
         }
         assert!(n > 0);
+    }
+
+    /// What the check stops at is found in the model's cells and rows, not
+    /// from its modes alone.
+    #[test]
+    fn omitted_state_is_found_in_cells() {
+        let mut m = Model::new(10, 3, SCROLLBACK, SCROLLBACK_BYTES).unwrap();
+        let flags = |m: &Model| {
+            let v = dump_state(m).unwrap();
+            let s = &v["screens"]["primary"];
+            (
+                s["protected_mode"].clone(),
+                s["protected_cells"].clone(),
+                s["prompt_marks"].clone(),
+                s["semantic_content"].clone(),
+            )
+        };
+        assert_eq!(
+            flags(&m),
+            ("off".into(), false.into(), false.into(), "output".into())
+        );
+        // DECSTR turns protection off, not the cells.
+        m.feed(b"\x1b[1\"qab\x1b[!p", 0);
+        assert_eq!(
+            flags(&m),
+            ("off".into(), true.into(), false.into(), "output".into())
+        );
+        // A prompt's row stays marked once its command's output starts.
+        m.feed(b"\x1b]133;A\x07$ \x1b]133;C\x07\r\nout", 0);
+        assert_eq!(
+            flags(&m),
+            ("off".into(), true.into(), true.into(), "output".into())
+        );
     }
 
     #[test]
