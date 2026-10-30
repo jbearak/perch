@@ -7,11 +7,14 @@
 // - this host's own platform VSIX: installs, and its binary runs `new -d`,
 //   `list` and `kill` (scripts/release-smoke.sh), and on macOS passes
 //   `codesign --verify`;
-// - the universal VSIX: installs, with no binary;
-// - with --foreign <target>: that VSIX is refused, as VS Code refuses a VSIX
-//   for another platform.
+// - the universal VSIX: installs, with no binary.
 //
-//   node scripts/smoke-install.mjs --vsix-dir dir --target darwin-arm64 [--foreign linux-x64]
+// The CLI does not check a local VSIX's target platform (VS Code 1.144
+// installed a linux-x64 VSIX on darwin-arm64), so other platforms' VSIXs are
+// not tried here; check-vsix.mjs checks their binaries, and
+// scripts/alpine-vsix-check.sh runs the alpine ones.
+//
+//   node scripts/smoke-install.mjs --vsix-dir dir --target darwin-arm64
 //
 // PERCH_VSCODE_VERSION picks the VS Code (default stable).
 import { execFileSync, spawnSync } from 'child_process';
@@ -57,14 +60,6 @@ class Smoke {
     console.log(`smoke-install: installed ${file} as ${installed[0]}`);
     return join(ext, installed[0]);
   }
-
-  /** Throws unless VS Code refuses the VSIX. */
-  refuse(file, name) {
-    const r = this.cli(name, ['--install-extension', file]);
-    const listed = this.cli(name, ['--list-extensions']).stdout;
-    if (r.status === 0 || listed.includes(extensionId)) throw new Error(`${file}: VS Code installed another platform's VSIX`);
-    console.log(`smoke-install: ${file} refused: ${(r.stderr + r.stdout).trim().split('\n').pop()}`);
-  }
 }
 
 async function main() {
@@ -88,7 +83,6 @@ async function main() {
     if (existsSync(join(any, 'bin'))) throw new Error('universal: installed with a bin/ directory');
     console.log('smoke-install: universal VSIX installed, no binary');
 
-    if (args.foreign !== undefined) s.refuse(vsix(checkTarget(args.foreign)), 'foreign');
     console.log('smoke-install: ok');
   } finally {
     rmSync(s.scratch, { recursive: true, force: true });
@@ -100,8 +94,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
     const value = argv[i + 1];
-    if (!['--vsix-dir', '--target', '--foreign'].includes(flag) || value === undefined) {
-      throw new Error(`usage: smoke-install.mjs --vsix-dir <dir> --target <target> [--foreign <target>] (at \`${flag}\`)`);
+    if (!['--vsix-dir', '--target'].includes(flag) || value === undefined) {
+      throw new Error(`usage: smoke-install.mjs --vsix-dir <dir> --target <target> (at \`${flag}\`)`);
     }
     o[flag.slice(2)] = value;
   }
