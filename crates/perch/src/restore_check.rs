@@ -92,7 +92,7 @@ pub fn check(case: &Case) -> Result<(), String> {
         true,
         sent,
         true,
-        false,
+        &[],
     )?;
     let on_alternate = model.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
     let state = dump_state(&model)?;
@@ -123,11 +123,14 @@ pub fn check(case: &Case) -> Result<(), String> {
     // styled blank cells (such as the blank left where a wide character
     // did not fit, which a wider client finds away from the edge). Text
     // printed on the row later leaves the styles different.
-    let styled_blanks = screens().any(|s| {
-        s["rows"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|r| r[0] == "" && r[2] != ""))
-    });
+    // The `col:sgr` entries of those cells: the only styles a row may
+    // lose for this reason. Columns stay put as later output scrolls rows.
+    let blank_styles: Vec<String> = screens()
+        .filter_map(|s| s["rows"].as_array())
+        .flatten()
+        .filter(|r| r[0] == "")
+        .flat_map(row_styles)
+        .collect();
 
     // What reaches the terminal after the restore: the sequence the feeder
     // held back unfinished, then the output.
@@ -190,7 +193,7 @@ pub fn check(case: &Case) -> Result<(), String> {
         on_alternate,
         kept,
         false,
-        styled_blanks,
+        &blank_styles,
     )
 }
 
@@ -289,9 +292,8 @@ fn unwritable_cursor(model: &Model) -> Result<bool, String> {
 /// `alternate`: whether the alternate screen's state counts. A restore
 /// made on the primary screen does not carry the hidden alternate screen
 /// (its contents, saved cursor and kitty stack), which the design restores
-/// only while the program is on it. `styled_blanks`: whether the restore
-/// left out styled blank cells (see `check`), so that rows can differ in
-/// styles alone.
+/// only while the program is on it. `blank_styles`: the styles of blank
+/// cells the restore left out (see `check`), which rows may lack.
 #[allow(clippy::too_many_arguments)]
 fn compare(
     model: &Model,
@@ -301,7 +303,7 @@ fn compare(
     alternate: bool,
     history_sent: u64,
     exact: bool,
-    styled_blanks: bool,
+    blank_styles: &[String],
 ) -> Result<(), String> {
     let dump = |m: &Model| -> Result<serde_json::Value, String> {
         serde_json::from_slice(&m.dump().map_err(|e| format!("dump: {e:?}"))?)
@@ -313,7 +315,7 @@ fn compare(
     let got = dump(terminal)?;
     let diffs: Vec<String> = restore::differences(&expected, &got, mode)
         .into_iter()
-        .filter(|d| !known(&expected, d, styled_blanks))
+        .filter(|d| !known(&expected, d, blank_styles))
         .filter(|d| alternate || !d.starts_with("alternate"))
         .collect();
     if diffs.is_empty() {
@@ -324,7 +326,7 @@ fn compare(
 }
 
 /// Differences the restore is known not to cover yet.
-fn known(expected: &serde_json::Value, diff: &str, styled_blanks: bool) -> bool {
+fn known(expected: &serde_json::Value, diff: &str, blank_styles: &[String]) -> bool {
     // A saved cursor waiting to wrap at a right margin inside the screen
     // (DECLRMM) is written without its pending wrap (deferred from M2a).
     let interior_wrap = |screen: &str| {
@@ -360,12 +362,23 @@ fn known(expected: &serde_json::Value, diff: &str, styled_blanks: bool) -> bool 
         expected["modes"]["?69"] == true || expected["modes"]["?2027"] == true;
     (margins_or_clusters && same_text(diff, false))
         || same_text(diff, true)
-        || (styled_blanks && styles_left_out(diff))
+        || styles_left_out(diff, blank_styles)
 }
 
-/// Whether a row difference has the same text and the terminal's styles
-/// are some of the model's, the rest left out.
-fn styles_left_out(diff: &str) -> bool {
+/// A row's `col:sgr` style entries.
+fn row_styles(row: &serde_json::Value) -> Vec<String> {
+    row[2]
+        .as_str()
+        .unwrap_or("")
+        .split(' ')
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a row difference has the same text, wrap and continuation and
+/// the terminal lacks only styles of blank cells the restore left out.
+fn styles_left_out(diff: &str, blank_styles: &[String]) -> bool {
     let Some((_, rest)) = diff.split_once(": ") else {
         return false;
     };
@@ -378,16 +391,16 @@ fn styles_left_out(diff: &str) -> bool {
     ) else {
         return false;
     };
-    let styles = |v: &serde_json::Value| -> Vec<String> {
-        v[2].as_str()
-            .unwrap_or("")
-            .split(' ')
-            .filter(|e| !e.is_empty())
-            .map(str::to_owned)
-            .collect()
-    };
-    let model = styles(&a);
-    a[0] == b[0] && a[1] == b[1] && a[3] == b[3] && styles(&b).iter().all(|e| model.contains(e))
+    let row = |v: &serde_json::Value| v.as_array().is_some_and(|r| r.len() == 4);
+    if !row(&a) || !row(&b) || a[0] != b[0] || a[1] != b[1] || a[3] != b[3] {
+        return false;
+    }
+    let (model, got) = (row_styles(&a), row_styles(&b));
+    got.iter().all(|e| model.contains(e))
+        && model
+            .iter()
+            .filter(|e| !got.contains(e))
+            .all(|e| blank_styles.contains(e))
 }
 
 /// Whether a row difference has the same text on both sides (and, with
@@ -470,6 +483,23 @@ pub fn check_fuzz_input(data: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_left_out_blank_styles_may_be_missing() {
+        let blank = vec!["7:1".to_owned()];
+        let row = |s: &str| {
+            format!(r#"primary row 0: ["ab",false,"0:31 {s}",false] != ["ab",false,"0:31",false]"#)
+        };
+        // The blank cell's style, lost: known.
+        assert!(styles_left_out(&row("7:1"), &blank));
+        // Another cell's style, or the same column with another style: not.
+        assert!(!styles_left_out(&row("5:1"), &blank));
+        assert!(!styles_left_out(&row("7:4"), &blank));
+        // A mode difference is never a row difference.
+        assert!(!styles_left_out("mode ?7: true != false", &blank));
+        // Nothing left out at the restore: nothing excused.
+        assert!(!styles_left_out(&row("7:1"), &[]));
+    }
     use proptest::prelude::*;
 
     /// Pieces that reach most of what a restore writes: text of every
