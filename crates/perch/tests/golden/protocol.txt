@@ -1,6 +1,6 @@
 # control session
 C> 0000004901 Hello {"min":1,"max":1,"client":"golden-test","mode":"control","label":"test"}
-S> 0000006402 Welcome {"protocol":1,"perch":"<version>","capabilities":["info","kill","rename","annotate","detach","attach"]}
+S> 0000006b02 Welcome {"protocol":1,"perch":"<version>","capabilities":["info","kill","rename","annotate","detach","attach","send"]}
 C> 0000002804 Request {"id":1,"op":"rename","name":"renamed"}
 S> 0000001f05 Response {"id":1,"ok":true,"result":{}}
 C> 0000004c04 Request {"id":"two","op":"annotate","set":{"k":"v"},"unset":["none"],"future":true}
@@ -28,7 +28,7 @@ S> 0000004403 Error {"code":"expected_hello","message":"the first frame must be 
 S> (closed)
 # attach mode, an unreadable Attach
 C> 0000002e01 Hello {"min":1,"max":1,"mode":"attach","label":"t"}
-S> 0000006402 Welcome {"protocol":1,"perch":"<version>","capabilities":["info","kill","rename","annotate","detach","attach"]}
+S> 0000006b02 Welcome {"protocol":1,"perch":"<version>","capabilities":["info","kill","rename","annotate","detach","attach","send"]}
 C> 0000001006 Attach {"rows":"many"}
 S> 0000007503 Error {"code":"bad_attach","message":"unreadable Attach: invalid type: string \"many\", expected u16 at line 1 column 14"}
 S> (closed)
