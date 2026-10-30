@@ -97,6 +97,7 @@ export class Terminals implements vscode.Disposable {
   private readonly opening = new WeakSet<vscode.Terminal>();
   private noticeShown = false;
   private linkEnv: boolean | undefined;
+  private noLinkEnv: boolean | undefined;
   private linkEnvWarned = false;
   private readonly closedEmitter = new vscode.EventEmitter<CloseOutcome>();
   readonly onDidClose = this.closedEmitter.event;
@@ -258,7 +259,7 @@ export class Terminals implements vscode.Disposable {
       cwd: o.cwd,
       env: o.env,
       annotations: o.annotations,
-      linkEnv: this.linkEnvSupported(settings.linkedEnvironment) ? settings.linkedEnvironment : undefined,
+      linkEnv: this.linkEnvArg(settings.linkedEnvironment),
     };
     this.prepared.set(id, { name: o.name, kind: o.kind, owner: o.owner, annotations: o.annotations, cwd: o.cwd });
     return {
@@ -280,6 +281,14 @@ export class Terminals implements vscode.Disposable {
    * `perch.linkedEnvironment` is passed only if this binary has the flags;
    * otherwise say once that it is ignored (when it names something).
    */
+  private linkEnvArg(names: readonly string[]): readonly string[] | undefined {
+    if (names.length > 0) return this.linkEnvSupported(names) ? names : undefined;
+    // Link nothing: `--no-link-env`, or no flag for a binary from before
+    // it, whose default list is empty.
+    this.noLinkEnv ??= this.deps.cli().supportsNoLinkEnv();
+    return this.noLinkEnv ? [] : undefined;
+  }
+
   private linkEnvSupported(names: readonly string[]): boolean {
     this.linkEnv ??= this.deps.cli().supportsLinkEnv();
     const ok = this.linkEnv;
@@ -295,6 +304,7 @@ export class Terminals implements vscode.Disposable {
   /** The binary or the setting changed: probe `--link-env` again. */
   binaryChanged(): void {
     this.linkEnv = undefined;
+    this.noLinkEnv = undefined;
     this.linkEnvWarned = false;
   }
 
