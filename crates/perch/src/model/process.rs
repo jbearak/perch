@@ -11,8 +11,8 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::wire::{Decoder, FromModel, ToModel};
-use crate::sys;
 use crate::vt_ffi::Model;
+use crate::{restore, sys};
 
 /// Ghostty's byte limit on history; the line limit is the session's.
 pub const SCROLLBACK_BYTES: u64 = 64 << 20;
@@ -94,6 +94,48 @@ fn run(fd: i32, params: Params) {
                         id,
                         at_ground: model.at_ground(),
                         tail,
+                    }
+                    .encode(&mut out);
+                }
+                ToModel::Resize { cols, rows } => {
+                    if let Err(e) = model.resize(cols, rows) {
+                        eprintln!("perch model: cannot resize to {cols}x{rows}: {e:?}");
+                    }
+                }
+                ToModel::Restore {
+                    id,
+                    full,
+                    cols,
+                    rows,
+                    scrollback_rows,
+                    bracketed_paste,
+                } => {
+                    send_replies(&mut model, generation, &mut out, &hooks);
+                    let mode = if full {
+                        restore::Mode::Full
+                    } else {
+                        restore::Mode::Screen
+                    };
+                    let client = restore::Client {
+                        cols,
+                        rows,
+                        scrollback_rows,
+                    };
+                    let at_ground = model.at_ground();
+                    let (fallback, bytes) =
+                        match restore::build(&mut model, mode, client, bracketed_paste) {
+                            Ok(r) => (r.nudge.is_some(), r.bytes),
+                            Err(e) => {
+                                eprintln!("perch model: cannot build a restore: {e:?}");
+                                (true, Vec::new())
+                            }
+                        };
+                    FromModel::Restore {
+                        generation,
+                        id,
+                        at_ground,
+                        fallback,
+                        bytes,
                     }
                     .encode(&mut out);
                 }

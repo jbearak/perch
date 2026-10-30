@@ -19,11 +19,14 @@ pub const MAX_MESSAGE: usize = 64 << 20;
 mod kind {
     pub const FRAME: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
+    pub const RESIZE: u8 = 3;
+    pub const RESTORE: u8 = 4;
     #[cfg(feature = "test-hooks")]
     pub const FAULT: u8 = 9;
     pub const REPLY: u8 = 16;
     pub const PWD: u8 = 17;
     pub const SNAPSHOT_DONE: u8 = 18;
+    pub const RESTORE_DONE: u8 = 19;
 }
 
 /// A fault the model process stages on request, in test-hooks builds.
@@ -75,6 +78,18 @@ pub enum ToModel {
     Frame { n: u64, bytes: Vec<u8> },
     /// Send the tail (`perch_vt_tail`) with this many history rows.
     Snapshot { id: u64, history_rows: u32 },
+    /// The PTY changed size; the model follows.
+    Resize { cols: u16, rows: u16 },
+    /// Build a restore for a client (see [`crate::restore::build`]), which
+    /// resizes the model to the client's size.
+    Restore {
+        id: u64,
+        full: bool,
+        cols: u16,
+        rows: u16,
+        scrollback_rows: u32,
+        bracketed_paste: bool,
+    },
     #[cfg(feature = "test-hooks")]
     Fault(Fault),
 }
@@ -99,6 +114,17 @@ pub enum FromModel {
         at_ground: bool,
         tail: Vec<u8>,
     },
+    /// The answer to [`ToModel::Restore`], taken after every frame sent
+    /// before the request. `fallback` when the restore passed its byte
+    /// limit and is the partial-model one, whose nudge the supervisor
+    /// sends; `bytes` is empty if the model could not build one at all.
+    Restore {
+        generation: u32,
+        id: u64,
+        at_ground: bool,
+        fallback: bool,
+        bytes: Vec<u8>,
+    },
 }
 
 impl FromModel {
@@ -106,7 +132,8 @@ impl FromModel {
         match self {
             FromModel::Reply { generation, .. }
             | FromModel::Pwd { generation, .. }
-            | FromModel::Snapshot { generation, .. } => *generation,
+            | FromModel::Snapshot { generation, .. }
+            | FromModel::Restore { generation, .. } => *generation,
         }
     }
 }
@@ -129,6 +156,27 @@ impl ToModel {
                 out.extend_from_slice(&id.to_be_bytes());
                 out.extend_from_slice(&history_rows.to_be_bytes());
             }
+            ToModel::Resize { cols, rows } => {
+                header(out, kind::RESIZE, 4);
+                out.extend_from_slice(&cols.to_be_bytes());
+                out.extend_from_slice(&rows.to_be_bytes());
+            }
+            ToModel::Restore {
+                id,
+                full,
+                cols,
+                rows,
+                scrollback_rows,
+                bracketed_paste,
+            } => {
+                header(out, kind::RESTORE, 18);
+                out.extend_from_slice(&id.to_be_bytes());
+                out.push(u8::from(*full));
+                out.extend_from_slice(&cols.to_be_bytes());
+                out.extend_from_slice(&rows.to_be_bytes());
+                out.extend_from_slice(&scrollback_rows.to_be_bytes());
+                out.push(u8::from(*bracketed_paste));
+            }
             #[cfg(feature = "test-hooks")]
             ToModel::Fault(f) => {
                 header(out, kind::FAULT, 1);
@@ -147,6 +195,18 @@ impl ToModel {
             kind::SNAPSHOT => ToModel::Snapshot {
                 id: r.u64()?,
                 history_rows: r.u32()?,
+            },
+            kind::RESIZE => ToModel::Resize {
+                cols: r.u16()?,
+                rows: r.u16()?,
+            },
+            kind::RESTORE => ToModel::Restore {
+                id: r.u64()?,
+                full: r.u8()? != 0,
+                cols: r.u16()?,
+                rows: r.u16()?,
+                scrollback_rows: r.u32()?,
+                bracketed_paste: r.u8()? != 0,
             },
             #[cfg(feature = "test-hooks")]
             kind::FAULT => ToModel::Fault(Fault::from_byte(r.u8()?).ok_or(WireError::Malformed)?),
@@ -196,6 +256,20 @@ impl FromModel {
                 out.push(u8::from(*at_ground));
                 out.extend_from_slice(tail);
             }
+            FromModel::Restore {
+                generation,
+                id,
+                at_ground,
+                fallback,
+                bytes,
+            } => {
+                header(out, kind::RESTORE_DONE, 14 + bytes.len());
+                out.extend_from_slice(&generation.to_be_bytes());
+                out.extend_from_slice(&id.to_be_bytes());
+                out.push(u8::from(*at_ground));
+                out.push(u8::from(*fallback));
+                out.extend_from_slice(bytes);
+            }
         }
     }
 
@@ -218,6 +292,13 @@ impl FromModel {
                 at_ground: r.u8()? != 0,
                 tail: r.rest(),
             },
+            kind::RESTORE_DONE => FromModel::Restore {
+                generation: r.u32()?,
+                id: r.u64()?,
+                at_ground: r.u8()? != 0,
+                fallback: r.u8()? != 0,
+                bytes: r.rest(),
+            },
             other => return Err(WireError::UnknownType(other)),
         })
     }
@@ -237,6 +318,10 @@ impl Reader<'_> {
 
     fn u8(&mut self) -> Result<u8, WireError> {
         Ok(self.take::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, WireError> {
+        Ok(u16::from_be_bytes(self.take()?))
     }
 
     fn u32(&mut self) -> Result<u32, WireError> {
@@ -347,6 +432,15 @@ mod tests {
                 id: 3,
                 history_rows: 1000,
             },
+            ToModel::Resize { cols: 80, rows: 24 },
+            ToModel::Restore {
+                id: 4,
+                full: true,
+                cols: 120,
+                rows: 40,
+                scrollback_rows: 1000,
+                bracketed_paste: true,
+            },
         ];
         let from = [
             FromModel::Reply {
@@ -364,6 +458,13 @@ mod tests {
                 id: 3,
                 at_ground: true,
                 tail: b"one\n".to_vec(),
+            },
+            FromModel::Restore {
+                generation: 2,
+                id: 4,
+                at_ground: true,
+                fallback: false,
+                bytes: b"\x18restore".to_vec(),
             },
         ];
         let mut a = Vec::new();
