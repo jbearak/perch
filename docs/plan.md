@@ -180,7 +180,7 @@ Branch `docs/design`: `docs/design.md`, `docs/plan.md`, `docs/research/`, `docs/
 
 - Release builds on native runners for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and `aarch64-apple-darwin`, each running `perch new -d`, `list` and `kill`; `x86_64-apple-darwin` cross-compiled and not run. Darwin binaries ad-hoc signed.
 - Seven VSIXs (six targets, the musl builds also serving the alpine targets, plus a universal one without a binary), each checked for the binary's presence and architecture.
-- Smoke test per native runner: install that runner's own VSIX and the universal one with the `code` CLI of the VS Code that `@vscode/test-electron` downloads (`--extensions-dir` a temporary directory), then run the installed binary. VS Code refuses a VSIX for another platform, so the alpine VSIXs are checked by unpacking them and running their binary in an `alpine:3` container.
+- Smoke test per native runner: install that runner's own VSIX and the universal one with the `code` CLI of the VS Code that `@vscode/test-electron` downloads (`--extensions-dir` a temporary directory), then run the installed binary. VS Code's CLI does not check a local VSIX's target (1.144 installed a linux-x64 VSIX on darwin-arm64), so installing one proves nothing about another platform. The alpine VSIXs are checked by unpacking them and running their binary in an `alpine:3` container.
 - Publishing to the Marketplace and Open VSX: written, gated on a tag and secrets, not run.
 
 ### M7. Documentation

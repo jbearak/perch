@@ -152,7 +152,7 @@ Republishing cannot bring back files that other programs owned in the old direct
   "id": "k3x9q2ab",
   "name": "R: thesis",
   "kind": "r",
-  "owner": "jbearak.raven",
+  "owner": "jbearak.raven-r",
   "annotations": { "raven.console": "ipc" },
   "command": ["/path/to/raven", "console", "--ipc", "/tmp/perch-501/k3x9q2ab/ipc"],
   "cwd": "/home/me/thesis",
@@ -456,7 +456,7 @@ perch version [--json]
 perch self-install <dest>                     hidden; used by the extension to keep a stable copy
 ```
 
-`--json` output carries `"schema": 1` and follows the additive-fields rule.
+`list`, `doctor` and `self-install` `--json` output carries `"schema": 1` at the top level; `info --json` (one session object) and `version --json` do not. All of it follows the additive-fields rule.
 
 ## VS Code extension
 
@@ -571,7 +571,7 @@ These changes belong in Raven and Sight, not in Perch. They are listed so that P
 **Raven (R).** Raven's console keeps its own socket protocol and its `queued`, `done` and `error` replies. What Raven needs to change:
 
 - **Launch.** Start the console with `command: [raven, 'console', '--ipc', '{dir}/ipc', ...]` and `annotations: { 'raven.console': 'ipc' }`. For the profile picker, use `prepareLaunch`, and map terminals to sessions with `sessionForTerminal`.
-- **Sending to a detached session.** Raven picks its target R session from `listSessions({ owner: 'jbearak.raven' })`, not only from open terminals, and connects to `<dir>/ipc` directly. A session with no terminal still receives code. Raven's fallback route, which types code into the terminal today with `terminal.sendText`, uses Perch's `send` for Perch sessions, because `sendText` reaches nothing while detached. If `degraded` includes `directory-recreated`, the console socket is gone for good and the `send` route is the only one left.
+- **Sending to a detached session.** Raven picks its target R session from `listSessions({ owner: 'jbearak.raven-r' })`, not only from open terminals, and connects to `<dir>/ipc` directly. A session with no terminal still receives code. Raven's fallback route, which types code into the terminal today with `terminal.sendText`, uses Perch's `send` for Perch sessions, because `sendText` reaches nothing while detached. If `degraded` includes `directory-recreated`, the console socket is gone for good and the `send` route is the only one left.
 - **Descriptor files.** Raven keeps two files in the session directory, each replaced atomically. R's side and the editor's side never write the same file. The editor writes `raven-window.json` (plot server port and token, data viewer directory), and the window that writes it is the one that receives plots and data viewers. Only two events make a window write it: Perch attaches a terminal in that window (`onDidAttach`, including restore and adoption of a terminal there), or the user sends code from that window to a detached session. A window that merely lists a session never writes it. If two windows race, the later write wins, and that is the window the user acted in last. R's bootstrap profile writes `raven-r.json` (R session ID, httpgd URL and token) whenever the device starts. Both are mode 0600. The bootstrap profile reads the port and token from `raven-window.json` at every request, falling back to the environment. Secrets stay out of annotations.
 - **Adoption.** On activation, Raven calls `terminals()` and `listSessions`. For each Raven terminal in this window, and on every later `onDidAttach`, it writes `raven-window.json`, registers the console socket and reads `raven-r.json` to re-register the httpgd device. Detached sessions found by `listSessions` are only recorded as possible targets. Adoption is idempotent. No code is sent to R.
 - **Detached plots.** While no window is connected, R's posts to the plot server fail. Because R records the httpgd URL in `raven-r.json` whenever the device starts, a window that adopts the session later finds plots made while detached.
