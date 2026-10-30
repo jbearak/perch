@@ -21,24 +21,31 @@ set -eu
 cd "$(git rev-parse --show-toplevel)"
 bin=${1:-target/linux-hosts/perch}
 [ $# -eq 0 ] || shift
-if [ ! -x "$bin" ]; then
-    [ "$bin" = target/linux-hosts/perch ] || { echo "no binary at $bin" >&2; exit 2; }
-    tests/linux/build-musl.sh "$bin"
-fi
-
 if [ "${PERCH_COLIMA_PROFILE:-}" = 1 ]; then
+    # Everything, the build included, runs against the temporary daemon.
+    # --activate=false leaves the user's Docker context alone; DOCKER_HOST
+    # selects the temporary daemon.
     profile=perch-m4-$$
     trap 'colima delete --force "$profile" >/dev/null 2>&1 || true' EXIT
-    colima start --profile "$profile" --cpu 2 --memory 2 --disk 20 --runtime docker
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    colima start --profile "$profile" --activate=false --cpu 2 --memory 2 --disk 20 --runtime docker
     DOCKER_HOST="unix://$HOME/.colima/$profile/docker.sock"
     export DOCKER_HOST
     PERCH_COLIMA_PROFILE= "$0" "$bin" "$@"
     exit
 fi
 
+if [ ! -x "$bin" ]; then
+    [ "$bin" = target/linux-hosts/perch ] || { echo "no binary at $bin" >&2; exit 2; }
+    tests/linux/build-musl.sh "$bin"
+fi
+
 name=perch-host-$$
-docker build -q -f tests/linux/host.Dockerfile -t perch-host tests/linux >/dev/null
 trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+docker build -q -f tests/linux/host.Dockerfile -t perch-host tests/linux >/dev/null
 docker run -d --name "$name" --privileged --cgroupns=private \
     --tmpfs /run --tmpfs /run/lock perch-host >/dev/null
 
