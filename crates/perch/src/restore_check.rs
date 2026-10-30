@@ -379,20 +379,10 @@ fn row_styles(row: &serde_json::Value) -> Vec<String> {
 /// Whether a row difference has the same text, wrap and continuation and
 /// the terminal lacks only styles of blank cells the restore left out.
 fn styles_left_out(diff: &str, blank_styles: &[String]) -> bool {
-    let Some((_, rest)) = diff.split_once(": ") else {
+    let Some((a, b)) = row_diff(diff) else {
         return false;
     };
-    let Some((a, b)) = rest.split_once(" != ") else {
-        return false;
-    };
-    let (Ok(a), Ok(b)) = (
-        serde_json::from_str::<serde_json::Value>(a),
-        serde_json::from_str::<serde_json::Value>(b),
-    ) else {
-        return false;
-    };
-    let row = |v: &serde_json::Value| v.as_array().is_some_and(|r| r.len() == 4);
-    if !row(&a) || !row(&b) || a[0] != b[0] || a[1] != b[1] || a[3] != b[3] {
+    if a[0] != b[0] || a[1] != b[1] || a[3] != b[3] {
         return false;
     }
     let (model, got) = (row_styles(&a), row_styles(&b));
@@ -403,37 +393,28 @@ fn styles_left_out(diff: &str, blank_styles: &[String]) -> bool {
             .all(|e| blank_styles.contains(e))
 }
 
+/// The two sides of a row difference (`... row N: [..] != [..]`), each a
+/// `[text, wrapped, styled, continuation]` row; `None` for any other
+/// difference, so that row-only exceptions never excuse a mode or cursor.
+fn row_diff(diff: &str) -> Option<(serde_json::Value, serde_json::Value)> {
+    let (_, rest) = diff.split_once(": ")?;
+    let (a, b) = rest.split_once(" != ")?;
+    let a: serde_json::Value = serde_json::from_str(a).ok()?;
+    let b: serde_json::Value = serde_json::from_str(b).ok()?;
+    let row = |v: &serde_json::Value| v.as_array().is_some_and(|r| r.len() == 4);
+    (row(&a) && row(&b)).then_some((a, b))
+}
+
 /// Whether a row difference has the same text on both sides (and, with
 /// `blank`, no text at all).
 fn same_text(diff: &str, blank: bool) -> bool {
-    let Some((_, rest)) = diff.split_once(": ") else {
-        return false;
-    };
-    let Some((a, b)) = rest.split_once(" != ") else {
-        return false;
-    };
-    match (
-        serde_json::from_str::<serde_json::Value>(a),
-        serde_json::from_str::<serde_json::Value>(b),
-    ) {
-        (Ok(a), Ok(b)) => a[0] == b[0] && (!blank || a[0] == ""),
-        _ => false,
-    }
+    row_diff(diff).is_some_and(|(a, b)| a[0] == b[0] && (!blank || a[0] == ""))
 }
 
 /// Whether a row difference (`... row N: [..] != [..]`) is only in the
 /// style of the last column and the soft wrap.
 fn last_column_style_only(diff: &str, cols: u64) -> bool {
-    let Some((_, rest)) = diff.split_once(": ") else {
-        return false;
-    };
-    let Some((a, b)) = rest.split_once(" != ") else {
-        return false;
-    };
-    let (Ok(a), Ok(b)) = (
-        serde_json::from_str::<serde_json::Value>(a),
-        serde_json::from_str::<serde_json::Value>(b),
-    ) else {
+    let Some((a, b)) = row_diff(diff) else {
         return false;
     };
     let last = format!("{}:", cols.saturating_sub(1));
@@ -499,6 +480,21 @@ mod tests {
         assert!(!styles_left_out("mode ?7: true != false", &blank));
         // Nothing left out at the restore: nothing excused.
         assert!(!styles_left_out(&row("7:1"), &[]));
+    }
+
+    #[test]
+    fn row_exceptions_never_excuse_other_differences() {
+        // Every exception on, as with margins and 2027 set.
+        let expected = serde_json::json!({ "cols": 8, "modes": { "?69": true, "?2027": true } });
+        let blank = vec!["7:1".to_owned()];
+        for diff in [
+            "mode ?7: true != false",
+            "mode ?2004: false != true",
+            "primary cursor: [1,2] != [1,3]",
+            r#"primary row 0: "ab" != "ab""#,
+        ] {
+            assert!(!known(&expected, diff, &blank), "{diff}");
+        }
     }
     use proptest::prelude::*;
 
