@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod term;
+
 use std::ffi::OsStr;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};

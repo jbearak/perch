@@ -153,13 +153,22 @@ fn golden_hello_welcome_error_transcript() {
     transcript.push("# request before Hello".to_owned());
     transcript.append(&mut c.log);
 
+    // Attach mode: welcomed, then an unreadable Attach.
+    let mut c = Raw::connect(&rt, &id);
+    c.send(
+        kind::HELLO,
+        r#"{"min":1,"max":1,"mode":"attach","label":"t"}"#,
+    );
+    c.recv();
+    c.send(kind::ATTACH, r#"{"rows":"many"}"#);
+    c.recv();
+    c.recv();
+    transcript.push("# attach mode, an unreadable Attach".to_owned());
+    transcript.append(&mut c.log);
+
     // An unreadable Hello, and an unknown mode.
     for (title, hello) in [
         ("# unreadable Hello", r#"{"min":1}"#),
-        (
-            "# attach mode (not in this supervisor)",
-            r#"{"min":1,"max":1,"mode":"attach"}"#,
-        ),
         ("# unknown mode", r#"{"min":1,"max":1,"mode":"spectate"}"#),
     ] {
         let mut c = Raw::connect(&rt, &id);

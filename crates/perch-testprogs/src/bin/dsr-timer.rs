@@ -11,6 +11,12 @@
 //! - `ris`: write RIS;
 //! - `flood:N`: write N bytes of text;
 //! - `text:WORD`: write WORD and a newline;
+//! - `open:KIND:N`: start a sequence of KIND (`apc`, `pm`, `sos`, `dcs`,
+//!   `osc52`, `osc1337`, `osc5522`, or `csi`, whose parameters carry line
+//!   feeds) and write N bytes of its body, leaving it open;
+//! - `body:KIND:N`: write N more bytes of its body;
+//! - `close:KIND`: end it (ST, or `m` for the CSI);
+//! - `cat:PATH:START:END`: write bytes START to END of a file;
 //! - `exit:N`: exit with status N.
 //!
 //! After each round it rewrites OUT with one JSON line per round so far:
@@ -86,6 +92,44 @@ fn step(word: &str, timeout: Duration) -> Value {
                     write(&block[..k]);
                     left -= k;
                 }
+            } else if let Some(rest) = word
+                .strip_prefix("open:")
+                .map(|r| (true, r))
+                .or_else(|| word.strip_prefix("body:").map(|r| (false, r)))
+            {
+                let (open, rest) = rest;
+                let (kind, n) = rest.split_once(':').expect("open:KIND:N");
+                let n: usize = n.parse().expect("open size");
+                let (intro, body): (&[u8], &[u8]) = match kind {
+                    "apc" => (b"\x1b_G", b"QUFB"),
+                    "pm" => (b"\x1b^", b"pmpm"),
+                    "sos" => (b"\x1bX", b"soss"),
+                    "dcs" => (b"\x1bPq", b"#0;2"),
+                    "osc52" => (b"\x1b]52;c;", b"QUFB"),
+                    "osc1337" => (b"\x1b]1337;File=inline=1:", b"QUFB"),
+                    "osc5522" => (b"\x1b]5522;", b"QUFB"),
+                    "csi" => (b"\x1b[", b"1;1;1;1\n"),
+                    _ => panic!("unknown kind `{kind}`"),
+                };
+                if open {
+                    write(intro);
+                }
+                let block: Vec<u8> = body.iter().copied().cycle().take(64 * 1024).collect();
+                let mut left = n;
+                while left > 0 {
+                    let k = left.min(block.len());
+                    write(&block[..k]);
+                    left -= k;
+                }
+            } else if let Some(kind) = word.strip_prefix("close:") {
+                write(if kind == "csi" { b"m" } else { b"\x1b\\" });
+            } else if let Some(rest) = word.strip_prefix("cat:") {
+                let mut parts = rest.rsplitn(3, ':');
+                let end: usize = parts.next().and_then(|v| v.parse().ok()).expect("END");
+                let start: usize = parts.next().and_then(|v| v.parse().ok()).expect("START");
+                let path = parts.next().expect("PATH");
+                let bytes = std::fs::read(path).expect("read the file");
+                write(&bytes[start.min(bytes.len())..end.min(bytes.len())]);
             } else if let Some(t) = word.strip_prefix("text:") {
                 write(format!("{t}\r\n").as_bytes());
             } else if let Some(code) = word.strip_prefix("exit:") {
