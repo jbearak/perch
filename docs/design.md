@@ -456,7 +456,7 @@ perch version [--json]
 perch self-install <dest>                     hidden; used by the extension to keep a stable copy
 ```
 
-`--json` output carries `"schema": 1` and follows the additive-fields rule.
+`list`, `doctor` and `self-install` `--json` output carries `"schema": 1` at the top level; `info --json` (one session object) and `version --json` do not. All of it follows the additive-fields rule.
 
 ## VS Code extension
 

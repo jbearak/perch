@@ -8,7 +8,7 @@ Perch never types into a session on its own. Input reaches a session only from i
 
 Perch's extension ID is `jbearak.perch`. It is a workspace extension: in a remote window it runs in the remote extension host, next to the sessions. VS Code does not pass an extension's exports between extension hosts, so an extension that uses the API must run in the same host as Perch. In a remote window that means it must run as a workspace extension too; a UI extension running locally cannot use it.
 
-Perch activates on startup, before or after your extension, and it may be installed or removed while your extension runs. Events fired before you subscribe are lost. So subscribe to the events first, then take the snapshots with `terminals()` and `listSessions()`, and make handling idempotent: an attach or end can arrive while the first listing is in flight, and the snapshot and the event then describe the same session. Look Perch up again whenever `vscode.extensions.onDidChange` fires.
+Perch activates on startup, before or after your extension, and it may be installed or removed while your extension runs. Events fired before you subscribe are lost. So subscribe to the events first, then take the snapshots with `terminals()` and `listSessions()`. An attach or end can arrive while the listing is in flight; the event is newer, so skip listing entries for sessions an event changed meanwhile. Look Perch up again whenever `vscode.extensions.onDidChange` fires, and discard the results of a lookup that a later one has replaced. `connectPerch` below does all of this; it never rejects, so `void connectPerch()` leaves no unhandled rejection.
 
 ```ts
 import * as vscode from 'vscode';
@@ -27,10 +27,10 @@ async function getPerch(): Promise<PerchApiV1 | undefined> {
 
 let perch: PerchApiV1 | undefined;
 let perchEvents: vscode.Disposable | undefined;
+let generation = 0; // which connectPerch() call is current
 const sessions = new Map<string, SessionInfo>(); // yours, by ID
 const terminalsBySession = new Map<string, vscode.Terminal>();
 
-// Idempotent: called for snapshot entries and events alike.
 function seen(session: SessionInfo, terminal?: vscode.Terminal): void {
   if (session.state === 'exited' || session.state === 'lost') return ended(session);
   sessions.set(session.id, session);
@@ -43,22 +43,24 @@ function ended(session: SessionInfo): void {
 }
 
 async function connectPerch(): Promise<void> {
-  const api = await getPerch();
-  if (api === perch) return;
+  const current = ++generation;
+  const api = await getPerch().catch(() => undefined);
+  if (current !== generation) return; // a later call took over
   perchEvents?.dispose();
   perchEvents = undefined;
   sessions.clear();
   terminalsBySession.clear();
   perch = api;
   if (api === undefined) return;
-  // 1. Subscribe first.
-  const endedIds = new Set<string>();
+  // 1. Subscribe first. Events are newer than the listing below.
+  const changedByEvents = new Set<string>();
   perchEvents = vscode.Disposable.from(
     api.onDidAttach(({ session, terminal }) => {
+      changedByEvents.add(session.id);
       if (session.owner === callerId) seen(session, terminal);
     }),
     api.onDidEndSession((session) => {
-      endedIds.add(session.id);
+      changedByEvents.add(session.id);
       ended(session);
     }),
   );
@@ -66,10 +68,11 @@ async function connectPerch(): Promise<void> {
   for (const { session, terminal } of api.terminals()) {
     if (session.owner === callerId) seen(session, terminal);
   }
-  const listed = await api.listSessions({ owner: callerId });
-  // 3. Reconcile: an end reported while the listing ran wins over it.
+  const listed = await api.listSessions({ owner: callerId }).catch(() => []);
+  if (current !== generation) return;
+  // 3. Skip what an event changed while the listing ran.
   for (const session of listed) {
-    if (!endedIds.has(session.id)) seen(session);
+    if (!changedByEvents.has(session.id)) seen(session);
   }
 }
 

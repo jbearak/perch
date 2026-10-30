@@ -42,7 +42,7 @@ An option that takes a value accepts it as the next argument or after `=`: `--na
 perch new [options] -- <command> [args...]
 ```
 
-Starts `<command>` in a new session. Without `-d` it then attaches the current terminal to the session, as `perch attach` does. The command starts at the first argument that does not begin with `-`; it and everything after it, options included, go to the program. `--` is needed only when the command's own name begins with `-`, and is always allowed.
+Starts `<command>` in a new session. Without `-d` it then attaches the current terminal to the session, as `perch attach` does. The command starts at the first argument that is neither an option nor an option's value; it and everything after it, options included, go to the program. `--` is needed only when the command's own name begins with `-`, and is always allowed.
 
 | Option | Effect |
 |--------|--------|
