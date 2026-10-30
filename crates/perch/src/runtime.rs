@@ -218,7 +218,7 @@ pub fn remove_locked(rt: BorrowedFd<'_>, name: &OsStr, locked: BorrowedFd<'_>) -
 }
 
 /// One session found in the runtime directory.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Entry {
     /// The directory's name, which is the session ID.
     pub dir_name: OsString,

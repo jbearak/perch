@@ -32,6 +32,23 @@ pub mod kind {
     /// A control-mode response: JSON `{"id":..,"ok":true,"result":{..}}` or
     /// `{"id":..,"ok":false,"error":{"code":..,"message":..}}`.
     pub const RESPONSE: u8 = 5;
+    /// Attach mode's first frame after `Welcome`: JSON [`super::Attach`].
+    pub const ATTACH: u8 = 6;
+    /// The supervisor took the client: JSON [`super::Attached`].
+    pub const ATTACHED: u8 = 7;
+    /// `ifDetached` was set and another client is live; the supervisor
+    /// closes: JSON `{}`.
+    pub const BUSY: u8 = 8;
+    /// Bytes the client's terminal sent, raw.
+    pub const INPUT: u8 = 9;
+    /// Bytes for the client's terminal, raw: a restore or live output.
+    pub const OUTPUT: u8 = 10;
+    /// The client's terminal changed size: JSON [`super::Resize`].
+    pub const RESIZE: u8 = 11;
+    /// The client is no longer attached: JSON [`super::Detached`].
+    pub const DETACHED: u8 = 12;
+    /// The program ended; the supervisor closes: JSON [`super::Exited`].
+    pub const EXITED: u8 = 13;
 
     /// A name for transcripts and errors.
     pub fn name(k: u8) -> &'static str {
@@ -41,6 +58,14 @@ pub mod kind {
             ERROR => "Error",
             REQUEST => "Request",
             RESPONSE => "Response",
+            ATTACH => "Attach",
+            ATTACHED => "Attached",
+            BUSY => "Busy",
+            INPUT => "Input",
+            OUTPUT => "Output",
+            RESIZE => "Resize",
+            DETACHED => "Detached",
+            EXITED => "Exited",
             _ => "Unknown",
         }
     }
@@ -177,6 +202,79 @@ impl Hello {
             label: label.into(),
         }
     }
+}
+
+impl Hello {
+    /// An attach-mode `Hello` from this build.
+    pub fn attach(label: &str) -> Hello {
+        Hello {
+            mode: "attach".into(),
+            ..Hello::control(label)
+        }
+    }
+}
+
+/// The restore a client asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreMode {
+    /// History, screens and state, for a terminal that starts empty.
+    Full,
+    /// Screens and state; the terminal keeps its scrollback.
+    Screen,
+    /// Nothing: the first attach of `perch new`, before the program runs.
+    None,
+}
+
+/// The client's attach request. Fields are additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attach {
+    pub rows: u16,
+    pub cols: u16,
+    pub restore: RestoreMode,
+    /// The most history rows the client's terminal keeps.
+    #[serde(default)]
+    pub scrollback: u32,
+    /// Attach only if no client is live; otherwise `Busy`.
+    #[serde(default)]
+    pub if_detached: bool,
+    /// The client's values of the linked variables.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// The client's process, for `info`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
+}
+
+/// The supervisor's answer to an `Attach` it takes: the size in effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attached {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// The client's terminal size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// Why a client is no longer attached: `takeover`, `detach` (asked for
+/// with the `detach` op) or `too_slow`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detached {
+    pub reason: String,
+}
+
+/// How the program ended, as in `meta.json`'s `exit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exited {
+    pub exit: crate::meta::Exit,
+    /// The status `perch attach` exits with: the program's code, 128 plus
+    /// a signal's number, or the code for a program that never started.
+    pub status: u8,
 }
 
 /// The supervisor's answer to a `Hello` it accepts.
