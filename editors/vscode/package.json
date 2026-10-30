@@ -193,7 +193,7 @@
           },
           "default": [],
           "scope": "machine",
-          "markdownDescription": "Environment variables whose values are socket paths, passed to `perch new --link-env`: each session sees a link that Perch re-points at the attached window's socket, so a reconnected session reaches the current window's agent or IPC socket. Changes apply to new sessions."
+          "markdownDescription": "Environment variables whose values are socket paths, passed to `perch new --link-env`: each session sees a link that Perch re-points at the attached window's socket, so a reconnected session reaches the current window's agent or IPC socket. `SSH_AUTH_SOCK` and `VSCODE_IPC_HOOK_CLI` are the usual entries; neither is on by default until it has been checked over Remote-SSH. Changes apply to new sessions."
         }
       }
     },
