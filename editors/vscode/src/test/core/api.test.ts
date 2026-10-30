@@ -221,6 +221,44 @@ describe('API core', () => {
       assert.strictEqual(new EndReporter().confirmedEnd(undefined, undefined), undefined);
     });
 
+    it('an end whose confirmation failed is reported once by the next successful listing without the session', () => {
+      const r = new EndReporter();
+      // Created and exited between listings; `perch info` failed once.
+      r.unconfirmed('abcd1234', session());
+      const [s, ...rest] = r.reconcile([]);
+      assert.deepStrictEqual(rest, []);
+      assert.strictEqual(s.id, 'abcd1234');
+      assert.strictEqual(s.state, 'exited');
+      assert.strictEqual(s.exit, undefined, 'exit status unknown');
+      assert.deepStrictEqual(r.reconcile([]), [], 'once');
+      assert.deepStrictEqual(r.ended(diffSessions([session()], []).ended), [], 'and not again by a diff');
+    });
+
+    it('with the exit this window’s terminal received, or the tombstone’s', () => {
+      const r = new EndReporter();
+      r.terminalExit('abcd1234', 5);
+      r.unconfirmed('abcd1234', session());
+      assert.deepStrictEqual(r.reconcile([])[0].exit, { code: 5 });
+      const r2 = new EndReporter();
+      r2.unconfirmed('abcd1234', session());
+      const tomb = session({ state: 'exited', attached: false, exit: { code: 2 } });
+      assert.deepStrictEqual(r2.reconcile([tomb])[0].exit, { code: 2 });
+    });
+
+    it('a listing that shows it running (taken over) reports nothing and drops it', () => {
+      const r = new EndReporter();
+      r.unconfirmed('abcd1234', session());
+      assert.deepStrictEqual(r.reconcile([session({ clientLabel: 'fedcba9876543210#bbbbbbbb' })]), []);
+      assert.deepStrictEqual(r.reconcile([]), [], 'dropped: its later end is a listing’s to report');
+    });
+
+    it('an unresponsive session stays pending', () => {
+      const r = new EndReporter();
+      r.unconfirmed('abcd1234', session());
+      assert.deepStrictEqual(r.reconcile([session({ state: 'unresponsive' })]), []);
+      assert.strictEqual(r.reconcile([]).length, 1);
+    });
+
     it('does not report sessions already ended at the first listing', () => {
       const r = new EndReporter();
       assert.deepStrictEqual(r.ended(diffSessions([], [session({ state: 'lost' })]).ended), []);

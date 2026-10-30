@@ -91,6 +91,8 @@ export interface ApiDeps {
   runtimeDir: string;
   /** Each listing that changed something. */
   onDidChangeList: vscode.Event<ListDiff>;
+  /** Each successful listing, changed or not. */
+  onDidList: vscode.Event<readonly Session[]>;
 }
 
 const unavailableMessage = 'Perch is not available on this host.';
@@ -114,6 +116,9 @@ export class Api implements vscode.Disposable {
       this.changed,
       this.attached,
       this.ended,
+      deps.onDidList((sessions) => {
+        for (const s of this.reporter.reconcile(sessions)) this.ended.fire(this.info(s));
+      }),
       deps.onDidChangeList((diff) => {
         this.changed.fire();
         for (const s of this.reporter.ended(diff.ended)) this.ended.fire(this.info(s));
@@ -136,15 +141,18 @@ export class Api implements vscode.Disposable {
     if (o.reason !== 'process' || o.result === 'busy') return;
     // The program's exit, as this window's terminal received it.
     this.reporter.terminalExit(o.id, o.code);
+    const known = (): Session | undefined => this.deps.find(o.id) ?? this.seen.get(o.id);
     let now: Session | undefined;
     try {
       now = await this.deps.cli().info(o.id);
     } catch {
-      return; // Unknown: a later listing decides.
+      // Unknown: the next successful listing decides.
+      this.reporter.unconfirmed(o.id, known());
+      this.seen.delete(o.id);
+      return;
     }
     if (now !== undefined && !isEnded(now)) return;
-    const known = this.deps.find(o.id) ?? this.seen.get(o.id);
-    const s = this.reporter.confirmedEnd(now, known);
+    const s = this.reporter.confirmedEnd(now, known());
     this.seen.delete(o.id);
     if (s !== undefined) this.ended.fire(this.info(s));
   }

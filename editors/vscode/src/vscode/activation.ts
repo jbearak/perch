@@ -177,6 +177,7 @@ export function activate(context: vscode.ExtensionContext): Exports {
     terminals,
     runtimeDir: runtimeDir(process.env, process.getuid?.() ?? 0, process.cwd()),
     onDidChangeList: store.onDidChange,
+    onDidList: store.onDidList,
   });
   context.subscriptions.push(api);
   const getApi = (version: number, callerId: string) => api.getApi(version, callerId);

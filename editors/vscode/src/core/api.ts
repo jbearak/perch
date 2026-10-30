@@ -176,6 +176,7 @@ export function apiError(err: unknown, code: ApiErrorCode | undefined): Error {
 export class EndReporter {
   private readonly reported = new Set<string>();
   private readonly exits = new Map<string, SessionExit>();
+  private readonly pending = new Map<string, Session | undefined>();
 
   /** This window's terminal of the session ended with the program's exit code. */
   terminalExit(id: string, code: number | undefined): void {
@@ -191,6 +192,36 @@ export class EndReporter {
   confirmedEnd(ended: Session | undefined, known: Session | undefined): Session | undefined {
     const s = ended ?? (known && { ...known, state: 'exited' as const, attached: false, exit: undefined });
     return s === undefined ? undefined : this.ended([s])[0];
+  }
+
+  /**
+   * Confirming an end failed (`perch info` did not answer). The session
+   * stays pending until a successful listing decides; `known` is the
+   * session as last seen here.
+   */
+  unconfirmed(id: string, known: Session | undefined): void {
+    this.pending.set(id, known);
+  }
+
+  /**
+   * At each successful listing: a pending session that is absent, or a
+   * tombstone, ended, and is reported once (exit status unknown unless this
+   * window's terminal received it). One the listing shows live, as after a
+   * takeover, is dropped unreported; an unresponsive one stays pending.
+   */
+  reconcile(listed: readonly Session[]): Session[] {
+    const out: Session[] = [];
+    for (const [id, known] of [...this.pending]) {
+      const s = listed.find((x) => x.id === id);
+      if (s !== undefined && !isEnded(s)) {
+        if (s.state !== 'unresponsive') this.pending.delete(id);
+        continue;
+      }
+      this.pending.delete(id);
+      const r = this.confirmedEnd(s, known);
+      if (r !== undefined) out.push(r);
+    }
+    return out;
   }
 
   /** From a listing's `ended`: the sessions to report, each once. */

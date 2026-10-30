@@ -28,6 +28,9 @@ export class SessionStore implements vscode.Disposable {
   private readonly refreshed = new vscode.EventEmitter<void>();
   /** Fires after every listing, changed or not: ages move on. */
   readonly onDidRefresh = this.refreshed.event;
+  private readonly listed = new vscode.EventEmitter<readonly Session[]>();
+  /** Fires after every successful listing, with it. */
+  readonly onDidList = this.listed.event;
   /** Why the last listing failed, or undefined. */
   error: string | undefined;
 
@@ -48,11 +51,13 @@ export class SessionStore implements vscode.Disposable {
     this.current = sessions;
     this.error = error;
     if (first || errorChanged || !isEmptyDiff(diff)) this.changed.fire(diff);
+    if (error === undefined) this.listed.fire(sessions);
     this.refreshed.fire();
   }
 
   dispose(): void {
     this.changed.dispose();
+    this.listed.dispose();
     this.refreshed.dispose();
   }
 }
