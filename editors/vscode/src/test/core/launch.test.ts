@@ -53,15 +53,22 @@ describe('launch', () => {
 
   it('recognizes Perch terminals from their creation options', () => {
     const n = newArgs({ id: 'abcd1234', label: 'l', scrollback: 1, name: 'x', kind: 'shell', command: ['zsh'] });
-    assert.deepStrictEqual(recognize('/ext/bin/linux-x64/perch', n), { id: 'abcd1234', mode: 'new', ifDetached: false });
+    assert.deepStrictEqual(recognize('/ext/bin/linux-x64/perch', n), {
+      id: 'abcd1234',
+      mode: 'new',
+      ifDetached: false,
+      label: 'l',
+    });
     // The path may point at an extension directory an update has deleted.
     assert.deepStrictEqual(recognize('/gone/old-version/bin/perch', attachArgs('zzzz9999', 'l', 1, true)), {
       id: 'zzzz9999',
       mode: 'attach',
       ifDetached: true,
+      label: 'l',
     });
     // --if-detached after `--` belongs to the command.
     assert.strictEqual(recognize('perch', ['attach', 'abcd1234', '--', '--if-detached'])?.ifDetached, false);
+    assert.strictEqual(recognize('perch', ['attach', 'abcd1234', '--', '--label', 'x'])?.label, undefined);
     assert.strictEqual(recognize('/bin/zsh', n), undefined);
     assert.strictEqual(recognize('/usr/bin/perch-other', n), undefined);
     assert.strictEqual(recognize('/usr/bin/perch', 'new --id abcd1234'), undefined);

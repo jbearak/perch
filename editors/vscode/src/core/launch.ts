@@ -83,6 +83,8 @@ export interface Recognized {
   /** `new` for a terminal that created its session, `attach` for one that attached. */
   mode: 'new' | 'attach';
   ifDetached: boolean;
+  /** The client label it attaches with, if it gives one. */
+  label?: string;
 }
 
 /**
@@ -96,13 +98,15 @@ export function recognize(shellPath: unknown, shellArgs: unknown): Recognized | 
   const args = shellArgs as string[];
   const end = args.indexOf('--');
   const options = end === -1 ? args : args.slice(0, end);
+  let r: Recognized | undefined;
   if (args[0] === 'new' && args[1] === '--id' && isSessionId(args[2] ?? '')) {
-    return { id: args[2], mode: 'new', ifDetached: false };
+    r = { id: args[2], mode: 'new', ifDetached: false };
+  } else if (args[0] === 'attach' && isSessionId(args[1] ?? '')) {
+    r = { id: args[1], mode: 'attach', ifDetached: options.includes('--if-detached') };
   }
-  if (args[0] === 'attach' && isSessionId(args[1] ?? '')) {
-    return { id: args[1], mode: 'attach', ifDetached: options.includes('--if-detached') };
-  }
-  return undefined;
+  const i = options.indexOf('--label');
+  if (r !== undefined && i !== -1 && i + 1 < options.length) r.label = options[i + 1];
+  return r;
 }
 
 /**
