@@ -275,7 +275,8 @@ fn has_rep(bytes: &[u8]) -> bool {
 /// - Pending wrap away from the right edge: at an interior right margin, or
 ///   left at the old margin's column after the margins were reset.
 ///   Rebuilding it needs a margin there, and setting margins homes the
-///   cursor. (The saved cursor's version is deferred from M2a.)
+///   cursor. (A saved cursor's, and the hidden primary screen's, are made
+///   before the program's margins are set.)
 fn unwritable_cursor(model: &Model) -> Result<bool, String> {
     let v: serde_json::Value =
         serde_json::from_slice(&model.dump().map_err(|e| format!("dump: {e:?}"))?)
@@ -337,19 +338,6 @@ fn known(
     blank_styles: &[String],
     insert_at_restore: bool,
 ) -> bool {
-    // A saved cursor waiting to wrap at a right margin inside the screen
-    // (DECLRMM) is written without its pending wrap (deferred from M2a).
-    let interior_wrap = |screen: &str| {
-        let sc = &expected["screens"][screen]["saved_cursor"];
-        sc["pending_wrap"] == true
-            && sc["x"].as_u64() != Some(expected["cols"].as_u64().unwrap_or(0) - 1)
-    };
-    if ["primary", "alternate"]
-        .iter()
-        .any(|s| diff.starts_with(&format!("{s}.saved_cursor")) && interior_wrap(s))
-    {
-        return true;
-    }
     // The blank cell left at the right edge (or right margin) where a wide
     // character did not fit takes the pen in Ghostty; the restore leaves it
     // unstyled.

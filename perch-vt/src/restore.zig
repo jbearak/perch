@@ -776,6 +776,17 @@ fn writeSavedCursor(w: *Writer, t: *const Terminal, screen: *const Screen) Write
         const start = edgeStart(row, x);
         try writeCup(w, y, start, .{});
         try writeEdgeCell(w, screen, row, start);
+    } else if (saved.pending_wrap and x > 0) {
+        // Waiting to wrap away from the edge (at a right margin, or left
+        // there after the margins were reset): made at a right margin set
+        // there for it (which homes the cursor) and dropped again (which
+        // does not).
+        const row = activePin(screen, y);
+        const start = edgeStart(row, x);
+        try w.print("\x1b[?69h\x1b[1;{d}s", .{x + 1});
+        try writeCup(w, y, start, .{});
+        try writeEdgeCell(w, screen, row, start);
+        try w.writeAll("\x1b[?69l");
     } else {
         try writeCup(w, y, x, .{});
     }

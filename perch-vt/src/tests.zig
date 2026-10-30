@@ -1051,6 +1051,18 @@ test "a protected alternate saved cursor with both screens' modes off" {
     try expectSameTerminal(a, r.vt);
 }
 
+test "a saved cursor waiting to wrap at an interior margin" {
+    const a = try newModel(10, 2);
+    defer a.destroy();
+    a.feed("\x1b[?69h\x1b[3;9s\x1b[1;9H \x1b7\x1b[?69l\x1b[H", 0);
+    try testing.expect(primary(a).saved_cursor.?.pending_wrap);
+    const r = try restoreInto(a, .screen, unlimited);
+    defer r.deinit();
+    try expectSameTerminal(a, r.vt);
+    feedBoth(a, r.vt, "\x1b8x");
+    try expectSameTerminal(a, r.vt);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();
