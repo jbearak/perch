@@ -130,6 +130,9 @@ const Builder = struct {
     fn run(self: *Builder, mode: Mode) (Error || Writer.Error)!void {
         const t = self.t;
         try writeModes(self.out(), t, .early);
+        // Before anything else, since DECSTR resets what it touches.
+        if (savedCarrier(t)) try self.out().writeAll("\x1b[1\"q\x1b[?47h\x1b7\x1b[?47l\x1b[!p");
+        try writeDefaultCursorStyle(self.out(), t);
         if (mode == .full) {
             const start = self.aw.written().len;
             try self.writeHistory();
@@ -139,11 +142,29 @@ const Builder = struct {
         const primary = t.screens.get(.primary).?;
         try self.writeScreen(primary);
         if (t.screens.active_key == .alternate) {
+            // The primary screen's own cursor style, which 1049 does not
+            // copy back on leaving (see `writeDefaultCursorStyle` for the
+            // default). Step 7 writes the active screen's.
+            const style = primary.cursor.cursor_style;
+            if (!t.cursor.is_default and style != t.cursor.default_style) {
+                try self.out().print("\x1b[{d} q", .{steadyStyle(style)});
+            }
             // Mode 47 whatever mode the program used: it saves no cursor,
             // so the primary screen's saved cursor written above survives,
             // and it does not clear, so the restore clears.
             try self.out().writeAll("\x1b[?47h");
-            try self.writeScreen(t.screens.get(.alternate).?);
+            // Protection carried to the primary screen through this one
+            // (see `writeProtect`) set its mode; only DECSTR turns that
+            // off again. What else it resets is written after this.
+            const alt = t.screens.get(.alternate).?;
+            const saved_protected = if (primary.saved_cursor) |sc| sc.protected else false;
+            if (primary.protected_mode == .off and (primary.cursor.protected or saved_protected) and
+                alt.protected_mode == .off) try self.out().writeAll("\x1b[!p");
+            // 47 copied the primary screen's style; this one's, if it has
+            // the default since.
+            if (t.cursor.is_default and alt.cursor.cursor_style != primary.cursor.cursor_style and
+                alt.cursor.cursor_style == t.cursor.default_style) try self.out().writeAll("\x1b[0 q");
+            try self.writeScreen(alt);
         }
         try self.writeState();
         try self.check();
@@ -187,15 +208,78 @@ const Builder = struct {
             }
         }
 
-        try writeSavedCursor(w, screen);
+        try writeSavedCursor(w, self.t, screen);
         try writeCleanSlate(w);
         // No margins or origin mode are set yet, so pending wrap can only
         // be rebuilt at the right edge of the screen here. The active
         // screen's cursor is written again, exactly, in step 7.
         try writeCursor(w, screen, .{}, true);
-        try writePen(w, screen);
+        const c = &screen.cursor;
+        if (screen == self.t.screens.get(.primary).? and self.t.screens.active_key == .alternate and
+            c.pending_wrap and c.x != screen.pages.cols - 1 and c.x > 0)
+        {
+            // Hidden while the alternate screen is active, this cursor is
+            // not written again in step 7, so its pending wrap away from
+            // the edge is made here, at a right margin set there for it
+            // (which homes the cursor) and dropped again (which does not).
+            const row = activePin(screen, c.y);
+            const start = edgeStart(row, c.x);
+            try w.print("\x1b[?69h\x1b[1;{d}s", .{c.x + 1});
+            try writeCup(w, c.y, start, .{});
+            try writeEdgeCell(w, screen, row, start);
+            try w.writeAll("\x1b[?69l");
+        }
+        try writePen(w, self.t, screen);
+        if (carriedProtection(self.t, screen) or carriedSaved(self.t, screen)) try self.carryProtection();
         try writeKittyStack(w, screen);
         try self.check();
+    }
+
+    /// The alternate screen's cursor protected with its mode off (see
+    /// `carriedProtection`): it can only come from the primary screen's
+    /// cursor, which 47 copies. So the primary cursor is set as the model
+    /// has it, protected in its own mode, and copied back, then this
+    /// cursor's own position and pen. Also run after carrying a saved
+    /// cursor's protection (`carriedSaved`), which left the primary
+    /// cursor as this one.
+    fn carryProtection(self: *Builder) Writer.Error!void {
+        const w = self.out();
+        const primary = self.t.screens.get(.primary).?;
+        const alt = self.t.screens.get(.alternate).?;
+        try writeCleanSlate(w);
+        if (primary.protected_mode != .off) try self.copyPrimaryCursor();
+        if (!alt.cursor.protected) {
+            try w.writeAll("\x1b[0\"q");
+        } else if (primary.protected_mode == .off or !primary.cursor.protected) {
+            // From this screen's saved cursor, protected as written above
+            // (DECRC sets the cursor's protection, not the mode), as the
+            // model's could be. It also restores origin mode, which is
+            // replayed in step 7.
+            try w.writeAll("\x1b8\x1b[?6l");
+        }
+        try writeCursor(w, alt, .{}, true);
+        try writePen(w, self.t, alt);
+    }
+
+    /// The primary cursor as the model has it, protected in the primary
+    /// screen's own mode, and copied to this one with 47.
+    fn copyPrimaryCursor(self: *Builder) Writer.Error!void {
+        const w = self.out();
+        const primary = self.t.screens.get(.primary).?;
+        const alt = self.t.screens.get(.alternate).?;
+        // The primary cursor's place, waiting to wrap by printing this
+        // screen's own cell there.
+        const c = &primary.cursor;
+        if (c.pending_wrap and c.x == alt.pages.cols - 1) {
+            const row = activePin(alt, c.y);
+            const start = edgeStart(row, c.x);
+            try writeCup(w, c.y, start, .{});
+            try writeCell(w, row, start, false);
+        } else try writeCup(w, c.y, c.x, .{});
+        try w.print("{f}", .{c.style.formatterVt()});
+        try w.writeAll("\x1b[?47l");
+        try writePen(w, self.t, primary);
+        try w.writeAll("\x1b[?47h\x1b[0m");
     }
 
     /// Step 7: terminal state without content, then the active screen's
@@ -263,9 +347,12 @@ const Builder = struct {
             .{ .x = region.left, .y = region.top }
         else
             .{};
-        try writeCleanSlate(w);
+        if (carriedProtection(t, active)) {
+            // The clean slate without unprotecting what was carried over.
+            try w.writeAll("\x1b[0m\x1b(B\x0f\x1b]8;;\x1b\\");
+        } else try writeCleanSlate(w);
         try writeCursor(w, active, origin, false);
-        try writePen(w, active);
+        try writePen(w, t, active);
 
         // Last of all: in insert mode the edge cell printed above would have
         // pushed the row right, and without wraparound it would have been
@@ -670,13 +757,17 @@ fn writeCleanSlate(w: *Writer) Writer.Error!void {
 
 /// Step 5.1: the saved cursor, set while this screen is active and saved
 /// with DECSC.
-fn writeSavedCursor(w: *Writer, screen: *const Screen) Writer.Error!void {
+fn writeSavedCursor(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
     const saved = screen.saved_cursor orelse return;
     const cols = screen.pages.cols;
     const x = @min(saved.x, cols - 1);
     const y = @min(saved.y, screen.pages.rows - 1);
 
     try writeCleanSlate(w);
+    // The saved cursor made protected at the start (see `savedCarrier`):
+    // DECRC sets the cursor's protection without a mode.
+    const carried = saved.protected and screen.protected_mode == .off and savedCarrier(t);
+    if (carried) try w.writeAll("\x1b8\x1b[?6l");
     // Setting origin mode homes the cursor, so it comes first. No scroll
     // region is set yet, so positions are absolute either way.
     if (saved.origin) try w.writeAll("\x1b[?6h");
@@ -684,12 +775,12 @@ fn writeSavedCursor(w: *Writer, screen: *const Screen) Writer.Error!void {
         const row = activePin(screen, y);
         const start = edgeStart(row, x);
         try writeCup(w, y, start, .{});
-        try writeEdgeCell(w, row, start);
+        try writeEdgeCell(w, screen, row, start);
     } else {
         try writeCup(w, y, x, .{});
     }
     try w.print("{f}", .{saved.style.formatterVt()});
-    if (saved.protected) try w.writeAll("\x1b[1\"q");
+    if (saved.protected and !carried) try writeProtect(w, t, screen);
     try writeCharsets(w, &saved.charset);
     try w.writeAll("\x1b7");
     if (saved.origin) try w.writeAll("\x1b[?6l");
@@ -705,7 +796,7 @@ fn writeCursor(w: *Writer, screen: *const Screen, origin: Origin, edge_only: boo
         const row = activePin(screen, cursor.y);
         const start = edgeStart(row, cursor.x);
         try writeCup(w, cursor.y, start, origin);
-        try writeEdgeCell(w, row, start);
+        try writeEdgeCell(w, screen, row, start);
     } else {
         try writeCup(w, cursor.y, cursor.x, origin);
     }
@@ -725,8 +816,10 @@ fn edgeStart(row: Pin, x: CellCountInt) CellCountInt {
 
 /// Print one cell in its own style, hyperlink and protection, then reset
 /// all three. A cell with no text is printed as a space.
-fn writeEdgeCell(w: *Writer, row: Pin, x: CellCountInt) Writer.Error!void {
-    try writeCell(w, row, x, true);
+fn writeEdgeCell(w: *Writer, screen: *const Screen, row: Pin, x: CellCountInt) Writer.Error!void {
+    // Protecting it would set a mode on a screen whose mode is off, and
+    // the formatter writes no cell's protection anyway.
+    try writeCell(w, row, x, screen.protected_mode != .off);
 }
 
 /// Print one cell in its own style and hyperlink (and, with `protect`,
@@ -774,24 +867,91 @@ fn writeCell(w: *Writer, row: Pin, x: CellCountInt, protect: bool) Writer.Error!
 
 /// Step 5.4: the live cursor's pen, hyperlink, protection (with the
 /// screen's protection mode) and character sets, after the clean slate.
-fn writePen(w: *Writer, screen: *const Screen) Writer.Error!void {
+fn writePen(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
     const cursor = &screen.cursor;
     try w.print("{f}", .{cursor.style.formatterVt()});
-    if (cursor.hyperlink) |link| switch (link.id) {
-        .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
-        .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
-    };
     // The screen's most recent protection mode, which erases follow even
     // once protection is off (ISO protects from EL and ED, DEC only from
     // their selective forms), then the cursor's protection in it. Written
     // last for the screen, since printing a protected edge cell above
     // switched the mode to DEC.
+    // With the mode off, a protected cursor came from the other screen.
+    // (The alternate screen's is carried by `Builder.carryProtection`.)
     switch (screen.protected_mode) {
-        .off => {},
         .iso => try w.writeAll(if (cursor.protected) "\x1bV" else "\x1bV\x1bW"),
         .dec => try w.writeAll(if (cursor.protected) "\x1b[1\"q" else "\x1b[1\"q\x1b[0\"q"),
+        .off => if (cursor.protected and screen == t.screens.get(.primary).?) try writeProtect(w, t, screen),
     }
+    // After protection, which the other screen can carry over without it.
+    if (cursor.hyperlink) |link| switch (link.id) {
+        .explicit => |id| try w.print("\x1b]8;id={s};{s}\x1b\\", .{ id, link.uri }),
+        .implicit => try w.print("\x1b]8;;{s}\x1b\\", .{link.uri}),
+    };
     try writeCharsets(w, &screen.charset);
+}
+
+/// Whether `screen` is the alternate screen with its cursor protected and its
+/// protection mode off, which the restore carries from the primary screen's
+/// cursor (when that one is protected too, in a mode of its own) or from
+/// this screen's saved cursor, carried the same way (see `carriedSaved`).
+/// Otherwise the cursor is left unprotected (a known gap).
+fn carriedProtection(t: *const Terminal, screen: *const Screen) bool {
+    const primary = t.screens.get(.primary).?;
+    return screen != primary and screen.protected_mode == .off and screen.cursor.protected and
+        ((primary.cursor.protected and primary.protected_mode != .off) or carriedSaved(t, screen));
+}
+
+/// Whether `screen` is the alternate screen with its saved cursor protected
+/// and its protection mode off, which the restore carries from the primary
+/// screen's cursor, when that screen has a mode of its own.
+fn carriedSaved(t: *const Terminal, screen: *const Screen) bool {
+    const primary = t.screens.get(.primary).?;
+    const saved = screen.saved_cursor orelse return false;
+    return screen != primary and screen.protected_mode == .off and saved.protected and
+        (primary.protected_mode != .off or savedCarrier(t));
+}
+
+/// Whether the alternate screen's saved cursor, protected with both screens'
+/// protection modes off (DECSTR turned the one it came from off), is carried
+/// by a saved cursor made at the start: protected on the primary screen,
+/// copied to the alternate screen and saved there, then the primary's mode
+/// turned off again with DECSTR. Written as the restore's first step, before
+/// anything DECSTR resets. Not when the primary screen needs the alternate
+/// screen to carry its own (see `writeProtect`), which DECSTR there wipes.
+fn savedCarrier(t: *const Terminal) bool {
+    if (t.screens.active_key != .alternate) return false;
+    const primary = t.screens.get(.primary).?;
+    const alt = t.screens.get(.alternate).?;
+    const saved = alt.saved_cursor orelse return false;
+    const primary_saved = if (primary.saved_cursor) |sc| sc.protected else false;
+    return saved.protected and alt.protected_mode == .off and primary.protected_mode == .off and
+        !primary.cursor.protected and !primary_saved;
+}
+
+/// Protect the cursor in the screen's protection mode. With the mode off,
+/// the protection came from the other screen's cursor (47, 1047 and 1049
+/// copy the cursor, protection included, and leave each screen's mode), so
+/// it is set there, in that screen's mode, and copied back with 47: this
+/// screen's mode stays off, and only the hidden alternate screen's
+/// changes. The alternate screen's comes from the primary screen the same
+/// way, which leaves the primary cursor to be set again.
+fn writeProtect(w: *Writer, t: *const Terminal, screen: *const Screen) Writer.Error!void {
+    switch (screen.protected_mode) {
+        .iso => try w.writeAll("\x1bV"),
+        .dec => try w.writeAll("\x1b[1\"q"),
+        .off => if (screen == t.screens.get(.primary).?) {
+            const other: ghostty.ProtectedMode = if (t.screens.get(.alternate)) |alt| alt.protected_mode else .off;
+            try w.writeAll("\x1b[?47h");
+            try w.writeAll(if (other == .iso) "\x1bV" else "\x1b[1\"q");
+            try w.writeAll("\x1b[?47l");
+        } else if (t.screens.get(.primary).?.protected_mode != .off) {
+            // The alternate screen's: carried from the primary screen's
+            // cursor, which `Builder.carryProtection` then sets back.
+            try w.writeAll("\x1b[?47l");
+            try w.writeAll(if (t.screens.get(.primary).?.protected_mode == .iso) "\x1bV" else "\x1b[1\"q");
+            try w.writeAll("\x1b[?47h");
+        },
+    }
 }
 
 /// All four designations and both invocations, so that whatever an earlier
@@ -884,10 +1044,13 @@ fn writeMode(w: *Writer, mode: ghostty.Mode, value: bool) Writer.Error!void {
     try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (value) 'h' else 'l') });
 }
 
-/// DECSCUSR. `CSI 0 SP q` gives the client its own default back when the
-/// program never chose a style.
+/// DECSCUSR for the active screen: the style the program chose, or the
+/// default where the screen has it (see `writeDefaultCursorStyle`).
 fn writeCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
-    if (t.cursor.is_default) return w.writeAll("\x1b[0 q");
+    if (t.cursor.is_default) {
+        if (t.screens.active.cursor.cursor_style == t.cursor.default_style) try w.writeAll("\x1b[0 q");
+        return;
+    }
     const blink = t.modes.get(.cursor_blinking);
     const n: u8 = switch (t.screens.active.cursor.cursor_style) {
         .block, .block_hollow => if (blink) 1 else 2,
@@ -895,6 +1058,31 @@ fn writeCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
         .bar => if (blink) 5 else 6,
     };
     try w.print("\x1b[{d} q", .{n});
+}
+
+/// The default cursor style (`CSI 0 SP q`, the client's own) selected
+/// while the primary screen keeps a style of its own, before anything is
+/// drawn. The default is selected terminal-wide but each screen
+/// keeps its own style, so the primary screen can keep a style of its own
+/// when the default was chosen on the alternate screen (1049 does not copy
+/// the cursor back), and the alternate screen gets it again on entry (47,
+/// 1047 and 1049 copy the cursor there). Rebuilt the same way: the
+/// primary's style, the default chosen on the alternate screen, and back
+/// with 1049, which also restores the saved cursor and its origin mode,
+/// all written after this. The alternate screen's is set after `?47h`.
+fn writeDefaultCursorStyle(w: *Writer, t: *const Terminal) Writer.Error!void {
+    if (!t.cursor.is_default) return;
+    const style = t.screens.get(.primary).?.cursor.cursor_style;
+    if (style == t.cursor.default_style) return;
+    try w.print("\x1b[{d} q\x1b[?47h\x1b[0 q\x1b[?1049l\x1b[?6l", .{steadyStyle(style)});
+}
+
+fn steadyStyle(style: ghostty.CursorStyle) u8 {
+    return switch (style) {
+        .block, .block_hollow => 2,
+        .underline => 4,
+        .bar => 6,
+    };
 }
 
 /// Whether the tab stops are Ghostty's defaults, every 8 columns, which the
@@ -908,9 +1096,10 @@ fn defaultTabstops(t: *const Terminal) bool {
 }
 
 /// Text inside an OSC, without the controls that would end or corrupt it.
+/// DEL does neither: a terminal keeps it in the string, as Ghostty did.
 fn writeOscText(w: *Writer, text: []const u8) Writer.Error!void {
     for (text) |c| {
-        if (c < 0x20 or c == 0x7f) continue;
+        if (c < 0x20) continue;
         try w.writeByte(c);
     }
 }
