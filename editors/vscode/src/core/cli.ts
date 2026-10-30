@@ -91,6 +91,15 @@ export class PerchCli {
     return !/--link-env\b.*not supported/.test(r.stderr ?? '');
   }
 
+  /**
+   * Whether `perch new` takes `--no-link-env`, probed the same way. Binaries
+   * from before it link nothing by default, so they need no flag for that.
+   */
+  supportsNoLinkEnv(): boolean {
+    const r = spawnSync(this.binary, ['new', '--no-link-env'], { encoding: 'utf8', timeout: 10_000 });
+    return !/unknown option `--no-link-env`/.test(r.stderr ?? '');
+  }
+
   /** Kill waits out the 5-second grace period. */
   async kill(id: string, force = false): Promise<void> {
     await runPerch(this.binary, force ? ['kill', id, '--force'] : ['kill', id], 20_000);

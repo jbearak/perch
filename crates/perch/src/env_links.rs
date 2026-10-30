@@ -22,13 +22,13 @@ use crate::{runtime, sys};
 /// The directory inside a session directory that holds the links.
 pub const DIR: &str = "env";
 
-/// Variables linked when `perch new` gets no `--link-env`. Empty: the
-/// design lists `SSH_AUTH_SOCK` and `VSCODE_IPC_HOOK_CLI`, each a default
-/// only once a link is shown to work for it on local and Remote-SSH hosts,
-/// which has not been checked yet (agent forwarding is checked in M4, VS
-/// Code's IPC socket in M5c). Until then both are opt-in, through
-/// `--link-env` and the extension's `perch.linkedEnvironment` setting.
-pub const DEFAULT: &[&str] = &[];
+/// Variables linked when `perch new` gets no `--link-env`. The design lists
+/// `SSH_AUTH_SOCK` and `VSCODE_IPC_HOOK_CLI`, each a default only once a
+/// link is shown to work for it. `SSH_AUTH_SOCK` passed both the plan's
+/// remote check (agent forwarding over ssh, tests/linux) and its local one
+/// (the extension's tests). `VSCODE_IPC_HOOK_CLI` stays opt-in until its
+/// Remote-SSH check (docs/verification.md) has been run.
+pub const DEFAULT: &[&str] = &["SSH_AUTH_SOCK"];
 
 /// Whether `name` can be a linked variable: a portable environment
 /// variable name, which is also a safe file name.

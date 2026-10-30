@@ -223,3 +223,34 @@ fn the_creators_attach_links_values_given_with_env() {
     let _ = rt.cmd().args(["kill", &id]).output();
     let _ = a.wait(SECS);
 }
+
+/// Without `--link-env`, `SSH_AUTH_SOCK` is linked; `--no-link-env` links
+/// nothing, and `--link-env` names replace the default.
+#[test]
+fn ssh_auth_sock_is_linked_by_default_and_no_link_env_links_nothing() {
+    let rt = Rt::new();
+    let new = |extra: &[&str]| {
+        let mut args = vec!["new", "-d"];
+        args.extend_from_slice(extra);
+        args.extend(["--", "sleep", "100"]);
+        let out = rt
+            .cmd()
+            .env("SSH_AUTH_SOCK", "/nonexistent/agent.sock")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", common::describe(&out));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let env_dir = |id: &str| rt.dir(id).join("env");
+
+    let id = new(&[]);
+    assert_eq!(link(&rt, &id), Path::new("/nonexistent/agent.sock"));
+    let id = new(&["--no-link-env"]);
+    assert!(
+        !env_dir(&id).join("SSH_AUTH_SOCK").exists()
+            && std::fs::symlink_metadata(env_dir(&id).join("SSH_AUTH_SOCK")).is_err()
+    );
+    let id = new(&["--link-env", "NOT_SET_HERE"]);
+    assert!(std::fs::symlink_metadata(env_dir(&id).join("SSH_AUTH_SOCK")).is_err());
+}

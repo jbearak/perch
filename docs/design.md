@@ -436,7 +436,7 @@ VS Code injects its shell integration only into shells it starts. A Perch termin
 ```text
 perch new [options] -- <command> [args...]   start a session (attaches unless -d)
     --id ID  --name NAME  --kind KIND  --owner EXT  --annotate K=V
-    --cwd DIR  --env NAME=VALUE  --link-env NAME  --label LABEL
+    --cwd DIR  --env NAME=VALUE  --link-env NAME  --no-link-env  --label LABEL
     --scrollback LINES (default 1000, at most 10000)  -d, --detached
     --detach-key KEY|none  --restore full|screen    used when it re-attaches
 perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]

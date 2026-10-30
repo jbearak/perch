@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The local checks for the linked-variable defaults. Each variable is
-// listed in `perch.linkedEnvironment` here; neither is a default yet.
-// `VSCODE_IPC_HOOK_CLI` also needs its Remote-SSH check, and
-// `SSH_AUTH_SOCK` the agent-forwarding check over ssh (M4).
+// listed in `perch.linkedEnvironment` here. `SSH_AUTH_SOCK` is a default:
+// this check and the agent-forwarding check over ssh (tests/linux) pass.
+// `VSCODE_IPC_HOOK_CLI` also needs its Remote-SSH check before it can be.
 import * as assert from 'assert';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
@@ -62,9 +62,19 @@ describe('linked variables', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('neither SSH_AUTH_SOCK nor VSCODE_IPC_HOOK_CLI is linked by default', async () => {
+  it('SSH_AUTH_SOCK is linked by default, VSCODE_IPC_HOOK_CLI is not', async () => {
     const { options } = testing.prepareLaunch({ name: 'x', kind: 'x', command: ['true'] });
-    assert.ok(!(options.shellArgs as string[]).includes('--link-env'));
+    const args = (options.shellArgs as string[]).join(' ');
+    assert.ok(args.includes('--link-env SSH_AUTH_SOCK'), args);
+    assert.ok(!args.includes('VSCODE_IPC_HOOK_CLI'), args);
+  });
+
+  it('an empty list links nothing', async () => {
+    await linkOnly([]);
+    const { options } = testing.prepareLaunch({ name: 'x', kind: 'x', command: ['true'] });
+    const args = options.shellArgs as string[];
+    assert.ok(args.includes('--no-link-env'), args.join(' '));
+    assert.ok(!args.includes('--link-env'), args.join(' '));
   });
 
   it('VSCODE_IPC_HOOK_CLI: the variable is the link, it resolves to the window’s socket, and connect() reaches it', async () => {

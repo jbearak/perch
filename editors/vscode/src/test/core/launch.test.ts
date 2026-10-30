@@ -41,7 +41,11 @@ describe('launch', () => {
       '--owner', 'jbearak.raven', '--cwd', '/home/me/thesis', '--annotate', 'project=thesis',
       '--env', 'R_LIBS={dir}/lib', '--link-env', 'SSH_AUTH_SOCK', '--', 'R', '--no-save', '--',
     ]);
-    assert.ok(!newArgs({ id: 'abcd1234', label: 'l', scrollback: 1, name: '', kind: '', command: ['sh'] }).includes('--link-env'));
+    const bare = { id: 'abcd1234', label: 'l', scrollback: 1, name: '', kind: '', command: ['sh'] };
+    // Undefined leaves the binary's default; an empty list links nothing.
+    assert.ok(!newArgs(bare).some((a) => a.includes('link-env')));
+    assert.ok(newArgs({ ...bare, linkEnv: [] }).includes('--no-link-env'));
+    assert.ok(!newArgs({ ...bare, linkEnv: [] }).includes('--link-env'));
   });
 
   it('builds perch attach for open and for restore', () => {

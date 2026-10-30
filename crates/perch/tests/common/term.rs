@@ -60,6 +60,7 @@ impl Pty {
             .env("PERCH_RUNTIME_DIR", &rt.path)
             .env("PERCH_TEST_TIME_SCALE", &rt.scale)
             .env_remove("PERCH_SESSION_ID")
+            .env_remove("SSH_AUTH_SOCK")
             .env("TERM", "xterm-256color")
             .stdin(stdio(&slave))
             .stdout(stdio(&slave))

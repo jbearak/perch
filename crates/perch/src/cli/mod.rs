@@ -16,7 +16,7 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 usage: perch new [options] -- <command> [args...]   (attaches unless -d)
            --id ID  --name NAME  --kind KIND  --owner EXT  --annotate K=V
-           --cwd DIR  --env NAME=VALUE  --link-env NAME
+           --cwd DIR  --env NAME=VALUE  --link-env NAME  --no-link-env
            --scrollback LINES (default 1000, at most 10000)
            -d, --detached  --label LABEL  --detach-key KEY|none  --restore full|screen
        perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]
