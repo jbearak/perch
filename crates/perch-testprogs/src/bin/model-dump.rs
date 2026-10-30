@@ -148,7 +148,7 @@ impl Run {
                 }
                 Step::Reset => self.partial = false,
                 Step::Discarded => self.discarded += 1,
-                Step::Query { .. } => {}
+                Step::Query { .. } | Step::LongEnd { .. } => {}
             }
         }
     }

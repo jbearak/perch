@@ -770,7 +770,7 @@ impl Supervisor {
         for step in self.feeder.push(chunk) {
             match step {
                 Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
-                Step::Query { id, kind } => {
+                Step::Query { id, kind, .. } => {
                     // The model may have failed on this read already.
                     self.handle_model_events();
                     let events = self.queries.query(id, kind, self.elapsed());
@@ -781,6 +781,7 @@ impl Supervisor {
                         self.apply_model_state();
                     }
                 }
+                Step::LongEnd { .. } => {}
                 Step::Discarded => {
                     log("a sequence over 16 MiB was not given to the model");
                 }

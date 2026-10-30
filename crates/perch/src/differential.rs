@@ -100,13 +100,13 @@ pub fn check_production(stream: &[u8], sizes: &[usize], limit: usize) -> Result<
                     fed += bytes.len() as u64;
                     frame_end.insert(n, fed);
                 }
-                Step::Query { id, kind } => {
+                Step::Query { id, kind, .. } => {
                     queries.push((query_kind(kind), frame_end[&id.0]));
                     if kind == Kind::Dsr6 {
                         dsr6.push(id.0);
                     }
                 }
-                Step::Reset | Step::Discarded | Step::Partial => {}
+                Step::Reset | Step::Discarded | Step::Partial | Step::LongEnd { .. } => {}
             }
         }
         let at = feeder.tracker().fed();
