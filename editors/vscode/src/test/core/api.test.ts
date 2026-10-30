@@ -201,6 +201,26 @@ describe('API core', () => {
       assert.strictEqual(s.exit, undefined);
     });
 
+    it('a confirmed end seen through this window’s terminal is reported once, whichever path sees it first', () => {
+      const r = new EndReporter();
+      r.terminalExit('abcd1234', 5);
+      // Never listed: known only from its attach.
+      const s = r.confirmedEnd(undefined, session());
+      assert.strictEqual(s?.state, 'exited');
+      assert.strictEqual(s?.attached, false);
+      assert.deepStrictEqual(s?.exit, { code: 5 });
+      assert.deepStrictEqual(r.ended(diffSessions([session()], []).ended), [], 'a later listing does not repeat it');
+      assert.strictEqual(r.confirmedEnd(undefined, session()), undefined);
+      // The listing first, then the terminal.
+      const r2 = new EndReporter();
+      assert.strictEqual(r2.ended(diffSessions([session()], []).ended).length, 1);
+      assert.strictEqual(r2.confirmedEnd(undefined, session()), undefined);
+      // A tombstone's own exit wins; nothing known means nothing to report.
+      const tomb = session({ state: 'exited', attached: false, exit: { signal: 'SIGKILL' } });
+      assert.deepStrictEqual(new EndReporter().confirmedEnd(tomb, undefined)?.exit, { signal: 'SIGKILL' });
+      assert.strictEqual(new EndReporter().confirmedEnd(undefined, undefined), undefined);
+    });
+
     it('does not report sessions already ended at the first listing', () => {
       const r = new EndReporter();
       assert.deepStrictEqual(r.ended(diffSessions([], [session({ state: 'lost' })]).ended), []);

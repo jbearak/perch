@@ -113,6 +113,23 @@ describe('API', () => {
       other.dispose();
     });
 
+    it('an annotation-only change fires onDidChangeSessions; an unchanged listing does not', async () => {
+      await testing.refresh();
+      await testing.refresh();
+      let fired = 0;
+      const sub = api.onDidChangeSessions(() => fired++);
+      try {
+        await testing.refresh();
+        assert.strictEqual(fired, 0, 'an unchanged listing');
+        await perch(binary, ['annotate', id, 'test.only=1']);
+        await testing.refresh();
+        assert.strictEqual(fired, 1, 'an annotation-only change');
+      } finally {
+        sub.dispose();
+        await perch(binary, ['annotate', id, '--unset', 'test.only']);
+      }
+    });
+
     it('annotates', async () => {
       await api.annotate(id, { 'test.added': 'a=b' }, ['test.key']);
       const s = (await api.listSessions({ owner: caller })).find((x) => x.id === id);
@@ -150,6 +167,50 @@ describe('API', () => {
       }
       await rejectsWith(api.kill(id), 'no_session');
     });
+  });
+
+  it('onDidEndSession reports, once, a session that starts and exits between listings', async () => {
+    // A profile-started session: nothing lists it before its program exits.
+    const { id, options } = api.prepareLaunch({ name: 'api quick exit', kind: 'test', command: ['sh', '-c', 'sleep 1; exit 5'] });
+    ids.push(id);
+    const ends: SessionInfo[] = [];
+    const sub = api.onDidEndSession((s) => {
+      if (s.id === id) ends.push(s);
+    });
+    try {
+      const attached = next(api.onDidAttach, (e) => e.session.id === id);
+      const terminal = vscode.window.createTerminal(options);
+      await attached;
+      assert.ok(!testing.sessions().some((s) => s.id === id), 'not listed yet');
+      await waitFor('onDidEndSession', async () => (ends.length > 0 ? true : undefined));
+      assert.strictEqual(ends[0].state, 'exited');
+      assert.deepStrictEqual(ends[0].exit, { code: 5 });
+      await testing.refresh();
+      await testing.refresh();
+      assert.strictEqual(ends.length, 1);
+      terminal.dispose();
+    } finally {
+      sub.dispose();
+    }
+  });
+
+  it('kill while attached here: onDidEndSession fires exactly once', async () => {
+    const r = await api.createSession({ name: 'api kill attached', kind: 'test', command: ['sleep', '600'], show: false });
+    ids.push(r.session.id);
+    const ends: SessionInfo[] = [];
+    const sub = api.onDidEndSession((s) => {
+      if (s.id === r.session.id) ends.push(s);
+    });
+    try {
+      await api.kill(r.session.id);
+      await waitFor('onDidEndSession', async () => (ends.length > 0 ? true : undefined));
+      await waitFor('the terminal to close', async () => (r.terminal.exitStatus !== undefined ? true : undefined));
+      await testing.refresh();
+      await testing.refresh();
+      assert.strictEqual(ends.length, 1);
+    } finally {
+      sub.dispose();
+    }
   });
 
   it('onDidEndSession reports a detached session whose program exits', async () => {

@@ -182,6 +182,17 @@ export class EndReporter {
     if (code !== undefined) this.exits.set(id, { code });
   }
 
+  /**
+   * This window's terminal of the session closed with the program's exit,
+   * and `perch info` confirms it ended: `ended` is the tombstone, or
+   * undefined if the session left none (it exited while attached). `known`
+   * is the session as last seen here. Returns it to report, at most once.
+   */
+  confirmedEnd(ended: Session | undefined, known: Session | undefined): Session | undefined {
+    const s = ended ?? (known && { ...known, state: 'exited' as const, attached: false, exit: undefined });
+    return s === undefined ? undefined : this.ended([s])[0];
+  }
+
   /** From a listing's `ended`: the sessions to report, each once. */
   ended(sessions: readonly Session[]): Session[] {
     const out: Session[] = [];

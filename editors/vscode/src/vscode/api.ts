@@ -103,6 +103,11 @@ export class Api implements vscode.Disposable {
   private readonly reporter = new EndReporter();
   private readonly disposables: vscode.Disposable[];
   private readonly apis = new Map<string, PerchApiV1>();
+  /**
+   * Sessions this window's terminals attached to, as last seen: one created
+   * from a profile may start and end between two listings.
+   */
+  private readonly seen = new Map<string, Session>();
 
   constructor(private readonly deps: ApiDeps) {
     this.disposables = [
@@ -113,12 +118,35 @@ export class Api implements vscode.Disposable {
         this.changed.fire();
         for (const s of this.reporter.ended(diff.ended)) this.ended.fire(this.info(s));
       }),
-      deps.terminals.onDidAttach(({ session, terminal }) => this.attached.fire({ session: this.info(session), terminal })),
-      deps.terminals.onDidClose((o: CloseOutcome) => {
-        // The program's exit, as this window's terminal received it.
-        if (o.reason === 'process' && o.result !== 'busy') this.reporter.terminalExit(o.id, o.code);
+      deps.terminals.onDidAttach(({ session, terminal }) => {
+        this.seen.set(session.id, session);
+        this.attached.fire({ session: this.info(session), terminal });
       }),
+      deps.terminals.onDidClose((o: CloseOutcome) => void this.terminalClosed(o)),
     ];
+  }
+
+  /**
+   * A terminal of this window ended with its process. If `perch info`
+   * confirms the program ended (a tombstone, or no session at all; a
+   * detach leaves it running), report it now rather than wait for a
+   * listing, which never shows a session that came and went between two.
+   */
+  private async terminalClosed(o: CloseOutcome): Promise<void> {
+    if (o.reason !== 'process' || o.result === 'busy') return;
+    // The program's exit, as this window's terminal received it.
+    this.reporter.terminalExit(o.id, o.code);
+    let now: Session | undefined;
+    try {
+      now = await this.deps.cli().info(o.id);
+    } catch {
+      return; // Unknown: a later listing decides.
+    }
+    if (now !== undefined && !isEnded(now)) return;
+    const known = this.deps.find(o.id) ?? this.seen.get(o.id);
+    const s = this.reporter.confirmedEnd(now, known);
+    this.seen.delete(o.id);
+    if (s !== undefined) this.ended.fire(this.info(s));
   }
 
   /** `exports.getApi`: an API object for the version, or undefined. */
