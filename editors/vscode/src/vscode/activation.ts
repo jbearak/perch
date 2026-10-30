@@ -59,6 +59,8 @@ export interface Testing {
   pendingRestores(): string[];
   /** Opens a restore terminal (`--if-detached`) whatever the session's state. */
   restoreAttach(id: string): vscode.Terminal;
+  /** Open from the last listing, without checking again: the race with another window. */
+  openStale(id: string): Promise<vscode.Terminal | undefined>;
   closeOutcomes(): readonly CloseOutcome[];
   onDidClose: vscode.Event<CloseOutcome>;
   setNotify(notify: Notify | undefined): void;
@@ -325,6 +327,11 @@ export function activate(context: vscode.ExtensionContext): Exports {
         const s = store.find(id);
         if (s === undefined) throw new Error(`${id} is not listed`);
         return terminals.attachTerminal(s, { ifDetached: true, preserveFocus: true });
+      },
+      openStale: (id) => {
+        const s = store.find(id);
+        if (s === undefined) throw new Error(`${id} is not listed`);
+        return terminals.openWith(s);
       },
       closeOutcomes: () => terminals.closeOutcomes,
       onDidClose: terminals.onDidClose,

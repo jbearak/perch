@@ -6,11 +6,13 @@ import {
   adopt,
   after75,
   closeAction,
+  openStep,
   RESTORE_WINDOW_MS,
   RestoreSet,
   RestoreStore,
   Restorer,
   restoreStep,
+  settle75,
   TerminalRegistry,
 } from '../../core/restore';
 import { Session } from '../../core/sessions';
@@ -64,10 +66,24 @@ describe('restore set', () => {
 
   it('confirms an exit with 75 with perch info', () => {
     assert.strictEqual(after75(session('a', { attached: true, clientLabel: 'tty:/dev/ttys001' })), 'busy');
+    // The winning client may have detached before the check: still live.
+    assert.strictEqual(after75(session('a', { attached: false })), 'busy');
+    assert.strictEqual(after75(session('a', { state: 'unresponsive' })), 'busy');
+    // Nothing is known when info fails: keep it.
+    assert.strictEqual(after75(new Error('timed out')), 'busy');
     // A program can exit with 75 too: then the session has ended or is gone.
     assert.strictEqual(after75(undefined), 'ended');
     assert.strictEqual(after75(session('a', { state: 'exited', exit: { code: 75 } })), 'ended');
-    assert.strictEqual(after75(session('a', { attached: false })), 'ended');
+    assert.strictEqual(after75(session('a', { state: 'lost' })), 'ended');
+  });
+
+  it('decides how Open attaches', () => {
+    assert.strictEqual(openStep(session('a'), false), 'attach-guarded');
+    assert.strictEqual(openStep(session('a', { attached: true }), false), 'confirm');
+    assert.strictEqual(openStep(session('a', { attached: true }), true), 'attach');
+    assert.strictEqual(openStep(session('a'), true), 'attach');
+    assert.strictEqual(openStep(session('a', { state: 'exited' }), false), 'not-running');
+    assert.strictEqual(openStep(session('a', { state: 'unresponsive' }), true), 'not-running');
   });
 
   it('decides each session restore step', () => {
@@ -277,5 +293,72 @@ describe('adoption', () => {
     assert.strictEqual(registry.untrack(created)?.id, 'aaaa1111');
     assert.strictEqual(registry.terminalFor('aaaa1111'), undefined);
     assert.strictEqual(registry.untrack(created), undefined);
+  });
+});
+
+describe('an exit with 75', () => {
+  /** A restore that found its session busy, then whatever info says next. */
+  async function busyRestore(next: Session | undefined | Error, advance = 0) {
+    const sessions = new Map<string, Session>();
+    const terminals = new Set(['aaaa1111']);
+    const x = restorer(['aaaa1111'], sessions, terminals);
+    await x.r.start(); // The restore terminal is open, so nothing is pending.
+    terminals.delete('aaaa1111'); // It exited with 75.
+    const set = new RestoreSet(x.store);
+    x.advance(advance);
+    const result = await settle75(
+      'aaaa1111',
+      async () => {
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      set,
+      (id) => x.r.busy(id),
+    );
+    return { x, result, sessions };
+  }
+
+  it('retries a session whose winning client detached before the check', async () => {
+    const { x, result, sessions } = await busyRestore(session('aaaa1111'));
+    assert.strictEqual(result, 'busy');
+    assert.deepStrictEqual(x.store.ids, ['aaaa1111']);
+    assert.deepStrictEqual(x.r.pendingIds(), ['aaaa1111']);
+    sessions.set('aaaa1111', session('aaaa1111'));
+    await x.r.pass();
+    assert.deepStrictEqual(x.opened, ['aaaa1111'], 'reopened on the next refresh');
+  });
+
+  it('keeps a session attached elsewhere without reopening it', async () => {
+    const other = session('aaaa1111', { attached: true, clientLabel: 'fedcba9876543210#bbbbbbbb' });
+    const { x, result, sessions } = await busyRestore(other);
+    assert.strictEqual(result, 'busy');
+    sessions.set('aaaa1111', other);
+    await x.r.pass();
+    assert.deepStrictEqual(x.opened, []);
+    assert.deepStrictEqual(x.store.ids, ['aaaa1111']);
+  });
+
+  it('keeps a session when info fails, and retries it within the window', async () => {
+    const { x, result, sessions } = await busyRestore(new Error('timed out'));
+    assert.strictEqual(result, 'busy');
+    assert.deepStrictEqual(x.store.ids, ['aaaa1111']);
+    assert.deepStrictEqual(x.r.pendingIds(), ['aaaa1111']);
+    sessions.set('aaaa1111', session('aaaa1111'));
+    await x.r.pass();
+    assert.deepStrictEqual(x.opened, ['aaaa1111']);
+
+    const late = await busyRestore(new Error('timed out'), RESTORE_WINDOW_MS + 1);
+    assert.strictEqual(late.result, 'busy');
+    assert.deepStrictEqual(late.x.store.ids, ['aaaa1111'], 'kept for a later activation');
+    assert.deepStrictEqual(late.x.r.pendingIds(), [], 'not retried after the window');
+  });
+
+  it('forgets a session that ended or is gone', async () => {
+    for (const next of [session('aaaa1111', { state: 'exited', exit: { code: 75 } }), session('aaaa1111', { state: 'lost' }), undefined]) {
+      const { x, result } = await busyRestore(next);
+      assert.strictEqual(result, 'ended');
+      assert.deepStrictEqual(x.store.ids, []);
+      assert.deepStrictEqual(x.r.pendingIds(), []);
+    }
   });
 });

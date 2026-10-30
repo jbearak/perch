@@ -167,6 +167,35 @@ describe('terminals', () => {
     assert.strictEqual(testing.terminalFor(id), t);
   });
 
+  it('open asks if another window attached after the check, and declining leaves it there', async () => {
+    const id = (await perch(binary, ['new', '-d', '--name', 'e2e race', '--', 'sleep', '600'])).trim();
+    ids.push(id);
+    await testing.refresh(); // The listing says detached.
+    const other = otherClient(binary, id);
+    others.push(other);
+    await attachedBy(binary, id, 'fedcba9876543210#bbbbbbbb');
+    const asked: string[] = [];
+    let answered!: () => void;
+    const answeredOnce = new Promise<void>((r) => (answered = r));
+    testing.setConfirm(async (message) => {
+      asked.push(message);
+      answered();
+      return false;
+    });
+    const closed = nextClose(testing, id);
+    const t = await testing.openStale(id);
+    assert.ok(t, 'a guarded attach starts');
+    const o = t.creationOptions as vscode.TerminalOptions;
+    assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: true });
+    const outcome = await closed;
+    assert.strictEqual(outcome.code, 75);
+    assert.strictEqual(outcome.result, 'busy');
+    await answeredOnce;
+    assert.deepStrictEqual(asked, ['Program: e2e race is open in another window. Move it here?']);
+    assert.strictEqual(testing.terminalFor(id), undefined);
+    await attachedBy(binary, id, 'fedcba9876543210#bbbbbbbb');
+  });
+
   it('a program that really exits with 75 ends its session and leaves the restore set', async () => {
     const id = (await perch(binary, ['new', '-d', '--name', 'e2e exit 75', '--', 'sh', '-c', 'sleep 4; exit 75'])).trim();
     ids.push(id);

@@ -10,12 +10,13 @@ import { attachArgs, newArgs, newSessionId, NewSession, recognize, Recognized, s
 import { waitUntilRunning } from '../core/readiness';
 import {
   adopt,
-  after75,
   closeAction,
+  openStep,
   ExitReason,
   RestoreSet,
   RestoreStore,
   Restorer,
+  settle75,
   TerminalRegistry,
 } from '../core/restore';
 import { displayName, iconName, kindIcon, kindName, Session } from '../core/sessions';
@@ -82,6 +83,8 @@ export class Terminals implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   /** Terminals this extension is closing itself. */
   private readonly closing = new WeakSet<vscode.Terminal>();
+  /** Open's guarded attaches, which ask before a takeover if they find the session busy. */
+  private readonly opening = new WeakSet<vscode.Terminal>();
   private noticeShown = false;
   private linkEnv: Promise<boolean> | undefined;
   private linkEnvWarned = false;
@@ -150,17 +153,16 @@ export class Terminals implements vscode.Disposable {
         await this.restoreSet.remove(launch.id);
         if (reason === 'user') await this.firstCloseNotice(launch.id);
       } else if (action === 'confirm') {
-        const info = await this.deps.cli().info(launch.id).catch(() => undefined);
-        result = after75(info);
+        // A guarded Open that found the session busy asks again; a restore
+        // retries while its window is open.
+        const opening = this.opening.has(t);
+        const retry = opening ? (id: string) => void this.reopen(id) : (id: string) => this.restorer.busy(id);
+        result = await settle75(launch.id, () => this.deps.cli().info(launch.id), this.restoreSet, retry);
         if (result === 'busy') {
-          // Another client got there first: close the terminal quietly and
-          // keep the session for a retry.
+          // Another client got there first: close the terminal quietly.
           this.output(`${launch.id} is attached elsewhere; leaving it there`);
           this.closing.add(t);
           t.dispose();
-          this.restorer.busy(launch.id);
-        } else {
-          await this.restoreSet.remove(launch.id);
         }
       }
     } finally {
@@ -313,7 +315,8 @@ export class Terminals implements vscode.Disposable {
 
   /**
    * Opens (or shows) a terminal attached to the session. If another client
-   * is attached, asks first: opening moves it here.
+   * is attached, asks first: opening moves it here. Until the user agrees
+   * to a takeover the attach is guarded by `--if-detached`.
    */
   async open(s: Session): Promise<vscode.Terminal | undefined> {
     const existing = this.registry.terminalFor(s.id);
@@ -321,16 +324,33 @@ export class Terminals implements vscode.Disposable {
       existing.show();
       return existing;
     }
-    const info = (await this.deps.cli().info(s.id)) ?? s;
-    if (info.state !== 'running') {
+    return this.openWith((await this.deps.cli().info(s.id)) ?? s);
+  }
+
+  /** A guarded Open found the session busy: ask, as Open does. */
+  private async reopen(id: string): Promise<void> {
+    try {
+      const info = await this.deps.cli().info(id);
+      if (info !== undefined && this.registry.terminalFor(id) === undefined) await this.openWith(info);
+    } catch (err) {
+      void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Open from a session as last checked; the tests pass a stale one to recreate the race. */
+  async openWith(info: Session): Promise<vscode.Terminal | undefined> {
+    let step = openStep(info, false);
+    if (step === 'not-running') {
       throw new Error(`${displayName(info)} is ${info.state === 'exited' ? 'no longer running' : info.state}.`);
     }
-    if (info.attached) {
+    if (step === 'confirm') {
       const question = `${kindName(info.kind)}: ${displayName(info)} is open in another window. Move it here?`;
       const detail = 'The other window keeps its terminal, which shows that the session moved.';
       if (!(await this.deps.confirm()(question, detail, 'Move Here'))) return undefined;
+      step = openStep(info, true);
     }
-    const terminal = this.attachTerminal(info, { ifDetached: false, preserveFocus: false });
+    const terminal = this.attachTerminal(info, { ifDetached: step === 'attach-guarded', preserveFocus: false });
+    if (step === 'attach-guarded') this.opening.add(terminal);
     void this.deps.refresh();
     return terminal;
   }

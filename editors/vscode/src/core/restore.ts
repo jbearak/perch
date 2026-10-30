@@ -40,12 +40,47 @@ export function closeAction(reason: ExitReason, code: number | undefined): 'forg
 }
 
 /**
- * After an exit with 75: `busy` if the session is still running and attached
- * elsewhere, so the attach was refused; `ended` if the program itself exited
- * with 75 (or the session is gone).
+ * After an exit with 75: `ended` only if `perch info` confirms the program
+ * itself ended (exited or lost) or the session is gone. Anything else is
+ * `busy`: the attach was refused and the session is live, even if the
+ * winning client has detached since, or `info` failed and nothing is known.
+ * Busy sessions stay in the restore set and are retried.
  */
-export function after75(info: Session | undefined): 'busy' | 'ended' {
-  return info !== undefined && info.state === 'running' && info.attached ? 'busy' : 'ended';
+export function after75(info: Session | undefined | Error): 'busy' | 'ended' {
+  if (info instanceof Error) return 'busy';
+  return info === undefined || isEnded(info) ? 'ended' : 'busy';
+}
+
+/**
+ * Settles an exit with 75: asks `perch info`, then either hands the session
+ * to `retry` or removes it from the restore set.
+ */
+export async function settle75(
+  id: string,
+  info: () => Promise<Session | undefined>,
+  set: RestoreSet,
+  retry: (id: string) => void,
+): Promise<'busy' | 'ended'> {
+  const checked = await info().catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
+  const result = after75(checked);
+  if (result === 'busy') retry(id);
+  else await set.remove(id);
+  return result;
+}
+
+/**
+ * How Open attaches. It is guarded by `--if-detached` unless the user has
+ * confirmed a takeover, so a client that attaches between the `info` check
+ * and the handshake is never displaced unasked: the guarded attach exits
+ * with 75 and Open asks then.
+ */
+export function openStep(
+  info: Session,
+  confirmedTakeover: boolean,
+): 'not-running' | 'confirm' | 'attach' | 'attach-guarded' {
+  if (info.state !== 'running') return 'not-running';
+  if (confirmedTakeover) return 'attach';
+  return info.attached ? 'confirm' : 'attach-guarded';
 }
 
 /**
