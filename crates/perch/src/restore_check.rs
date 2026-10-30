@@ -148,12 +148,17 @@ pub fn check(case: &Case) -> Result<(), String> {
         let alternate = m.active_screen() == crate::vt_ffi::ActiveScreen::Alternate;
         [modes[0], modes[1], modes[2], alternate]
     };
+    // And reverse wraparound, at any point (DECSTR can turn it off again).
+    let reverse_wrap =
+        |m: &Model| m.mode(45, false) == Some(true) || m.mode(1045, false) == Some(true);
     let mut reenters = false;
+    let mut reverse = reverse_wrap(&model);
     let mut before = alt_modes(&model);
     for b in case.after {
         feed(&mut model, &mut feeder, &[*b]);
         let now = alt_modes(&model);
         reenters |= now.iter().zip(before).any(|(n, b)| *n && !b);
+        reverse |= reverse_wrap(&model);
         before = now;
     }
     // While the feeder holds an unfinished sequence the model is behind the
@@ -178,7 +183,7 @@ pub fn check(case: &Case) -> Result<(), String> {
     }
     // Reverse wraparound follows the screen rows' soft-wrap marks, which
     // the restore cannot always rebuild (see `restore::differences`).
-    if model.mode(45, false) == Some(true) || model.mode(1045, false) == Some(true) {
+    if reverse {
         return Ok(());
     }
     // The rows the restore sent, plus those the output scrolled up, less
