@@ -224,7 +224,7 @@ check_tmpfiles() {
 }
 
 check_binary_replaced() {
-    local dir sup log gen1 gen2
+    local dir sup log gen1 gen2 exe
     dir=$(on 'mktemp -d') || die "mktemp"
     on "cp /usr/local/bin/perch $dir/perch && $dir/perch new -d --name bin -- perch-ticker bin >/dev/null &&
         rm -rf $dir && mkdir $dir && cp /usr/local/bin/perch $dir/perch.new && mv $dir/perch.new $dir/perch" ||
@@ -235,6 +235,11 @@ check_binary_replaced() {
         *) die "the supervisor's binary was not deleted: $(readlink "/proc/$sup/exe")" ;;
     esac
     attach_check bin /usr/local/bin/perch
+    # The replacement goes too: from here on nothing exists at the path the
+    # supervisor started from, so a model restart that exec'd it would fail.
+    on "rm -rf $dir" || die "cannot remove $dir"
+    absent() { [ ! -e "$dir/perch" ] || die "$dir/perch exists $1"; }
+    absent "before the model is killed"
     log="$(field bin dir)/supervisor.log"
     gen1=$(sed -n 's/.*model process \([0-9]*\) started (generation 1.*/\1/p' "$log" | tail -1)
     [ -n "$gen1" ] || die "no model process in $log"
@@ -245,13 +250,19 @@ check_binary_replaced() {
     }
     gen2=$(sed -n 's/.*model process \([0-9]*\) started (generation 2.*/\1/p' "$log" | tail -1)
     kill -0 "$gen2" || die "the restarted model $gen2 is not running"
-    note "killed model $gen1; model $gen2 runs $(readlink "/proc/$gen2/exe")"
+    absent "after the model restarted"
+    # Forked from the supervisor, not exec'd from any file on disk.
+    exe=$(readlink "/proc/$gen2/exe")
+    case "$exe" in
+        "$dir/perch (deleted)") note "killed model $gen1; model $gen2 runs $exe" ;;
+        *) die "the restarted model $gen2 runs $exe, not the supervisor's deleted binary" ;;
+    esac
     # A restarted model has not seen the screen: the restore says so and
     # asks the program to redraw (the design's partial restore).
     [ "$(field bin model)" = partial ] || die "the model is $(field bin model), not partial"
     attach_check bin /usr/local/bin/perch "The screen could not be restored. Asking the program to redraw."
+    absent "after the attach"
     on "perch kill bin"
-    on "rm -rf $dir"
 }
 
 # --- main -------------------------------------------------------------------
