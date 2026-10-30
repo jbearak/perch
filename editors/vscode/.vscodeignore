@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Everything is left out except what the extension needs at run time.
+# scripts/package.mjs packages from a staging copy that adds LICENSE, NOTICE,
+# README.md and, except for the universal VSIX, bin/<os>-<arch>/perch.
+**
+!package.json
+!dist/extension.js
+!media/**
+!bin/*/perch
+!LICENSE
+!NOTICE
+!README.md
