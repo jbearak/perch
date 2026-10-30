@@ -376,12 +376,15 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
     const n = @min(total, limits.client_scrollback_rows);
     if (n == 0) return 0;
 
-    // Each row's own bytes, and the bytes written between it and the row
-    // before (a line break, or a wrap primer, or nothing).
-    const content = try alloc.alloc(usize, n);
-    defer alloc.free(content);
-    const between = try alloc.alloc(usize, n);
-    defer alloc.free(between);
+    // Each row's bytes written as the first row, and as written after the
+    // row before (with a line break, a wrap primer or nothing between, and
+    // that row's cells fixed up after a wrap). The second is not always the
+    // larger: a row can be written whole after a wrap that it would be
+    // written in runs without.
+    const first = try alloc.alloc(usize, n);
+    defer alloc.free(first);
+    const after = try alloc.alloc(usize, n);
+    defer alloc.free(after);
     var joiner: Joiner = undefined;
     const cluster = t.modes.get(.grapheme_cluster);
     if (cluster) try joiner.init(alloc);
@@ -399,19 +402,19 @@ pub fn historyKept(alloc: Allocator, t: *const Terminal, limits: Limits) Allocat
         alone.write(&own.writer, row, next) catch return error.OutOfMemory;
         var all: Writer.Discarding = .init(&.{});
         rows.write(&all.writer, row, next) catch return error.OutOfMemory;
-        content[i] = @intCast(own.count);
-        between[i] = @as(usize, @intCast(all.count)) - content[i];
+        first[i] = @intCast(own.count);
+        after[i] = @intCast(all.count);
     }
     std.debug.assert(i == n);
 
-    // The oldest row from which the rest fits the cap.
+    // The oldest row from which the rest fits the cap: that row written
+    // first, and each after it as written after the one before.
     var start = n;
-    var bytes: usize = 0;
+    var rest: usize = 0;
     while (start > 0) {
         const j = start - 1;
-        const add = content[j] + if (j + 1 < n) between[j + 1] else 0;
-        if (bytes + add > limits.history_cap) break;
-        bytes += add;
+        if (first[j] + rest > limits.history_cap) break;
+        rest += after[j];
         start = j;
     }
     return n - start;

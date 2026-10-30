@@ -1090,6 +1090,35 @@ test "a saved cursor waiting to wrap at an empty edge cell leaves it empty" {
     try expectSameTerminal(a, r.vt);
 }
 
+test "history: a row written whole after a wrap, in runs alone" {
+    // On a one-row screen a row wrapped onto from a spacer head is written
+    // whole (its cells cannot be fixed up from the row above), and alone,
+    // as the oldest row sent, in runs: more bytes alone than after the
+    // row before, which the cap's arithmetic must allow.
+    const a = try newModel(2, 1);
+    defer a.destroy();
+    a.feed("z@\x1b[?2027h\xf0\x1b[?2027h\xf0\x9f\x91\xa8\xe2\x80\x8d\xe2\r\xf0\x9f\x91\xa8\x8d", 0);
+    try a.resize(4, 1);
+    const total = historyRows(primary(a));
+    try testing.expect(total > 0);
+    var previous: usize = 0;
+    for (0..200) |cap| {
+        var limits = unlimited;
+        limits.history_cap = cap;
+        const kept = try restore.historyKept(testing.allocator, &a.terminal, limits);
+        try testing.expect(kept >= previous and kept <= total);
+        previous = kept;
+        const bytes = try restore.build(testing.allocator, &a.terminal, .full, limits);
+        defer testing.allocator.free(bytes);
+        // Early modes, the history within the cap, its newlines, then the
+        // clean slate before the screen's clear.
+        const early = "\x1b[?2027h".len;
+        const slate = "\x1b[0m\x1b(B\x0f\x1b[0\"q\x1b]8;;\x1b\\".len;
+        if (kept > 0) try testing.expect(screenStart(bytes) - early - 2 * a.terminal.rows - slate <= cap);
+    }
+    try testing.expectEqual(total, previous);
+}
+
 test "the byte cap" {
     const a = try newModel(40, 10);
     defer a.destroy();
