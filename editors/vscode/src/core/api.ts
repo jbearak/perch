@@ -176,7 +176,8 @@ export function apiError(err: unknown, code: ApiErrorCode | undefined): Error {
 export class EndReporter {
   private readonly reported = new Set<string>();
   private readonly exits = new Map<string, SessionExit>();
-  private readonly pending = new Map<string, Session | undefined>();
+  /** Unconfirmed ends: the session as last seen, and when it was left pending. */
+  private readonly pending = new Map<string, { known: Session | undefined; since: number }>();
 
   /** This window's terminal of the session ended with the program's exit code. */
   terminalExit(id: string, code: number | undefined): void {
@@ -197,10 +198,10 @@ export class EndReporter {
   /**
    * Confirming an end failed (`perch info` did not answer). The session
    * stays pending until a successful listing decides; `known` is the
-   * session as last seen here.
+   * session as last seen here. `now` is on the clock listings are timed by.
    */
-  unconfirmed(id: string, known: Session | undefined): void {
-    this.pending.set(id, known);
+  unconfirmed(id: string, known: Session | undefined, now: number = performance.now()): void {
+    this.pending.set(id, { known, since: now });
   }
 
   /**
@@ -208,10 +209,13 @@ export class EndReporter {
    * tombstone, ended, and is reported once (exit status unknown unless this
    * window's terminal received it). One the listing shows live, as after a
    * takeover, is dropped unreported; an unresponsive one stays pending.
+   * Only a listing started after the session was left pending decides: one
+   * already under way may predate the session, or a takeover of it.
    */
-  reconcile(listed: readonly Session[]): Session[] {
+  reconcile(listed: readonly Session[], startedAt: number = Infinity): Session[] {
     const out: Session[] = [];
-    for (const [id, known] of [...this.pending]) {
+    for (const [id, { known, since }] of [...this.pending]) {
+      if (startedAt <= since) continue;
       const s = listed.find((x) => x.id === id);
       if (s !== undefined && !isEnded(s)) {
         if (s.state !== 'unresponsive') this.pending.delete(id);

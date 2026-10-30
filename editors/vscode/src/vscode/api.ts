@@ -92,7 +92,7 @@ export interface ApiDeps {
   /** Each listing that changed something. */
   onDidChangeList: vscode.Event<ListDiff>;
   /** Each successful listing, changed or not. */
-  onDidList: vscode.Event<readonly Session[]>;
+  onDidList: vscode.Event<{ sessions: readonly Session[]; startedAt: number }>;
 }
 
 const unavailableMessage = 'Perch is not available on this host.';
@@ -116,8 +116,8 @@ export class Api implements vscode.Disposable {
       this.changed,
       this.attached,
       this.ended,
-      deps.onDidList((sessions) => {
-        for (const s of this.reporter.reconcile(sessions)) this.ended.fire(this.info(s));
+      deps.onDidList(({ sessions, startedAt }) => {
+        for (const s of this.reporter.reconcile(sessions, startedAt)) this.ended.fire(this.info(s));
       }),
       deps.onDidChangeList((diff) => {
         this.changed.fire();

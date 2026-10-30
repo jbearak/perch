@@ -118,7 +118,8 @@ export function activate(context: vscode.ExtensionContext): Exports {
       return;
     }
     try {
-      store.set(await cli.list());
+      const startedAt = performance.now();
+      store.set(await cli.list(), undefined, startedAt);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== store.error) output.appendLine(`Listing sessions failed: ${message}`);

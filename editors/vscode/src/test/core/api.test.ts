@@ -252,6 +252,16 @@ describe('API core', () => {
       assert.deepStrictEqual(r.reconcile([]), [], 'dropped: its later end is a listing’s to report');
     });
 
+    it('a listing started before the end was left pending does not decide it', () => {
+      const r = new EndReporter();
+      r.unconfirmed('abcd1234', session(), 100);
+      // Asked for before: it may predate the session or its takeover.
+      assert.deepStrictEqual(r.reconcile([], 50), []);
+      assert.deepStrictEqual(r.reconcile([], 100), []);
+      // Asked for after: absent means ended.
+      assert.strictEqual(r.reconcile([], 150).length, 1);
+    });
+
     it('an unresponsive session stays pending', () => {
       const r = new EndReporter();
       r.unconfirmed('abcd1234', session());
