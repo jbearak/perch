@@ -159,7 +159,12 @@ export class Terminals implements vscode.Disposable {
     if (launch === undefined || !this.registry.track(t, launch)) return;
     void this.restoreSet.add(launch.id);
     // A terminal from prepareLaunch: another extension's profile, or Perch's own.
-    if (launch.mode === 'new') this.starting.set(t, this.waitForSession(launch.id, t, t.name));
+    if (launch.mode === 'new') {
+      const started = this.waitForSession(launch.id, t, t.name);
+      // Perch's own profile reports a failed start; another extension's waits itself.
+      started.catch(() => undefined);
+      this.starting.set(t, started);
+    }
     void this.watchAttach(t, launch);
   }
 

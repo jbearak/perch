@@ -63,7 +63,7 @@ describe('terminals', () => {
       assert.strictEqual(r.session.state, 'running');
       const o = terminal.creationOptions as vscode.TerminalOptions;
       assert.strictEqual(o.isTransient, true);
-      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'new', ifDetached: false });
+      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'new', ifDetached: false, label: testing.label });
       const args = o.shellArgs as string[];
       for (const [flag, value] of [['--scrollback', '4321'], ['--detach-key', 'none'], ['--restore', 'full'], ['--label', testing.label]]) {
         assert.strictEqual(args[args.indexOf(flag) + 1], value, `${flag} ${value}`);
@@ -101,7 +101,7 @@ describe('terminals', () => {
       await testing.restore();
       const t = await waitFor('a restored terminal', async () => testing.terminalFor(id));
       const o = t.creationOptions as vscode.TerminalOptions;
-      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: true });
+      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: true, label: testing.label });
       assert.strictEqual(o.isTransient, true);
       assert.strictEqual(t.name, 'e2e create');
       await attachedBy(binary, id, testing.label);
@@ -146,7 +146,7 @@ describe('terminals', () => {
       const t = testing.terminalFor(id);
       assert.ok(t);
       const o = t.creationOptions as vscode.TerminalOptions;
-      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: false });
+      assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: false, label: testing.label });
       await attachedBy(binary, id, testing.label);
     });
   });
@@ -186,7 +186,7 @@ describe('terminals', () => {
     const t = await testing.openStale(id);
     assert.ok(t, 'a guarded attach starts');
     const o = t.creationOptions as vscode.TerminalOptions;
-    assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: true });
+    assert.deepStrictEqual(recognize(o.shellPath, o.shellArgs), { id, mode: 'attach', ifDetached: true, label: testing.label });
     const outcome = await closed;
     assert.strictEqual(outcome.code, 75);
     assert.strictEqual(outcome.result, 'busy');

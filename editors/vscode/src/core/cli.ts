@@ -53,11 +53,10 @@ export function runPerch(binary: string, args: readonly string[], timeoutMs: num
         reject(new PerchError(`perch ${args[0] ?? ''}: ${why}`, code, stderr, e.killed === true, spawnError, stdout));
       },
     );
-    if (input !== undefined) {
-      // A child that exits before reading all of it closes the pipe; its exit says why.
-      child.stdin?.on('error', () => undefined);
-      child.stdin?.end(input);
-    }
+    // A child that exits before reading all of its input closes the pipe;
+    // its exit says why. One that never started gets nothing written.
+    child.stdin?.on('error', () => undefined);
+    if (input !== undefined) child.once('spawn', () => child.stdin?.end(input));
   });
 }
 
