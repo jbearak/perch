@@ -258,7 +258,7 @@ export class Terminals implements vscode.Disposable {
       cwd: o.cwd,
       env: o.env,
       annotations: o.annotations,
-      linkEnv: this.linkEnvSupported(settings.linkedEnvironment) ? settings.linkedEnvironment : [],
+      linkEnv: this.linkEnvSupported(settings.linkedEnvironment) ? settings.linkedEnvironment : undefined,
     };
     this.prepared.set(id, { name: o.name, kind: o.kind, owner: o.owner, annotations: o.annotations, cwd: o.cwd });
     return {
@@ -277,14 +277,13 @@ export class Terminals implements vscode.Disposable {
   }
 
   /**
-   * `--link-env` only when `perch.linkedEnvironment` names something, and
-   * only if this binary has the flag; otherwise say once that it is ignored.
+   * `perch.linkedEnvironment` is passed only if this binary has the flags;
+   * otherwise say once that it is ignored (when it names something).
    */
   private linkEnvSupported(names: readonly string[]): boolean {
-    if (names.length === 0) return false;
     this.linkEnv ??= this.deps.cli().supportsLinkEnv();
     const ok = this.linkEnv;
-    if (!ok && !this.linkEnvWarned) {
+    if (!ok && names.length > 0 && !this.linkEnvWarned) {
       this.linkEnvWarned = true;
       const message = 'This version of perch does not support perch.linkedEnvironment yet; sessions start without linked variables.';
       this.output(message);

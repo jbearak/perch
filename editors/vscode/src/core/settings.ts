@@ -19,7 +19,7 @@ export const defaults: Settings = {
   path: '',
   addToPath: true,
   restoreTerminals: true,
-  linkedEnvironment: [],
+  linkedEnvironment: ['SSH_AUTH_SOCK'],
   shell: '',
 };
 

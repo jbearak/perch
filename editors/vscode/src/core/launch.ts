@@ -45,7 +45,10 @@ export interface NewSession {
   cwd?: string;
   env?: Readonly<Record<string, string>>;
   annotations?: Readonly<Record<string, string>>;
-  /** `--link-env` names; empty when the binary does not support it. */
+  /**
+   * `--link-env` names; empty for `--no-link-env` (link nothing);
+   * undefined to leave the binary's default, as when it lacks the flags.
+   */
   linkEnv?: readonly string[];
 }
 
@@ -62,6 +65,7 @@ export function newArgs(o: NewSession): string[] {
   if (o.cwd !== undefined && o.cwd !== '') args.push('--cwd', o.cwd);
   for (const [k, v] of Object.entries(o.annotations ?? {})) args.push('--annotate', `${k}=${v}`);
   for (const [k, v] of Object.entries(o.env ?? {})) args.push('--env', `${k}=${v}`);
+  if (o.linkEnv !== undefined && o.linkEnv.length === 0) args.push('--no-link-env');
   for (const name of o.linkEnv ?? []) args.push('--link-env', name);
   args.push('--', ...o.command);
   return args;

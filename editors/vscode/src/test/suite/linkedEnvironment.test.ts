@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The local checks for the linked-variable defaults. Each variable is
-// listed in `perch.linkedEnvironment` here; neither is a default yet.
-// `VSCODE_IPC_HOOK_CLI` also needs its Remote-SSH check, and
-// `SSH_AUTH_SOCK` the agent-forwarding check over ssh (M4).
+// listed in `perch.linkedEnvironment` here. `SSH_AUTH_SOCK` is a default:
+// this check and the agent-forwarding check over ssh (tests/linux) pass.
+// `VSCODE_IPC_HOOK_CLI` also needs its Remote-SSH check before it can be.
 import * as assert from 'assert';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';

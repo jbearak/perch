@@ -32,7 +32,8 @@ struct Options {
     annotations: BTreeMap<String, String>,
     cwd: Option<String>,
     env: Vec<(String, String)>,
-    /// `--link-env`, or `None` for the default list.
+    /// `--link-env` (or empty with `--no-link-env`), or `None` for the
+    /// default list.
     link_env: Option<Vec<String>>,
     scrollback: Option<u32>,
     detached: bool,
@@ -90,6 +91,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if !list.iter().any(|n| n == name) {
                     list.push(name.to_owned());
                 }
+            }
+            "--no-link-env" => {
+                o.link_env.get_or_insert_with(Vec::new);
             }
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             _ => {

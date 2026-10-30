@@ -76,8 +76,12 @@ impl Rt {
     /// A `perch` command against this runtime directory, with no terminal.
     pub fn cmd(&self) -> Command {
         let mut c = Command::new(perch_bin());
+        // `SSH_AUTH_SOCK` is linked by default, so whether the machine
+        // running the tests has an agent would change sessions; tests that
+        // want one set it.
         c.env("PERCH_RUNTIME_DIR", &self.path)
             .env("PERCH_TEST_TIME_SCALE", &self.scale)
+            .env_remove("SSH_AUTH_SOCK")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
