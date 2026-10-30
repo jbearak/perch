@@ -17,10 +17,15 @@
 //! - `body:KIND:N`: write N more bytes of its body;
 //! - `close:KIND`: end it (ST, or `m` for the CSI);
 //! - `cat:PATH:START:END`: write bytes START to END of a file;
+//! - `paste:ACTION`: bracketed paste: `on`, `off`, `save` or `restore`
+//!   (`CSI ? 2004 h`, `l`, `s`, `r`);
+//! - `drain:MS`: read whatever input arrives within MS milliseconds;
 //! - `exit:N`: exit with status N.
 //!
 //! After each round it rewrites OUT with one JSON line per round so far:
-//! an array of `{"step", "reply", "ms"}`, `reply` null when none came.
+//! an array of `{"step", "ms"}` objects. A query's has `reply`, null when
+//! none came, and `stale`, what was already waiting before the query was
+//! sent; `drain`'s has `read`. `ms` is how long the step took.
 
 use std::io::Write;
 use std::path::Path;
@@ -61,6 +66,13 @@ fn main() {
 }
 
 fn step(word: &str, timeout: Duration) -> Value {
+    let start = Instant::now();
+    let mut v = step_inner(word, timeout);
+    v["ms"] = json!(start.elapsed().as_secs_f64() * 1000.0);
+    v
+}
+
+fn step_inner(word: &str, timeout: Duration) -> Value {
     let (query, last): (&[u8], u8) = match word {
         "dsr5" => (b"\x1b[5n", b'n'),
         "dsr6" => (b"\x1b[6n", b'R'),
@@ -132,6 +144,20 @@ fn step(word: &str, timeout: Duration) -> Value {
                 write(&bytes[start.min(bytes.len())..end.min(bytes.len())]);
             } else if let Some(t) = word.strip_prefix("text:") {
                 write(format!("{t}\r\n").as_bytes());
+            } else if let Some(action) = word.strip_prefix("paste:") {
+                let fin = match action {
+                    "on" => "h",
+                    "off" => "l",
+                    "save" => "s",
+                    "restore" => "r",
+                    _ => panic!("unknown paste action `{action}`"),
+                };
+                write(format!("\x1b[?2004{fin}").as_bytes());
+            } else if let Some(ms) = word.strip_prefix("drain:") {
+                let ms: u64 = ms.parse().expect("drain ms");
+                let mut read = Vec::new();
+                read_until(&mut read, None, Duration::from_millis(ms));
+                return json!({ "step": word, "read": String::from_utf8_lossy(&read) });
             } else if let Some(code) = word.strip_prefix("exit:") {
                 std::process::exit(code.parse().expect("exit code"));
             } else {
@@ -143,15 +169,13 @@ fn step(word: &str, timeout: Duration) -> Value {
     // Whatever arrived late for an earlier query is not this reply.
     let mut stale = Vec::new();
     read_until(&mut stale, None, Duration::ZERO);
-    let start = Instant::now();
     write(query);
     let mut reply = Vec::new();
     let got = read_until(&mut reply, Some(last), timeout);
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
     json!({
         "step": word,
         "reply": got.then(|| String::from_utf8_lossy(&reply).into_owned()),
-        "ms": ms,
+        "stale": String::from_utf8_lossy(&stale),
     })
 }
 
@@ -177,12 +201,12 @@ fn read_until(buf: &mut Vec<u8>, last: Option<u8>, timeout: Duration) -> bool {
             }
             continue;
         }
-        let mut b = [0u8; 256];
+        let mut b = [0u8; 64 * 1024];
         match sys::read(0, &mut b) {
             Ok(0) | Err(_) => return false,
             Ok(n) => {
                 buf.extend_from_slice(&b[..n]);
-                if last.is_some_and(|l| buf.contains(&l)) {
+                if last.is_some_and(|l| b[..n].contains(&l)) {
                     return true;
                 }
             }

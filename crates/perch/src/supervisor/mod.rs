@@ -525,7 +525,9 @@ impl Supervisor {
             feeder: Feeder::new(),
             model: Model::new(cfg.size.cols, cfg.size.rows, cfg.scrollback),
             queries: Queries::new(),
-            input: Input::new(),
+            // Scaled in tests, so a test can stretch it past a slow
+            // runner's pauses between the halves of a split reply.
+            input: Input::with_hold(clock::scaled(crate::input::REPLY_HOLD)),
             master_write_failed: false,
             epoch: now,
             ending: None,
@@ -1282,6 +1284,11 @@ impl Supervisor {
                 "writing": self.input.writing(),
                 "holding": self.input.holding(),
                 "gate": self.input_gate,
+                "client": self.client.as_ref().map(|c| json!({
+                    "phase": format!("{:?}", c.flow.phase()),
+                    "readBudget": c.flow.read_budget().min(u32::MAX as usize),
+                    "liveBytes": c.flow.live_bytes(),
+                })),
             }),
         )
     }
