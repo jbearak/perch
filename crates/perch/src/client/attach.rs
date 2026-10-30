@@ -158,7 +158,7 @@ impl DetachKey {
         let f: Vec<&str> = p.split(';').collect();
         let mods_prefix = |m: &str| CTRL_MODS.iter().any(|c| c.starts_with(m));
         let mods_done = |m: &str| CTRL_MODS.contains(&m);
-        // Kitty: CSI code[:alternates] ; mods[:event] u
+        // Kitty: CSI code[:alternates] ; mods[:event] [; text] u
         let kitty = match &f[..] {
             [code] => {
                 let mut subs = code.split(':');
@@ -175,6 +175,17 @@ impl DetachKey {
                     match &m[..] {
                         [m0] => mods_prefix(m0),
                         [m0, ev] => mods_done(m0) && matches!(*ev, "" | "1" | "2"),
+                        _ => false,
+                    }
+                }
+            }
+            // The associated text: codepoints, `:`-separated.
+            [code, mods, _text] => {
+                code.split(':').next() == Some(cp.as_str()) && {
+                    let m: Vec<&str> = mods.split(':').collect();
+                    match &m[..] {
+                        [m0] => mods_done(m0),
+                        [m0, ev] => mods_done(m0) && matches!(*ev, "1" | "2"),
                         _ => false,
                     }
                 }
@@ -807,7 +818,12 @@ mod tests {
     #[test]
     fn every_split_of_the_csi_forms_detaches() {
         let k = Some(DetachKey::DEFAULT);
-        for form in [&b"\x1b[92;5u"[..], b"\x1b[92;5:1u", b"\x1b[27;5;92~"] {
+        for form in [
+            &b"\x1b[92;5u"[..],
+            b"\x1b[92;5:1u",
+            b"\x1b[92;5;92u",
+            b"\x1b[27;5;92~",
+        ] {
             for cut in 1..form.len() {
                 let mut first = b"ab".to_vec();
                 first.extend_from_slice(&form[..cut]);

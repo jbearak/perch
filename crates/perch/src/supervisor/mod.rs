@@ -309,6 +309,7 @@ struct Supervisor {
     creator_deadline: Option<Instant>,
     attach_mode: bool,
     /// Turns of the poll loop, for tests that check it is idle.
+    #[cfg(feature = "test-hooks")]
     loops: u64,
 }
 
@@ -502,6 +503,7 @@ impl Supervisor {
             last_input: None,
             start_failure: None,
             creator_deadline: None,
+            #[cfg(feature = "test-hooks")]
             loops: 0,
             attach_mode: cfg.attach,
         })
@@ -543,7 +545,10 @@ impl Supervisor {
         self.apply_model_state();
 
         loop {
-            self.loops += 1;
+            #[cfg(feature = "test-hooks")]
+            {
+                self.loops += 1;
+            }
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
             let master_write = self.input.pending().is_some() && !self.master_write_failed;
