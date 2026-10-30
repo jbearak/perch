@@ -496,12 +496,10 @@ mod linux {
             kill: conf.get("KillUserProcesses").cloned(),
             only: words(conf.get("KillOnlyUsers")),
             exclude: words(conf.get("KillExcludeUsers")),
-            linger: Some(
-                std::path::Path::new("/var/lib/systemd/linger")
-                    .join(user)
-                    .exists(),
-            )
-            .filter(|_| std::path::Path::new("/var/lib/systemd/linger").is_dir()),
+            linger: {
+                let dir = std::path::Path::new("/var/lib/systemd/linger");
+                dir.is_dir().then(|| dir.join(user).exists())
+            },
             source: "from logind.conf".into(),
         }
     }
