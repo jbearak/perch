@@ -170,6 +170,17 @@ describe('sessions', () => {
       assert.ok(!isEmptyDiff(diffSessions([a], [{ ...a, name: 'renamed' }])));
     });
 
+    it('counts a changed annotation set or value as a change, and an equal one as none', () => {
+      const a = session({ id: 'a', annotations: { k: 'v', x: 'y' } });
+      assert.ok(isEmptyDiff(diffSessions([a], [{ ...a, annotations: { x: 'y', k: 'v' } }])), 'order does not matter');
+      const variants: Record<string, string>[] = [{ k: 'w', x: 'y' }, { k: 'v' }, { k: 'v', x: 'y', z: '' }];
+      for (const annotations of variants) {
+        const d = diffSessions([a], [{ ...a, annotations }]);
+        assert.deepStrictEqual(d.changed.map((s) => s.id), ['a'], JSON.stringify(annotations));
+        assert.deepStrictEqual(d.ended, []);
+      }
+    });
+
     it('reports a session that ended with its tombstone', () => {
       const a = session({ id: 'a' });
       const d = diffSessions([a], [{ ...a, state: 'exited', exit: { code: 0 } }]);

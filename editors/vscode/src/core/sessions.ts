@@ -223,7 +223,7 @@ export function killConfirmation(s: Session, ctx: DescribeContext): { message: s
 
 export interface ListDiff {
   added: Session[];
-  /** Present in both, with a different state, attachment or name. */
+  /** Present in both, with a different state, attachment, name or annotations. */
   changed: Session[];
   /** Gone from the listing. */
   removed: Session[];
@@ -252,7 +252,8 @@ export function diffSessions(before: readonly Session[], after: readonly Session
       prev.name !== s.name ||
       prev.cwd !== s.cwd ||
       prev.memoryBytes !== s.memoryBytes ||
-      prev.degraded.join() !== s.degraded.join()
+      prev.degraded.join() !== s.degraded.join() ||
+      !sameAnnotations(prev.annotations, s.annotations)
     ) {
       diff.changed.push(s);
     }
@@ -264,6 +265,11 @@ export function diffSessions(before: readonly Session[], after: readonly Session
     if (!isEnded(s)) diff.ended.push({ ...s, state: 'exited', attached: false, exit: undefined });
   }
   return diff;
+}
+
+function sameAnnotations(a: Readonly<Record<string, string>>, b: Readonly<Record<string, string>>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k]);
 }
 
 export function isEmptyDiff(d: ListDiff): boolean {

@@ -57,4 +57,18 @@ describe('activation', () => {
     assert.strictEqual(pathMutator?.type, vscode.EnvironmentVariableMutatorType.Append);
     assert.strictEqual(pathMutator?.value, `${path.delimiter}${testing.commandLineDir}`);
   });
+
+  it('runs perch doctor and warns only when sessions are not expected to survive logout', async function () {
+    const { ext, testing } = await activated();
+    const binary = bundledBinaryOrSkip(this, ext.extensionPath);
+    const warning = await testing.doctorChecked;
+    const report = JSON.parse(
+      await perch(binary, ['doctor', '--json']).catch((err: { stdout?: string }) => err.stdout ?? '{}'),
+    ) as { ok: boolean; survivesLogout: boolean | null };
+    if (report.survivesLogout === false || !report.ok) {
+      assert.match(warning ?? '', /Run `perch doctor` for details\.$/);
+    } else {
+      assert.strictEqual(warning, undefined);
+    }
+  });
 });

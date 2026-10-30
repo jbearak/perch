@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The VS Code side of activation: the binary, the session list, kill and
-// dismiss, the status bar count, the command-line copy and terminals. The
-// API arrives in a later milestone.
+// dismiss, the status bar count, the command-line copy, terminals, the
+// `perch doctor` warning and the API for other extensions.
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { available, commandLineDir, ensureExecutable, hostSupported, resolveBinary } from '../core/binary';
+import { runtimeDir } from '../core/api';
 import { PerchCli } from '../core/cli';
+import { doctorWarnedKey, doctorWarning, parseDoctor } from '../core/doctor';
 import { clientLabel, windowKey, workspaceKey } from '../core/labels';
 import { RefreshScheduler } from '../core/refresh';
 import { RestoreStore } from '../core/restore';
@@ -24,6 +26,7 @@ import {
   stripAnsi,
 } from '../core/sessions';
 import { readSettings, Settings } from '../core/settings';
+import { Api, PerchApiV1 } from './api';
 import { CommandLine } from './commandLine';
 import { DetachedCount, SessionItem, SessionsProvider, SessionStore } from './sessionsView';
 import { CloseOutcome, CreateOptions, Notify, Terminals } from './terminals';
@@ -49,7 +52,7 @@ export interface Testing {
   /** Settles when adoption and the first restore pass have run. */
   terminalsStarted: Promise<void>;
   createSession(o: CreateOptions): Promise<{ session: Session; terminal: vscode.Terminal }>;
-  prepareLaunch(o: CreateOptions): Promise<{ id: string; options: vscode.TerminalOptions }>;
+  prepareLaunch(o: CreateOptions): { id: string; options: vscode.TerminalOptions };
   /** The Perch terminal attached to a session in this window. */
   terminalFor(id: string): vscode.Terminal | undefined;
   restoreSet(): string[];
@@ -65,9 +68,13 @@ export interface Testing {
   onDidClose: vscode.Event<CloseOutcome>;
   setNotify(notify: Notify | undefined): void;
   shellCommand(): string[];
+  /** Settles with the warning `perch doctor` led to, if any, once it has run. */
+  doctorChecked: Promise<string | undefined>;
 }
 
 export interface Exports {
+  /** The API for other extensions; undefined for a version this Perch does not serve. */
+  getApi(version: number, callerId: string): PerchApiV1 | undefined;
   testing?: Testing;
 }
 
@@ -111,7 +118,8 @@ export function activate(context: vscode.ExtensionContext): Exports {
       return;
     }
     try {
-      store.set(await cli.list());
+      const startedAt = performance.now();
+      store.set(await cli.list(), undefined, startedAt);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== store.error) output.appendLine(`Listing sessions failed: ${message}`);
@@ -160,6 +168,22 @@ export function activate(context: vscode.ExtensionContext): Exports {
       vscode.window.registerTerminalProfileProvider('perch.persistentShell', terminals.profileProvider()),
     );
   }
+
+  const api = new Api({
+    supported,
+    cli: () => cli,
+    find: (id) => store.find(id),
+    sessions: () => store.sessions,
+    refresh: () => scheduler.now(),
+    terminals,
+    runtimeDir: runtimeDir(process.env, process.getuid?.() ?? 0, process.cwd()),
+    onDidChangeList: store.onDidChange,
+    onDidList: store.onDidList,
+  });
+  context.subscriptions.push(api);
+  const getApi = (version: number, callerId: string) => api.getApi(version, callerId);
+
+  const doctorChecked = supported ? checkHost(context, cli, output) : Promise.resolve(undefined);
 
   const commandLine = new CommandLine(
     commandLineDir(context.globalStorageUri.fsPath, platform, process.arch),
@@ -301,8 +325,9 @@ export function activate(context: vscode.ExtensionContext): Exports {
     ),
   );
 
-  if (context.extensionMode !== vscode.ExtensionMode.Test) return {};
+  if (context.extensionMode !== vscode.ExtensionMode.Test) return { getApi };
   return {
+    getApi,
     testing: {
       label,
       sessions: () => store.sessions,
@@ -339,11 +364,39 @@ export function activate(context: vscode.ExtensionContext): Exports {
         terminals.notify = n ?? ((m, ...items) => vscode.window.showInformationMessage(m, ...items));
       },
       shellCommand: () => terminals.shellOptions().command,
+      doctorChecked,
     },
   };
 }
 
 export function deactivate(): void {}
+
+/**
+ * Runs `perch doctor` and, once per host, warns when sessions there are not
+ * expected to survive logout. Resolves with the warning, if any.
+ */
+async function checkHost(
+  context: vscode.ExtensionContext,
+  cli: PerchCli,
+  output: vscode.OutputChannel,
+): Promise<string | undefined> {
+  const host = os.hostname();
+  try {
+    const report = parseDoctor(await cli.doctor());
+    for (const c of report.checks) output.appendLine(`perch doctor: ${c.status} ${c.name}: ${c.message}`);
+    const warning = doctorWarning(report, host);
+    if (warning === undefined) return undefined;
+    const key = doctorWarnedKey(host);
+    if (!context.globalState.get<boolean>(key, false)) {
+      await context.globalState.update(key, true);
+      void vscode.window.showWarningMessage(warning);
+    }
+    return warning;
+  } catch (err) {
+    output.appendLine(`perch doctor failed: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
 
 /**
  * In test mode with PERCH_TEST_RESTORE_FILE set, the restore set lives in

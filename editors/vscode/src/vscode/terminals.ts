@@ -6,6 +6,7 @@
 // process is `perch new` or `perch attach`.
 import * as vscode from 'vscode';
 import { PerchCli } from '../core/cli';
+import { Launched } from '../core/api';
 import { attachArgs, newArgs, newSessionId, NewSession, recognize, Recognized, scrollbackLines, shellCommand } from '../core/launch';
 import { waitUntilRunning } from '../core/readiness';
 import {
@@ -19,7 +20,7 @@ import {
   settle75,
   TerminalRegistry,
 } from '../core/restore';
-import { displayName, iconName, kindIcon, kindName, Session } from '../core/sessions';
+import { displayName, iconName, isEnded, kindIcon, kindName, Session } from '../core/sessions';
 import { Settings } from '../core/settings';
 import type { Confirm } from './activation';
 
@@ -46,6 +47,15 @@ export interface CloseOutcome {
   /** `forget`, `keep`, `ignore`, or for code 75 `busy` or `ended`. */
   result: string;
 }
+
+/** A terminal attached to a session, as `onDidAttach` reports it. */
+export interface Attached {
+  session: Session;
+  terminal: vscode.Terminal;
+}
+
+/** How long a new terminal has to show up attached before `onDidAttach` gives up on it. */
+const ATTACH_WAIT_MS = 10_000;
 
 /** Shows the first-close notice; resolves with the button chosen. */
 export type Notify = (message: string, ...items: string[]) => Thenable<string | undefined>;
@@ -86,10 +96,17 @@ export class Terminals implements vscode.Disposable {
   /** Open's guarded attaches, which ask before a takeover if they find the session busy. */
   private readonly opening = new WeakSet<vscode.Terminal>();
   private noticeShown = false;
-  private linkEnv: Promise<boolean> | undefined;
+  private linkEnv: boolean | undefined;
   private linkEnvWarned = false;
   private readonly closedEmitter = new vscode.EventEmitter<CloseOutcome>();
   readonly onDidClose = this.closedEmitter.event;
+  private readonly attachedEmitter = new vscode.EventEmitter<Attached>();
+  /** Fires when a terminal of this window is attached: create, open, restore, adopt. */
+  readonly onDidAttach = this.attachedEmitter.event;
+  /** What each launch prepared here said, for a session not listed yet. */
+  private readonly prepared = new Map<string, Launched>();
+  /** Each terminal creating a session: settles once it runs or fails. */
+  private readonly starting = new WeakMap<vscode.Terminal, Promise<Session>>();
 
   constructor(private readonly deps: TerminalsDeps) {
     const state = deps.context.workspaceState;
@@ -115,6 +132,7 @@ export class Terminals implements vscode.Disposable {
     });
     this.disposables.push(
       this.closedEmitter,
+      this.attachedEmitter,
       vscode.window.onDidOpenTerminal((t) => this.opened(t)),
       vscode.window.onDidCloseTerminal((t) => void this.closed(t)),
     );
@@ -123,9 +141,10 @@ export class Terminals implements vscode.Disposable {
   /** At activation: adopt the Perch terminals already open, then restore. */
   async start(): Promise<void> {
     const adopted = adopt(this.registry, vscode.window.terminals, recognizeTerminal);
-    for (const { launch } of adopted) {
+    for (const { terminal, launch } of adopted) {
       this.output(`Adopted the terminal of ${launch.id}`);
       await this.restoreSet.add(launch.id);
+      void this.watchAttach(terminal, launch);
     }
     if (this.deps.hasWorkspace && this.deps.settings().restoreTerminals) await this.restorer.start();
   }
@@ -139,6 +158,39 @@ export class Terminals implements vscode.Disposable {
     const launch = recognizeTerminal(t);
     if (launch === undefined || !this.registry.track(t, launch)) return;
     void this.restoreSet.add(launch.id);
+    // A terminal from prepareLaunch: another extension's profile, or Perch's own.
+    if (launch.mode === 'new') {
+      const started = this.waitForSession(launch.id, t, t.name);
+      // Perch's own profile reports a failed start; another extension's waits itself.
+      started.catch(() => undefined);
+      this.starting.set(t, started);
+    }
+    void this.watchAttach(t, launch);
+  }
+
+  /**
+   * Fires `onDidAttach` once the terminal's client is the one attached, or
+   * gives up quietly if the terminal closes first (a busy restore exits
+   * with 75), the session ends, or 10 seconds pass.
+   */
+  private async watchAttach(t: vscode.Terminal, launch: Recognized): Promise<void> {
+    const end = Date.now() + ATTACH_WAIT_MS;
+    while (t.exitStatus === undefined && this.registry.get(t) !== undefined) {
+      let info: Session | undefined;
+      try {
+        info = await this.deps.cli().info(launch.id);
+      } catch {
+        // Not ready, or slow: ask again.
+      }
+      if (info !== undefined && isEnded(info)) return;
+      const here = launch.label === undefined || info?.clientLabel === launch.label;
+      if (info !== undefined && info.state === 'running' && info.attached && here) {
+        this.attachedEmitter.fire({ session: info, terminal: t });
+        return;
+      }
+      if (Date.now() >= end) return;
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 
   private async closed(t: vscode.Terminal): Promise<void> {
@@ -192,7 +244,7 @@ export class Terminals implements vscode.Disposable {
   }
 
   /** The launch for a new session, without creating a terminal. */
-  async prepareLaunch(o: CreateOptions): Promise<{ id: string; options: vscode.TerminalOptions }> {
+  prepareLaunch(o: CreateOptions): { id: string; options: vscode.TerminalOptions } {
     const id = newSessionId();
     const settings = this.deps.settings();
     const spec: NewSession = {
@@ -206,8 +258,9 @@ export class Terminals implements vscode.Disposable {
       cwd: o.cwd,
       env: o.env,
       annotations: o.annotations,
-      linkEnv: (await this.linkEnvSupported(settings.linkedEnvironment)) ? settings.linkedEnvironment : [],
+      linkEnv: this.linkEnvSupported(settings.linkedEnvironment) ? settings.linkedEnvironment : [],
     };
+    this.prepared.set(id, { name: o.name, kind: o.kind, owner: o.owner, annotations: o.annotations, cwd: o.cwd });
     return {
       id,
       options: {
@@ -227,10 +280,10 @@ export class Terminals implements vscode.Disposable {
    * `--link-env` only when `perch.linkedEnvironment` names something, and
    * only if this binary has the flag; otherwise say once that it is ignored.
    */
-  private async linkEnvSupported(names: readonly string[]): Promise<boolean> {
+  private linkEnvSupported(names: readonly string[]): boolean {
     if (names.length === 0) return false;
     this.linkEnv ??= this.deps.cli().supportsLinkEnv();
-    const ok = await this.linkEnv;
+    const ok = this.linkEnv;
     if (!ok && !this.linkEnvWarned) {
       this.linkEnvWarned = true;
       const message = 'This version of perch does not support perch.linkedEnvironment yet; sessions start without linked variables.';
@@ -248,12 +301,16 @@ export class Terminals implements vscode.Disposable {
 
   /** Creates the terminal and resolves once the program is running. */
   async createSession(o: CreateOptions & { show?: boolean }): Promise<{ session: Session; terminal: vscode.Terminal }> {
-    const { id, options } = await this.prepareLaunch(o);
+    const { id, options } = this.prepareLaunch(o);
     const terminal = vscode.window.createTerminal(options);
-    this.registry.track(terminal, { id, mode: 'new', ifDetached: false });
+    this.registry.track(terminal, { id, mode: 'new', ifDetached: false, label: this.deps.label });
+    const started = this.waitForSession(id, terminal, options.name ?? id);
+    this.starting.set(terminal, started);
     await this.restoreSet.add(id);
     if (o.show !== false) terminal.show();
-    const session = await this.waitForSession(id, terminal, options.name ?? id);
+    const session = await started;
+    // The creator attaches before the program starts.
+    if (session.state === 'running') this.attachedEmitter.fire({ session, terminal });
     void this.deps.refresh();
     return { session, terminal };
   }
@@ -289,7 +346,7 @@ export class Terminals implements vscode.Disposable {
   profileProvider(): vscode.TerminalProfileProvider {
     return {
       provideTerminalProfile: async () => {
-        const { id, options } = await this.prepareLaunch(this.shellOptions());
+        const { id, options } = this.prepareLaunch(this.shellOptions());
         // The terminal appears through onDidOpenTerminal; report a failed start.
         void this.watchProfileTerminal(id, options.name ?? id);
         return new vscode.TerminalProfile(options);
@@ -306,7 +363,7 @@ export class Terminals implements vscode.Disposable {
     }
     if (terminal === undefined) return; // The profile was not used.
     try {
-      await this.waitForSession(id, terminal, name);
+      await (this.starting.get(terminal) ?? this.waitForSession(id, terminal, name));
     } catch (err) {
       void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
     }
@@ -318,13 +375,13 @@ export class Terminals implements vscode.Disposable {
    * is attached, asks first: opening moves it here. Until the user agrees
    * to a takeover the attach is guarded by `--if-detached`.
    */
-  async open(s: Session): Promise<vscode.Terminal | undefined> {
+  async open(s: Session, show = true): Promise<vscode.Terminal | undefined> {
     const existing = this.registry.terminalFor(s.id);
     if (existing !== undefined) {
-      existing.show();
+      if (show) existing.show();
       return existing;
     }
-    return this.openWith((await this.deps.cli().info(s.id)) ?? s);
+    return this.openWith((await this.deps.cli().info(s.id)) ?? s, show);
   }
 
   /** A guarded Open found the session busy: ask, as Open does. */
@@ -338,7 +395,7 @@ export class Terminals implements vscode.Disposable {
   }
 
   /** Open from a session as last checked; the tests pass a stale one to recreate the race. */
-  async openWith(info: Session): Promise<vscode.Terminal | undefined> {
+  async openWith(info: Session, show = true): Promise<vscode.Terminal | undefined> {
     let step = openStep(info, false);
     if (step === 'not-running') {
       throw new Error(`${displayName(info)} is ${info.state === 'exited' ? 'no longer running' : info.state}.`);
@@ -349,14 +406,14 @@ export class Terminals implements vscode.Disposable {
       if (!(await this.deps.confirm()(question, detail, 'Move Here'))) return undefined;
       step = openStep(info, true);
     }
-    const terminal = this.attachTerminal(info, { ifDetached: step === 'attach-guarded', preserveFocus: false });
+    const terminal = this.attachTerminal(info, { ifDetached: step === 'attach-guarded', preserveFocus: false, show });
     if (step === 'attach-guarded') this.opening.add(terminal);
     void this.deps.refresh();
     return terminal;
   }
 
   /** A terminal running `perch attach`, tracked and in the restore set. */
-  attachTerminal(s: Session, o: { ifDetached: boolean; preserveFocus: boolean }): vscode.Terminal {
+  attachTerminal(s: Session, o: { ifDetached: boolean; preserveFocus: boolean; show?: boolean }): vscode.Terminal {
     const terminal = vscode.window.createTerminal({
       name: displayName(s),
       shellPath: this.deps.cli().binary,
@@ -364,14 +421,28 @@ export class Terminals implements vscode.Disposable {
       isTransient: true,
       iconPath: new vscode.ThemeIcon(iconName(s)),
     });
-    this.registry.track(terminal, { id: s.id, mode: 'attach', ifDetached: o.ifDetached });
+    const launch: Recognized = { id: s.id, mode: 'attach', ifDetached: o.ifDetached, label: this.deps.label };
+    this.registry.track(terminal, launch);
     void this.restoreSet.add(s.id);
-    terminal.show(o.preserveFocus);
+    if (o.show !== false) terminal.show(o.preserveFocus);
+    void this.watchAttach(terminal, launch);
     return terminal;
   }
 
   terminalFor(id: string): vscode.Terminal | undefined {
     return this.registry.terminalFor(id);
+  }
+
+  /** What a launch prepared in this activation said about its session. */
+  launched(id: string): Launched | undefined {
+    return this.prepared.get(id);
+  }
+
+  /** This activation's label and those of the terminals it tracks. */
+  labels(): string[] {
+    const labels = new Set([this.deps.label]);
+    for (const { launch } of this.registry.all()) if (launch.label !== undefined) labels.add(launch.label);
+    return [...labels];
   }
 
   private output(message: string): void {
