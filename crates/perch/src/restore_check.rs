@@ -247,12 +247,13 @@ fn text_before_2027(case: &Case) -> Result<bool, String> {
 }
 
 /// Whether `bytes` might hold a REP: a CSI with a `b` anywhere after it.
-/// Ghostty takes bytes that cannot be parameters inside a CSI, so this
-/// stays conservative.
+/// Ghostty takes bytes that cannot be parameters inside a CSI, and ignores
+/// some between ESC and `[`, so this stays conservative.
 fn has_rep(bytes: &[u8]) -> bool {
     let csi = bytes
-        .windows(2)
-        .position(|w| w == b"\x1b[")
+        .iter()
+        .position(|&c| c == 0x1b)
+        .and_then(|i| bytes[i..].iter().position(|&c| c == b'[').map(|j| i + j))
         .or_else(|| bytes.iter().position(|&c| c == 0x9b));
     csi.is_some_and(|i| bytes[i..].contains(&b'b'))
 }
