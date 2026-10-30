@@ -22,9 +22,10 @@ use serde_json::{Value, json};
 const NO_STALL_MS: u64 = 1500;
 
 fn records(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    // Only whole lines: the program may be part way through writing one.
+    let done = text.rfind('\n').map_or("", |i| &text[..i]);
+    done.lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
 }

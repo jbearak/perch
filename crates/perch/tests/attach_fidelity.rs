@@ -112,7 +112,8 @@ fn round(rt: &Rt, id: &str, n: usize, words: &str) {
     std::fs::rename(go.with_extension("tmp"), &go).unwrap();
     wait_for(Duration::from_secs(30), || {
         let text = std::fs::read_to_string(rt.dir(id).join("out")).ok()?;
-        (text.lines().count() >= n).then_some(())
+        // Only whole lines: the program may be part way through one.
+        (text.matches('\n').count() >= n).then_some(())
     })
     .unwrap_or_else(|| panic!("round `{words}` never finished"));
 }

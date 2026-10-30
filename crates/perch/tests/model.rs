@@ -106,7 +106,11 @@ impl Timer {
         let want = self.rounds;
         let line = wait_for(Duration::from_secs(60), || {
             let text = std::fs::read_to_string(&self.out).ok()?;
-            text.lines().nth(want - 1).map(str::to_owned)
+            // Only whole lines: the program may be part way through one.
+            text.split_inclusive('\n')
+                .filter(|l| l.ends_with('\n'))
+                .nth(want - 1)
+                .map(|l| l.trim_end().to_owned())
         })
         .unwrap_or_else(|| panic!("round {want} ({steps}) never finished"));
         serde_json::from_str::<Vec<Value>>(&line).expect("round JSON")

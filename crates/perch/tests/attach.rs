@@ -83,7 +83,8 @@ impl Timer {
         let want = self.rounds;
         wait_for(Duration::from_secs(60), || {
             let text = std::fs::read_to_string(&self.out).ok()?;
-            (text.lines().count() >= want).then_some(())
+            // Only whole lines: the program may be part way through one.
+            (text.matches('\n').count() >= want).then_some(())
         })
         .unwrap_or_else(|| panic!("round `{words}` never finished"));
     }
