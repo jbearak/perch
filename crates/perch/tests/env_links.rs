@@ -187,3 +187,39 @@ fn ssh_auth_sock_follows_the_attached_client() {
     assert_eq!(vars, format!("{} unset", linked.display()));
     drop((r, p));
 }
+
+/// The creator's attach starts the links from the session's environment,
+/// so a value given with `--env` is the one linked, whatever Perch's own
+/// environment holds.
+#[test]
+fn the_creators_attach_links_values_given_with_env() {
+    let rt = Rt::new();
+    let mut a = Pty::spawn(
+        &rt,
+        &[
+            "new",
+            "--env",
+            "SSH_AUTH_SOCK=/nonexistent/agent.sock",
+            "--link-env",
+            "SSH_AUTH_SOCK",
+            "--",
+            "sleep",
+            "100",
+        ],
+        80,
+        24,
+    );
+    let id = wait_for(SECS, || {
+        let v = rt.list(false);
+        let s = v["sessions"].as_array()?.first()?.clone();
+        (s["state"] == "running").then(|| s["id"].as_str().unwrap().to_owned())
+    })
+    .expect("a running session");
+    let linked = wait_for(SECS, || {
+        let l = link(&rt, &id);
+        (l == Path::new("/nonexistent/agent.sock")).then_some(l)
+    });
+    assert!(linked.is_some(), "linked to {:?}", link(&rt, &id));
+    let _ = rt.cmd().args(["kill", &id]).output();
+    let _ = a.wait(SECS);
+}

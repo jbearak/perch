@@ -276,8 +276,13 @@ fn start(o: Options) -> Result<ExitCode, String> {
         links,
     };
     let sock = rt.path.join(&id).join("sock");
-    // The creator's own attach sends the values the links start with.
-    let link_values = env_links::client_values(&cfg.links.keys().cloned().collect::<Vec<_>>());
+    // The creator's own attach sends the values the links start with: those
+    // of the session's environment, including `--env`, not only Perch's own.
+    let link_values: BTreeMap<String, String> = cfg
+        .links
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), v.to_str()?.to_owned())))
+        .collect();
     drop(rt);
     match supervisor::start(cfg)? {
         Outcome::Running { .. } => {
