@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The client side of control mode: connect, `Hello`, requests.
+//! The client side: control mode (connect, `Hello`, requests) here, and
+//! `perch attach`'s relay in [`attach`].
+
+pub mod attach;
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
