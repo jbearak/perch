@@ -499,6 +499,13 @@ pub fn set_nonblocking(fd: RawFd, on: bool) -> io::Result<()> {
     }
 }
 
+/// Whether `O_NONBLOCK` is set.
+pub fn is_nonblocking(fd: RawFd) -> io::Result<bool> {
+    // SAFETY: plain fcntl call.
+    let flags = cvt(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
+    Ok(flags & libc::O_NONBLOCK != 0)
+}
+
 /// Whether `fd` is open. Usable after `fork`.
 pub fn fd_is_open(fd: RawFd) -> bool {
     // SAFETY: F_GETFD on any number is harmless.
@@ -661,6 +668,20 @@ pub fn isatty(fd: RawFd) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+/// The name of the terminal on `fd`, such as `/dev/ttys003`.
+pub fn ttyname(fd: RawFd) -> Option<String> {
+    let mut buf = [0 as c_char; 256];
+    // SAFETY: `buf` is valid for its length; on success it holds a
+    // NUL-terminated string.
+    let rc = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: ttyname_r wrote a NUL-terminated string.
+    let name = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
 // ---------------------------------------------------------------------------
 // poll
 
@@ -799,6 +820,7 @@ pub mod sig {
     pub const PIPE: i32 = libc::SIGPIPE;
     pub const USR1: i32 = libc::SIGUSR1;
     pub const QUIT: i32 = libc::SIGQUIT;
+    pub const WINCH: i32 = libc::SIGWINCH;
 }
 
 /// The name of a signal, such as `SIGKILL`.

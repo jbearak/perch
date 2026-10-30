@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The client side of control mode: connect, `Hello`, requests.
+//! The client side: control mode (connect, `Hello`, requests) here, and
+//! `perch attach`'s relay in [`attach`].
+
+pub mod attach;
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -154,7 +157,9 @@ impl Client {
             if left.is_zero() {
                 return Err(ClientError::Timeout);
             }
-            self.stream.set_read_timeout(Some(left))?;
+            // macOS refuses (EINVAL) once the peer has closed; the read
+            // then says so.
+            let _ = self.stream.set_read_timeout(Some(left));
             match self.stream.read(&mut buf) {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
@@ -183,7 +188,8 @@ fn read_frame(
         if left.is_zero() {
             return Err(ClientError::Timeout);
         }
-        stream.set_read_timeout(Some(left))?;
+        // As in `wait_closed`.
+        let _ = stream.set_read_timeout(Some(left));
         match stream.read(&mut buf) {
             Ok(0) => return Err(ClientError::Closed),
             Ok(n) => decoder.push(&buf[..n]),

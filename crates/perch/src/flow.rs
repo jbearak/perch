@@ -223,6 +223,12 @@ impl ClientFlow {
         true
     }
 
+    /// The rest of a frame partly written, which must still go out whole
+    /// whatever happens to the client, so framing is never broken.
+    pub fn started(&self) -> Option<&[u8]> {
+        (self.written > 0).then(|| self.pending()).flatten()
+    }
+
     /// The bytes to write next: the rest of the front frame.
     pub fn pending(&self) -> Option<&[u8]> {
         self.queue.front().map(|q| &q.frame.bytes[self.written..])

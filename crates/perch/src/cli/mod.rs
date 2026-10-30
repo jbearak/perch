@@ -2,6 +2,7 @@
 
 //! The command line.
 
+mod attach;
 mod list;
 mod new;
 mod selfinstall;
@@ -11,9 +12,13 @@ mod version;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: perch new -d [options] -- <command> [args...]
+usage: perch new [options] -- <command> [args...]   (attaches unless -d)
            --id ID  --name NAME  --kind KIND  --owner EXT  --annotate K=V
            --cwd DIR  --env NAME=VALUE  --scrollback LINES (default 1000, at most 10000)
+           -d, --detached  --label LABEL  --detach-key KEY|none  --restore full|screen
+       perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]
+           [--restore full|screen] [--scrollback LINES]
+       perch detach [<session>]
        perch list [--json] [--all]
        perch info <session> [--json]
        perch kill <session> [--force] [--pid]
@@ -29,6 +34,8 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("version") => version::run(rest),
         Some("--version" | "-V") if args.len() == 1 => version::run(&[]),
         Some("new") => new::run(rest),
+        Some("attach") => attach::run(rest),
+        Some("detach") => attach::detach(rest),
         Some("list" | "ls") => list::run(rest),
         Some("info") => session::info(rest),
         Some("kill") => session::kill(rest),

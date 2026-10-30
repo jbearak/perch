@@ -76,6 +76,14 @@ pub enum Event {
     Reply { frame: u64, bytes: Vec<u8> },
     /// A snapshot the supervisor asked for.
     Snapshot { id: u64, tail: Vec<u8> },
+    /// A restore the supervisor asked for. `fallback` when it is the
+    /// partial-model one (past its byte limit); empty `bytes` when the
+    /// model could not build one.
+    Restore {
+        id: u64,
+        fallback: bool,
+        bytes: Vec<u8>,
+    },
 }
 
 /// One live model process.
@@ -278,6 +286,55 @@ impl Model {
         Some(id)
     }
 
+    /// The model's size, which a restarted model starts at.
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// The PTY changed size: the model follows, after the frames already
+    /// queued.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if (cols, rows) == (self.cols, self.rows) {
+            return;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        if let Some(link) = &mut self.link {
+            ToModel::Resize { cols, rows }.encode(&mut link.out);
+        }
+    }
+
+    /// Asks a complete model for a restore for `client`, after every frame
+    /// already queued. The model resizes itself to the client's size.
+    /// `None` if there is no complete model.
+    pub fn request_restore(
+        &mut self,
+        mode: crate::restore::Mode,
+        client: crate::restore::Client,
+        bracketed_paste: bool,
+    ) -> Option<u64> {
+        if self.state != ModelState::Ok {
+            return None;
+        }
+        let link = self.link.as_mut()?;
+        let id = self.next_snapshot;
+        self.next_snapshot += 1;
+        let (cols, rows) = client.size();
+        ToModel::Restore {
+            id,
+            full: mode == crate::restore::Mode::Full,
+            cols,
+            rows,
+            scrollback_rows: client.scrollback_rows,
+            bracketed_paste,
+        }
+        .encode(&mut link.out);
+        link.snapshot = Some((id, Instant::now() + SNAPSHOT_DEADLINE));
+        self.cols = cols;
+        self.rows = rows;
+        Some(id)
+    }
+
     /// Kills the model and carries on without it.
     pub fn fail(&mut self, why: &str) {
         self.drop_link(why, true);
@@ -401,6 +458,26 @@ impl Model {
                     log("the model was not at ground at a snapshot, where the tracker was");
                 }
                 self.events.push(Event::Snapshot { id, tail });
+            }
+            FromModel::Restore {
+                id,
+                at_ground,
+                fallback,
+                bytes,
+                ..
+            } => {
+                let link = self.link.as_mut().expect("a live model sent it");
+                if link.snapshot.is_some_and(|(want, _)| want == id) {
+                    link.snapshot = None;
+                }
+                if !at_ground {
+                    log("the model was not at ground at a restore, where the tracker was");
+                }
+                self.events.push(Event::Restore {
+                    id,
+                    fallback,
+                    bytes,
+                });
             }
         }
     }

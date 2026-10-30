@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `perch new -d`: start a detached session.
+//! `perch new`: start a session, and attach to it unless `-d`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -8,7 +8,10 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use super::attach::{default_label, parse_restore};
 use super::{Args, fail, usage_error};
+use crate::client::attach::{self, DetachKey};
+use crate::proto::RestoreMode;
 use crate::runtime;
 use crate::supervisor::{self, Config, Outcome};
 use crate::sys;
@@ -31,6 +34,9 @@ struct Options {
     env: Vec<(String, String)>,
     scrollback: Option<u32>,
     detached: bool,
+    label: Option<String>,
+    detach_key: Option<Option<DetachKey>>,
+    restore: Option<RestoreMode>,
     command: Vec<String>,
 }
 
@@ -67,21 +73,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.env.push((k, v));
             }
             "--scrollback" => {
-                let v = a.value(flag)?;
-                let n: u64 = v
-                    .parse()
-                    .map_err(|_| format!("--scrollback `{v}` is not a number of lines"))?;
-                o.scrollback =
-                    Some(u32::try_from(n.min(u64::from(MAX_SCROLLBACK))).expect("clamped"));
+                o.scrollback = Some(super::attach::parse_scrollback(a.value(flag)?)?);
             }
-            // Attach settings: used when `perch new` attaches, which arrives
-            // with attach support. Checked now so a script fails early.
-            "--label" => drop(a.value(flag)?),
-            "--detach-key" => drop(non_empty(flag, a.value(flag)?)?),
-            "--restore" => match a.value(flag)? {
-                "full" | "screen" => {}
-                v => return Err(format!("--restore `{v}`: full or screen")),
-            },
+            // How it attaches, and re-attaches after a takeover.
+            "--label" => o.label = Some(a.value(flag)?.to_owned()),
+            "--detach-key" => o.detach_key = Some(DetachKey::parse(a.value(flag)?)?),
+            "--restore" => o.restore = Some(parse_restore(a.value(flag)?)?),
             "--link-env" => return Err("--link-env is not supported by this version yet".into()),
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             _ => {
@@ -93,7 +90,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
     }
     if o.command.is_empty() {
-        return Err("missing command: perch new -d [options] -- <command> [args...]".into());
+        return Err("missing command: perch new [options] -- <command> [args...]".into());
     }
     Ok(o)
 }
@@ -155,9 +152,6 @@ pub(super) fn run(args: &[String]) -> ExitCode {
         Ok(o) => o,
         Err(e) => return usage_error(&e),
     };
-    if !o.detached {
-        return fail("attaching is not supported by this version yet; use `perch new -d`");
-    }
     match start(o) {
         Ok(code) => code,
         Err(e) => fail(&e),
@@ -233,6 +227,7 @@ fn start(o: Options) -> Result<ExitCode, String> {
             .map_or_else(|| command[0].clone(), |n| n.to_string_lossy().into_owned())
     });
     let (size, termios) = creator_terminal().unwrap_or((DEFAULT_SIZE, None));
+    let scrollback = o.scrollback.unwrap_or(DEFAULT_SCROLLBACK);
     let cfg = Config {
         runtime: rt.path.clone(),
         id: id.clone(),
@@ -246,13 +241,33 @@ fn start(o: Options) -> Result<ExitCode, String> {
         umask: sys::current_umask(),
         size,
         termios,
-        scrollback: o.scrollback.unwrap_or(DEFAULT_SCROLLBACK),
+        scrollback,
+        attach: !o.detached,
     };
+    let sock = rt.path.join(&id).join("sock");
     drop(rt);
     match supervisor::start(cfg)? {
         Outcome::Running { .. } => {
             println!("{id}");
             Ok(ExitCode::SUCCESS)
+        }
+        Outcome::Ready => {
+            // Test hook: a creator that dies before it attaches.
+            #[cfg(feature = "test-hooks")]
+            if std::env::var_os("PERCH_TEST_NO_ATTACH").is_some() {
+                println!("{id}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let opts = attach::Options {
+                sock,
+                label: o.label.unwrap_or_else(default_label),
+                restore: RestoreMode::None,
+                reattach: o.restore.unwrap_or(RestoreMode::Screen),
+                scrollback,
+                if_detached: false,
+                detach_key: o.detach_key.unwrap_or(Some(DetachKey::DEFAULT)),
+            };
+            Ok(ExitCode::from(attach::run(&opts)))
         }
         Outcome::StartFailed { message, exit_code } => {
             eprintln!("perch: {message}");

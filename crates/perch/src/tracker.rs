@@ -187,6 +187,20 @@ impl Tracker {
         events
     }
 
+    /// Feeds bytes until the tracker is next at ground, and returns how
+    /// many it took and what they held. Used to find exactly where a long
+    /// sequence ends.
+    pub fn feed_to_ground(&mut self, bytes: &[u8]) -> (usize, Vec<Event>) {
+        let mut events = Vec::new();
+        for (i, &b) in bytes.iter().enumerate() {
+            events.extend(self.feed(&[b]));
+            if self.at_ground() {
+                return (i + 1, events);
+            }
+        }
+        (bytes.len(), events)
+    }
+
     /// Whether the parser and its UTF-8 decoder are both between sequences.
     pub fn at_ground(&self) -> bool {
         self.state == State::Ground && self.utf8.state == UTF8_ACCEPT

@@ -9,8 +9,9 @@
 //! while no client is attached (DSR 5, DA1 and DA2 itself, DSR 6 from the
 //! model), answers control requests, keeps its directory published, and
 //! ends the session, leaving `tail.txt` when the program exits detached.
-//! Attaching comes later.
+//! One client at a time attaches ([`attach`]); a new attach takes over.
 
+mod attach;
 pub(crate) mod log;
 mod program;
 
@@ -55,7 +56,10 @@ const KILL_FINAL: Duration = Duration::from_secs(2);
 const MAX_CONN_BACKLOG: usize = 4 << 20;
 
 /// Operations this supervisor supports, announced in `Welcome`.
-pub const CAPABILITIES: &[&str] = &["info", "kill", "rename", "annotate", "detach"];
+pub const CAPABILITIES: &[&str] = &["info", "kill", "rename", "annotate", "detach", "attach"];
+/// How long the supervisor of an attaching `perch new` waits for the
+/// creator's attach before giving up without starting the program.
+pub const CREATOR_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The degraded marker for a recreated directory.
 pub const DIRECTORY_RECREATED: &str = "directory-recreated";
@@ -78,11 +82,15 @@ pub struct Config {
     /// The creator's terminal attributes, if it had a terminal.
     pub termios: Option<sys::Termios>,
     pub scrollback: u32,
+    /// The creator attaches: the program starts at its attach.
+    pub attach: bool,
 }
 
-/// What `perch new -d` learns from the supervisor.
+/// What `perch new` learns from the supervisor.
 #[derive(Debug)]
 pub enum Outcome {
+    /// The socket is listening and waits for the creator's attach.
+    Ready,
     /// The program started.
     Running { pid: i32 },
     /// The program could not start; the session is gone.
@@ -92,6 +100,7 @@ pub enum Outcome {
 /// Starts a supervisor for `cfg` and waits until its socket is listening
 /// and the program has started or failed to.
 pub fn start(cfg: Config) -> Result<Outcome, String> {
+    let attach = cfg.attach;
     let (ready_r, ready_w) = sys::pipe().map_err(|e| format!("pipe: {e}"))?;
     // SAFETY: the CLI is single-threaded here.
     match unsafe { sys::fork() }.map_err(|e| format!("fork: {e}"))? {
@@ -112,12 +121,12 @@ pub fn start(cfg: Config) -> Result<Outcome, String> {
         sys::Fork::Parent(pid) => {
             drop(ready_w);
             let _ = sys::waitpid(pid, false);
-            read_readiness(ready_r)
+            read_readiness(ready_r, attach)
         }
     }
 }
 
-fn read_readiness(fd: OwnedFd) -> Result<Outcome, String> {
+fn read_readiness(fd: OwnedFd, attach: bool) -> Result<Outcome, String> {
     let mut text = String::new();
     let _ = std::fs::File::from(fd).read_to_string(&mut text);
     let mut ready = false;
@@ -147,6 +156,9 @@ fn read_readiness(fd: OwnedFd) -> Result<Outcome, String> {
             Some("error") => return Err(v["message"].as_str().unwrap_or("unknown error").into()),
             _ => {}
         }
+    }
+    if ready && attach {
+        return Ok(Outcome::Ready);
     }
     Err(if ready {
         "the supervisor stopped before the program started; see supervisor.log".into()
@@ -205,6 +217,13 @@ fn run(cfg: Config, ready_w: OwnedFd) -> i32 {
 enum Phase {
     AwaitHello,
     Control,
+    /// An attach `Hello` was welcomed; the `Attach` frame is due.
+    AwaitAttach,
+    /// The live client (held in [`Supervisor::client`]).
+    Attached,
+    /// Detached or exited: what it sends is discarded, and the connection
+    /// closes once its last frames are written.
+    Leaving,
 }
 
 struct Conn {
@@ -212,6 +231,9 @@ struct Conn {
     decoder: Decoder,
     out: Vec<u8>,
     phase: Phase,
+    /// The label from `Hello`.
+    label: String,
+    /// For `Hello`, then for `Attach`.
     hello_deadline: Instant,
     /// Close once `out` is flushed.
     closing: bool,
@@ -277,6 +299,18 @@ struct Supervisor {
     epoch: Instant,
     /// The session is ending with a tombstone, waiting for the tail.
     ending: Option<Ending>,
+    /// The attached client.
+    client: Option<attach::Client>,
+    last_input: Option<i64>,
+    /// The program could not start for an attached creator: the exit code.
+    start_failure: Option<u8>,
+    /// An attaching `perch new`'s supervisor gives up at this time if the
+    /// creator has not attached.
+    creator_deadline: Option<Instant>,
+    attach_mode: bool,
+    /// Turns of the poll loop, for tests that check it is idle.
+    #[cfg(feature = "test-hooks")]
+    loops: u64,
 }
 
 /// A tombstone waiting for the model's snapshot of the screen.
@@ -465,6 +499,13 @@ impl Supervisor {
             master_write_failed: false,
             epoch: now,
             ending: None,
+            client: None,
+            last_input: None,
+            start_failure: None,
+            creator_deadline: None,
+            #[cfg(feature = "test-hooks")]
+            loops: 0,
+            attach_mode: cfg.attach,
         })
     }
 
@@ -474,46 +515,59 @@ impl Supervisor {
         }
     }
 
-    fn run(&mut self, mut ready: Ready) -> i32 {
-        // The program is forked after readiness (`-d`).
+    /// Forks the program on the PTY.
+    fn spawn_program(&mut self) -> Result<(), String> {
         let plan = self.plan.take().expect("plan");
         let slave = self.slave.take().expect("slave");
-        match program::spawn(&plan, &slave) {
-            Ok((pid, pipe)) => {
-                let _ = sys::set_nonblocking(pipe.as_raw_fd(), true);
-                self.program = Some(pid);
-                self.meta.pid = Some(pid);
-                self.meta.pid_start = procinfo::start_time(pid);
-                self.start_pipe = Some(pipe);
-            }
-            Err(e) => {
-                let msg = format!("cannot fork the program: {e}");
-                log(&msg);
-                let delivered =
-                    ready.send(&json!({ "event": "start_failed", "message": msg, "exitCode": 1 }));
-                return self.end_start_failed(msg, delivered);
-            }
+        let (pid, pipe) =
+            program::spawn(&plan, &slave).map_err(|e| format!("cannot fork the program: {e}"))?;
+        let _ = sys::set_nonblocking(pipe.as_raw_fd(), true);
+        self.program = Some(pid);
+        self.meta.pid = Some(pid);
+        self.meta.pid_start = procinfo::start_time(pid);
+        self.start_pipe = Some(pipe);
+        Ok(())
+    }
+
+    fn run(&mut self, mut ready: Ready) -> i32 {
+        if self.attach_mode {
+            // The program is forked at the creator's attach.
+            ready.close();
+            self.creator_deadline = Some(Instant::now() + clock::scaled(CREATOR_DEADLINE));
+        } else if let Err(msg) = self.spawn_program() {
+            // The program is forked after readiness (`-d`).
+            log(&msg);
+            let delivered =
+                ready.send(&json!({ "event": "start_failed", "message": msg, "exitCode": 1 }));
+            return self.end_start_failed(msg, delivered);
         }
-        drop(slave);
-        drop(plan);
         self.model.start(false);
         self.apply_model_state();
 
         loop {
+            #[cfg(feature = "test-hooks")]
+            {
+                self.loops += 1;
+            }
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
             let master_write = self.input.pending().is_some() && !self.master_write_failed;
+            let master_read = self.master_readable && self.read_budget() > 0;
             let master_idx = match &self.master {
-                Some(m) if self.master_readable || master_write => {
-                    fds.push(PollFd::new(
-                        m.as_raw_fd(),
-                        self.master_readable,
-                        master_write,
-                    ));
+                Some(m) if master_read || master_write => {
+                    fds.push(PollFd::new(m.as_raw_fd(), master_read, master_write));
                     Some(fds.len() - 1)
                 }
                 _ => None,
             };
+            let client_idx = self.client.as_ref().map(|c| {
+                fds.push(PollFd::new(
+                    c.conn.stream.as_raw_fd(),
+                    self.client_wants_read(),
+                    self.client_wants_write(),
+                ));
+                fds.len() - 1
+            });
             let model_idx = self.model.poll_fd().map(|(fd, write)| {
                 fds.push(PollFd::new(fd, true, write));
                 fds.len() - 1
@@ -524,7 +578,11 @@ impl Supervisor {
             });
             let conn_base = fds.len();
             for c in &self.conns {
-                fds.push(PollFd::new(c.stream.as_raw_fd(), !c.eof, !c.out.is_empty()));
+                fds.push(PollFd::new(
+                    c.stream.as_raw_fd(),
+                    !c.eof && !c.closing,
+                    !c.out.is_empty(),
+                ));
             }
             let timeout = self.next_wake().map(|t| {
                 let d = t.saturating_duration_since(Instant::now());
@@ -544,6 +602,7 @@ impl Supervisor {
                 && (fds[i].readable || fds[i].hangup)
                 && let Some(code) = self.handle_start_pipe(&mut ready)
             {
+                self.flush_before_exit();
                 return code;
             }
             if let Some(i) = master_idx
@@ -551,6 +610,11 @@ impl Supervisor {
                 && (fds[i].readable || fds[i].hangup)
             {
                 self.read_master();
+            }
+            if let Some(i) = client_idx
+                && (fds[i].readable || fds[i].hangup)
+            {
+                self.client_readable();
             }
             if let Some(i) = model_idx
                 && (fds[i].readable || fds[i].hangup)
@@ -566,6 +630,10 @@ impl Supervisor {
             self.model.flush();
             self.handle_model_events();
             self.flush_input();
+            let client_writable = client_idx.is_some_and(|i| fds[i].writable);
+            self.client_flush(client_writable);
+            self.handle_model_events();
+            self.model.flush();
             for (k, c) in self.conns.iter_mut().enumerate() {
                 let p = fds[conn_base + k];
                 if p.readable || p.hangup {
@@ -585,7 +653,9 @@ impl Supervisor {
 
             let now = Instant::now();
             for c in &mut self.conns {
-                if c.phase == Phase::AwaitHello && now >= c.hello_deadline {
+                if matches!(c.phase, Phase::AwaitHello | Phase::AwaitAttach)
+                    && now >= c.hello_deadline
+                {
                     c.dead = true;
                 }
             }
@@ -608,6 +678,11 @@ impl Supervisor {
     /// Gives every connection's pending responses (a kill's `ok`) a short
     /// chance to go out before the supervisor exits.
     fn flush_before_exit(&mut self) {
+        if let Some(exit) = self.meta.exit.clone()
+            && self.client.is_some()
+        {
+            self.exited_to_client(&exit, self.start_failure);
+        }
         for c in &mut self.conns {
             if !c.out.is_empty() && !c.dead {
                 let _ = c.stream.set_nonblocking(false);
@@ -629,9 +704,15 @@ impl Supervisor {
             t = t.min(d);
         }
         for c in &self.conns {
-            if c.phase == Phase::AwaitHello {
+            if matches!(c.phase, Phase::AwaitHello | Phase::AwaitAttach) {
                 t = t.min(c.hello_deadline);
             }
+        }
+        if let Some(d) = self.client_deadline() {
+            t = t.min(d);
+        }
+        if let Some(d) = self.creator_deadline {
+            t = t.min(d);
         }
         if let Some(k) = &self.killing {
             t = t.min(k.next_scan);
@@ -702,11 +783,16 @@ impl Supervisor {
                 if let Some(pid) = self.program {
                     let _ = sys::waitpid(pid, false);
                 }
-                let delivered = ready.send(&json!({
+                let mut delivered = ready.send(&json!({
                     "event": "start_failed",
                     "message": msg,
                     "exitCode": err.exit_code(),
                 }));
+                // An attached creator hears it in `exited`.
+                if self.client.is_some() {
+                    self.start_failed_attached(msg.clone(), err.exit_code());
+                    delivered = true;
+                }
                 // The pipe closes only after cleanup, so `perch new`
                 // returns once nothing is left behind.
                 let code = self.end_start_failed(msg, delivered);
@@ -731,29 +817,38 @@ impl Supervisor {
         1
     }
 
-    /// Reads the program's output, up to `rounds` reads.
-    fn read_master_rounds(&mut self, rounds: usize) {
-        let Some(m) = &self.master else { return };
+    /// Reads the program's output, up to `rounds` reads and as much as the
+    /// client's flow allows. Returns whether the PTY had nothing more.
+    fn read_master_rounds(&mut self, rounds: usize) -> bool {
+        let Some(m) = &self.master else { return true };
+        if !self.master_readable {
+            return true;
+        }
         let fd = m.as_raw_fd();
         let mut buf = vec![0u8; 64 * 1024];
         for _ in 0..rounds {
-            match sys::read(fd, &mut buf) {
+            let budget = self.read_budget().min(buf.len());
+            if budget == 0 {
+                return false;
+            }
+            match sys::read(fd, &mut buf[..budget]) {
                 Ok(0) => {
                     self.master_readable = false;
-                    return;
+                    return true;
                 }
                 Ok(n) => {
                     self.last_output = Some(clock::unix_now());
                     self.output(&buf[..n]);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
                 // EIO: every slave descriptor is closed.
                 Err(_) => {
                     self.master_readable = false;
-                    return;
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn read_master(&mut self) {
@@ -767,14 +862,26 @@ impl Supervisor {
             self.apply_model_state();
         }
         self.model.check_backlog();
+        let base = self.feeder.tracker().fed();
+        // Where the client's frames are cut: after each query it owns.
+        let mut cuts = Vec::new();
+        let mut from = None;
         for step in self.feeder.push(chunk) {
             match step {
                 Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
-                Step::Query { id, kind } => {
+                Step::Query { id, kind, end } => {
                     // The model may have failed on this read already.
                     self.handle_model_events();
+                    if self.queries.client_owns() {
+                        cuts.push((end, id));
+                    }
                     let events = self.queries.query(id, kind, self.elapsed());
                     self.apply_queries(events);
+                }
+                Step::LongEnd { at } => {
+                    if let Some(i) = self.long_sequence_ended(at, base, chunk.len()) {
+                        from = Some(i);
+                    }
                 }
                 Step::Reset => {
                     if self.model.reset_seen() {
@@ -792,6 +899,16 @@ impl Supervisor {
                     }
                 }
             }
+        }
+        match from {
+            Some(i) => {
+                let cuts: Vec<_> = cuts
+                    .into_iter()
+                    .filter(|&(e, _)| e > base + i as u64)
+                    .collect();
+                self.client_output(&chunk[i..], base + i as u64, &cuts);
+            }
+            None => self.client_output(chunk, base, &cuts),
         }
         if self.model.restart_if_due(self.feeder.at_ground_point()) {
             self.apply_model_state();
@@ -831,7 +948,15 @@ impl Supervisor {
             }
             for e in events {
                 match e {
-                    model_mod::Event::Failed => self.apply_model_state(),
+                    model_mod::Event::Failed => {
+                        self.apply_model_state();
+                        self.model_failed_restore();
+                    }
+                    model_mod::Event::Restore {
+                        id,
+                        fallback,
+                        bytes,
+                    } => self.model_restore(Some(id), fallback, bytes),
                     model_mod::Event::Reply { frame, bytes } => {
                         let events =
                             self.queries
@@ -886,6 +1011,7 @@ impl Supervisor {
                         decoder: Decoder::new(),
                         out: Vec::new(),
                         phase: Phase::AwaitHello,
+                        label: String::new(),
                         hello_deadline: Instant::now() + clock::scaled(HELLO_DEADLINE),
                         closing: false,
                         eof: false,
@@ -904,8 +1030,9 @@ impl Supervisor {
 
     fn process_conns(&mut self) {
         let mut requests = Vec::new();
+        let mut attaches = Vec::new();
         for (i, c) in self.conns.iter_mut().enumerate() {
-            while !c.closing && !c.dead {
+            while !c.closing && !c.dead && c.phase != Phase::Attached {
                 match c.decoder.next_frame() {
                     Ok(None) => break,
                     Ok(Some(f)) => match c.phase {
@@ -918,6 +1045,28 @@ impl Supervisor {
                                 format!("frame type {} is not valid in control mode", f.kind),
                             ),
                         ),
+                        Phase::AwaitAttach if f.kind == kind::ATTACH => {
+                            match serde_json::from_slice::<proto::Attach>(&f.payload) {
+                                Ok(a) => {
+                                    // Taken out below; frames after it are
+                                    // the client's.
+                                    c.phase = Phase::Attached;
+                                    attaches.push((i, a));
+                                }
+                                Err(e) => send_error(
+                                    c,
+                                    ErrorBody::new("bad_attach", format!("unreadable Attach: {e}")),
+                                ),
+                            }
+                        }
+                        Phase::AwaitAttach => send_error(
+                            c,
+                            ErrorBody::new(
+                                "unexpected_frame",
+                                format!("expected Attach, got frame type {}", f.kind),
+                            ),
+                        ),
+                        Phase::Attached | Phase::Leaving => {}
                     },
                     Err(e) => send_error(c, ErrorBody::new("bad_frame", e.to_string())),
                 }
@@ -937,6 +1086,14 @@ impl Supervisor {
             c.out.extend(frame);
             if c.out.len() > MAX_CONN_BACKLOG {
                 c.dead = true;
+            }
+        }
+        for (i, a) in attaches.into_iter().rev() {
+            let conn = self.conns.remove(i);
+            self.attach(conn, a);
+            // What the client sent after `Attach` came in the same reads.
+            if self.client.is_some() {
+                self.client_readable();
             }
         }
     }
@@ -973,7 +1130,14 @@ impl Supervisor {
                 _ => proto::error_response(&id, "bad_request", "`name` must be a non-empty string"),
             },
             "annotate" => self.annotate(&id, &req),
-            "detach" => proto::ok_response(&id, json!({ "detached": false })),
+            "detach" => {
+                let attached = self.client.is_some();
+                if attached {
+                    log("detach requested");
+                    self.client_leaves(Some("detach"));
+                }
+                proto::ok_response(&id, json!({ "detached": attached }))
+            }
             #[cfg(feature = "test-hooks")]
             "test-model" => self.test_model(&id, &req),
             other => proto::error_response(&id, "unsupported", &format!("unknown op `{other}`")),
@@ -1047,6 +1211,7 @@ impl Supervisor {
                 "generation": self.model.generation(),
                 "state": model_state_name(self.model.state()),
                 "pwd": self.model.pwd().map(|p| String::from_utf8_lossy(p).into_owned()),
+                "loops": self.loops,
             }),
         )
     }
@@ -1078,13 +1243,13 @@ impl Supervisor {
             "state": self.meta.state,
             "exit": self.meta.exit,
             "pid": self.meta.pid,
-            "attached": false,
-            "clientLabel": null,
-            "clientPid": null,
+            "attached": self.client.is_some(),
+            "clientLabel": self.client.as_ref().map(|c| c.label.clone()),
+            "clientPid": self.client.as_ref().and_then(|c| c.pid),
             "rows": self.size.rows,
             "cols": self.size.cols,
             "lastOutputAt": self.last_output.map(clock::rfc3339),
-            "lastInputAt": null,
+            "lastInputAt": self.last_input.map(clock::rfc3339),
             "degraded": self.meta.degraded,
             "model": model_state_name(self.model.state()),
             "memoryBytes": (!scope.is_empty()).then_some(memory),
@@ -1158,13 +1323,36 @@ impl Supervisor {
         if self.ending.is_some() {
             return self.finish_ending();
         }
+        if let Some(code) = self.start_failure {
+            self.remove_dir();
+            return Some(i32::from(code));
+        }
+        if self.plan.is_some() && self.killing.is_none() {
+            // Waiting for the creator's attach.
+            if self.creator_deadline.is_some_and(|d| Instant::now() >= d) {
+                log("the creator did not attach within 30 seconds; not starting the program");
+                self.remove_dir();
+                return Some(1);
+            }
+            return None;
+        }
         if self.start_pipe.is_some() && self.killing.is_none() {
             return None;
         }
         let Some(k) = &self.killing else {
+            let status = self.program_status?;
+            if self.client.is_some() {
+                // Exit while attached: the output still in the PTY goes to
+                // the client, then `exited`, and nothing is left behind.
+                if !self.read_master_rounds(64) || !self.client_drained() {
+                    return None;
+                }
+                self.meta.exit = Some(Exit::from_status(status));
+                self.remove_dir();
+                return Some(0);
+            }
             // Exit while detached: a tombstone, after the output still in
             // the PTY has reached the model.
-            let status = self.program_status?;
             self.read_master_rounds(64);
             self.meta.exit = Some(Exit::from_status(status));
             return self.begin_ending();
@@ -1176,7 +1364,9 @@ impl Supervisor {
         let members = self.scope();
         let k = self.killing.as_mut().expect("killing");
         k.next_scan = now + KILL_SCAN;
-        let done = members.is_empty() && self.program_status.is_some();
+        // A program never started (the creator had not attached) leaves
+        // nothing to wait for.
+        let done = members.is_empty() && (self.program_status.is_some() || self.program.is_none());
         let gave_up = k.give_up.is_some_and(|t| now >= t);
         if !done && !gave_up {
             if !k.sigkill_sent && now >= k.deadline {
@@ -1196,7 +1386,12 @@ impl Supervisor {
         let origin = k.origin;
         self.meta.exit = self.program_status.map(Exit::from_status);
         match origin {
-            // The requester knows the session ended: leave nothing behind.
+            // The requester, or the attached client, knows the session
+            // ended: leave nothing behind.
+            _ if self.client.is_some() => {
+                self.remove_dir();
+                Some(0)
+            }
             KillOrigin::Request => {
                 self.remove_dir();
                 Some(0)
@@ -1463,20 +1658,22 @@ fn handle_hello(c: &mut Conn, f: &proto::Frame) {
         e.client = Some(theirs);
         return send_error(c, e);
     };
+    let welcome = Welcome {
+        protocol: version,
+        perch: crate::VERSION.into(),
+        capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    c.label = hello.label;
     match hello.mode.as_str() {
         "control" => {
             c.phase = Phase::Control;
-            let welcome = Welcome {
-                protocol: version,
-                perch: crate::VERSION.into(),
-                capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
-            };
             c.out.extend(proto::encode_json(kind::WELCOME, &welcome));
         }
-        "attach" => send_error(
-            c,
-            ErrorBody::new("unsupported", "this supervisor does not support attach"),
-        ),
+        "attach" => {
+            c.phase = Phase::AwaitAttach;
+            c.hello_deadline = Instant::now() + clock::scaled(HELLO_DEADLINE);
+            c.out.extend(proto::encode_json(kind::WELCOME, &welcome));
+        }
         other => send_error(
             c,
             ErrorBody::new("bad_hello", format!("unknown mode `{other}`")),

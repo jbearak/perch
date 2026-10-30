@@ -15,19 +15,20 @@ export const repo = resolve(here, '../..');
 export const fixturesDir = join(here, 'fixtures');
 
 /// Command-line options: `--model-dump PATH`, `--only NAME` (repeatable),
-/// `--xterm 5.3|5.5|6.0` (repeatable), `--keep DIR`.
+/// `--xterm 5.3|5.5|6.0` (repeatable), `--keep DIR`, `--recorded DIR`.
 export function options(argv) {
-  const o = { only: [], xterm: [], modelDump: process.env.PERCH_MODEL_DUMP, keep: null };
+  const o = { only: [], xterm: [], modelDump: process.env.PERCH_MODEL_DUMP, keep: null, recorded: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--model-dump') o.modelDump = argv[++i];
     else if (a === '--only') o.only.push(argv[++i]);
     else if (a === '--xterm') o.xterm.push(argv[++i]);
     else if (a === '--keep') o.keep = argv[++i];
+    else if (a === '--recorded') o.recorded = argv[++i];
     else throw new Error(`unknown option ${a}`);
   }
   o.modelDump ??= join(repo, 'target/debug/model-dump');
-  if (!existsSync(o.modelDump)) {
+  if (!o.recorded && !existsSync(o.modelDump)) {
     throw new Error(`${o.modelDump} is missing: run \`cargo build -p perch-testprogs\` first`);
   }
   return o;

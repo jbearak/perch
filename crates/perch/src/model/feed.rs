@@ -32,8 +32,10 @@ pub const MAX_FRAME: usize = 1 << 20;
 pub enum Step {
     /// Send these bytes to the model as frame `n`.
     Frame { n: u64, bytes: Vec<u8> },
-    /// A query ends the frame just sent; [`QueryId`] is its number.
-    Query { id: QueryId, kind: Kind },
+    /// A query ends the frame just sent; [`QueryId`] is its number. `end`
+    /// is the output offset just past its last byte, counted from the
+    /// start of the stream, where a client's frame is cut too.
+    Query { id: QueryId, kind: Kind, end: u64 },
     /// RIS ends the frame just sent. A partial model is complete again.
     Reset,
     /// A long string sequence of a kind Perch never restores: the model
@@ -42,6 +44,10 @@ pub enum Step {
     /// A long sequence that can change the screen: the model gets it in
     /// pieces and is partial until the next RIS.
     Partial,
+    /// The long sequence being dropped or fed through ended. Output from
+    /// offset `at` on is no longer part of it: a client that attached in
+    /// its middle gets output again from there.
+    LongEnd { at: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,8 +159,21 @@ impl Feeder {
     /// Output that cannot take a held sequence more than one byte past the
     /// limit, outside a string being dropped.
     fn push_piece(&mut self, piece: &[u8], steps: &mut Vec<Step>) {
-        let start = self.tracker.fed();
-        let events = self.tracker.feed(piece);
+        let mut events = Vec::new();
+        let mut rest = piece;
+        if self.long == Some(Long::FeedThrough) {
+            // Where the sequence fed through ends, exactly.
+            let (n, ev) = self.tracker.feed_to_ground(piece);
+            events = ev;
+            rest = &piece[n..];
+            if self.tracker.at_ground() {
+                self.long = None;
+                steps.push(Step::LongEnd {
+                    at: self.tracker.fed(),
+                });
+            }
+        }
+        events.extend(self.tracker.feed(rest));
         self.held.extend_from_slice(piece);
         for e in events {
             match e.seen {
@@ -163,6 +182,7 @@ impl Feeder {
                     steps.push(Step::Query {
                         id: QueryId(n),
                         kind,
+                        end: e.end,
                     });
                 }
                 Seen::Reset => {
@@ -171,9 +191,6 @@ impl Feeder {
                 }
                 Seen::Paste(_) => {}
             }
-        }
-        if self.long == Some(Long::FeedThrough) && self.tracker.ground_offset() > start {
-            self.long = None;
         }
         let limit = if self.long == Some(Long::FeedThrough) {
             self.tracker.fed()
@@ -218,8 +235,13 @@ impl Feeder {
             if self.tracker.at_ground() && !c1 {
                 debug_assert!(events.is_empty());
                 self.sent = self.tracker.fed();
+                steps.push(Step::LongEnd { at: self.sent });
                 return i + 1;
             }
+            // The byte that ended it starts or does something else.
+            steps.push(Step::LongEnd {
+                at: self.tracker.fed() - 1,
+            });
             self.sent = self.tracker.fed() - 1;
             self.held.push(b);
             self.c1_first = c1;
@@ -231,6 +253,7 @@ impl Feeder {
                         steps.push(Step::Query {
                             id: QueryId(n),
                             kind,
+                            end: e.end,
                         });
                     }
                 }
@@ -299,6 +322,7 @@ mod tests {
             for s in f.push(c) {
                 match s {
                     Step::Frame { bytes, .. } => fed.extend(bytes),
+                    Step::LongEnd { .. } => {}
                     s => other.push(s),
                 }
             }
@@ -348,7 +372,8 @@ mod tests {
                 },
                 Step::Query {
                     id: QueryId(1),
-                    kind: Kind::Dsr6
+                    kind: Kind::Dsr6,
+                    end: 5,
                 },
                 Step::Frame {
                     n: 2,
@@ -356,7 +381,8 @@ mod tests {
                 },
                 Step::Query {
                     id: QueryId(2),
-                    kind: Kind::Da1
+                    kind: Kind::Da1,
+                    end: 9,
                 },
                 Step::Frame {
                     n: 3,
@@ -378,7 +404,8 @@ mod tests {
                 },
                 Step::Query {
                     id: QueryId(5),
-                    kind: Kind::Dsr5
+                    kind: Kind::Dsr5,
+                    end: 17,
                 },
             ]
         );
@@ -405,7 +432,8 @@ mod tests {
             steps.last(),
             Some(&Step::Query {
                 id: QueryId(3),
-                kind: Kind::Dsr6
+                kind: Kind::Dsr6,
+                end: (MAX_FRAME * 2 + 14) as u64,
             })
         );
     }
@@ -434,7 +462,8 @@ mod tests {
                 Step::Discarded,
                 Step::Query {
                     id: QueryId(3),
-                    kind: Kind::Dsr6
+                    kind: Kind::Dsr6,
+                    end: 120,
                 }
             ]
         );
@@ -483,6 +512,50 @@ mod tests {
         // A long OSC of another number is fed through too.
         let (_, other) = run(&mut f, &[b"\x1b]2;", &[b't'; 20], b"\x07"]);
         assert_eq!(other, [Step::Partial]);
+    }
+
+    /// Where each long sequence's end is reported: the offset from which
+    /// output is no longer part of it.
+    fn long_ends(f: &mut Feeder, chunks: &[&[u8]]) -> Vec<u64> {
+        let mut ends = Vec::new();
+        for c in chunks {
+            for s in f.push(c) {
+                if let Step::LongEnd { at } = s {
+                    ends.push(at);
+                }
+            }
+        }
+        ends
+    }
+
+    #[test]
+    fn the_end_of_a_long_sequence_is_reported_exactly() {
+        // A dropped string ended by BEL: the BEL is part of it.
+        let mut f = Feeder::with_limit(8);
+        let mut s = b"ab\x1b]52;c;".to_vec();
+        s.extend([b'Q'; 20]);
+        let bel = s.len() as u64 + 1;
+        s.extend(b"\x07after");
+        assert_eq!(long_ends(&mut f, &[&s]), [bel]);
+        // Ended by ST: the ESC starts what follows.
+        let mut f = Feeder::with_limit(8);
+        let mut s = b"\x1b_G".to_vec();
+        s.extend([b'A'; 20]);
+        let esc = s.len() as u64;
+        s.extend(b"\x1b\\after");
+        assert_eq!(long_ends(&mut f, &[&s[..10], &s[10..]]), [esc]);
+        // A CSI fed through, ended by its final byte, with text after it in
+        // the same read and in a later one.
+        let mut f = Feeder::with_limit(8);
+        let mut s = b"x\x1b[".to_vec();
+        s.extend(b"1\n1\n1\n1\n1\n1\n");
+        assert_eq!(long_ends(&mut f, &[&s]), Vec::<u64>::new());
+        let end = s.len() as u64 + 3;
+        assert_eq!(long_ends(&mut f, &[b"11mtext\x1b[2"]), [end]);
+        assert!(!f.in_long_sequence());
+        // A RIS ending it: the sequence ends at the ESC's ground.
+        let mut f = Feeder::with_limit(8);
+        assert_eq!(long_ends(&mut f, &[b"\x1b[1111111111\x1bcz"]), [14]);
     }
 
     #[test]
