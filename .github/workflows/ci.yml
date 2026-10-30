@@ -72,9 +72,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends tmux
           node tests/fidelity/tmux-check.mjs
       - name: test (test-hooks)
+        env:
+          PERCH_E2E_RECORDINGS: ${{ runner.temp }}/e2e
         run: |
           cargo build -p perch-testprogs --features perch/test-hooks
           cargo test --workspace --features perch/test-hooks
+      # Restores a real supervisor sent a client (recorded by the test above)
+      # against the program's output in headless xterm.js.
+      - name: fidelity end to end
+        run: node tests/fidelity/run.mjs --recorded "$RUNNER_TEMP/e2e"
       - name: test (musl)
         run: |
           cargo build -p perch-testprogs --target "$MUSL"
@@ -152,9 +158,15 @@ jobs:
           brew install tmux
           node tests/fidelity/tmux-check.mjs
       - name: test (test-hooks)
+        env:
+          PERCH_E2E_RECORDINGS: ${{ runner.temp }}/e2e
         run: |
           cargo build -p perch-testprogs --features perch/test-hooks
           cargo test --workspace --features perch/test-hooks
+      # Restores a real supervisor sent a client (recorded by the test above)
+      # against the program's output in headless xterm.js.
+      - name: fidelity end to end
+        run: node tests/fidelity/run.mjs --recorded "$RUNNER_TEMP/e2e"
       - name: release build
         run: |
           set -euo pipefail

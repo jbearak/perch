@@ -30,10 +30,20 @@
 // Fixtures may list `known` differences, each with a reason: a difference
 // containing `match` (and, if given, found where `where` says) is reported
 // but does not fail.
+//
+// With `--recorded DIR`, it checks recordings from a real supervisor
+// instead (crates/perch/tests/attach_fidelity.rs): in each subdirectory,
+// what the program wrote before and after a client attached
+// (program-0.bin, program-1.bin) and what that client received (the
+// restore and the held-back bytes in restore.bin, then live.bin). Terminal
+// A gets the program's output, B what the client received, and both are
+// compared as by the xterm oracle, at the restore and after the output
+// that follows.
 
 Object.defineProperty(globalThis, 'navigator', { value: undefined, configurable: true });
 
-import { rmSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'fs';
+import { join } from 'path';
 import { createRequire } from 'module';
 import { fixtures, here, modelDump, options, steps } from './lib.mjs';
 
@@ -457,9 +467,69 @@ async function runFixture(fx, dumped, version, report) {
   await close();
 }
 
+/// One recording from a real supervisor.
+async function runRecorded(dir, rec, version, report) {
+  const make = load(version);
+  const file = (n) => readFileSync(join(dir, n));
+  const fx = fixtures([rec.fixture])[0];
+  const known = fx?.script.known;
+  const name = `${rec.fixture} (${rec.mode}, recorded)`;
+  const [cols, rows] = rec.size;
+  const A = make(cols, rows, rec.scrollback);
+  const B = make(cols, rows, rec.client_scrollback);
+  const fail = (where, list) => {
+    for (const d of list) {
+      const k = (known ?? []).find((k) => d.includes(k.match) && (!k.where || where.includes(k.where)));
+      report.push({ fixture: name, version, where, difference: d, known: k?.reason ?? null });
+    }
+  };
+  await write(A, file('program-0.bin'));
+  await write(B, file('restore.bin'));
+  const sent = () => Math.min(A.buffer.normal.length - A.rows, rec.client_scrollback);
+  const ctx = { mode: rec.mode, history: rec.client_scrollback };
+  let errs = compareXterm(snapshot(A), snapshot(B), { ...ctx, sent: sent() });
+  fail('restore (xterm, recorded)', errs);
+  if (!errs.length) report.push({ fixture: name, version, passed: 'restore matches the program\'s output' });
+  await write(A, file('program-1.bin'));
+  await write(B, file('live.bin'));
+  errs = compareXterm(snapshot(A), snapshot(B), { ...ctx, sent: sent() });
+  fail('restore after (xterm, recorded)', errs);
+  if (!errs.length) report.push({ fixture: name, version, passed: 'live output after it matches' });
+}
+
+async function mainRecorded(opts, versions) {
+  const dirs = readdirSync(opts.recorded)
+    .filter((n) => existsSync(join(opts.recorded, n, 'recording.json')))
+    .sort();
+  if (!dirs.length) throw new Error(`no recordings in ${opts.recorded}`);
+  let failed = 0;
+  const report = [];
+  for (const n of dirs) {
+    const dir = join(opts.recorded, n);
+    const rec = JSON.parse(readFileSync(join(dir, 'recording.json'), 'utf8'));
+    if (opts.only.length && !opts.only.includes(rec.fixture)) continue;
+    for (const version of versions) {
+      const start = report.length;
+      await runRecorded(dir, rec, version, report);
+      const mine = report.slice(start);
+      const bad = mine.filter((r) => r.difference && !r.known);
+      const known = mine.filter((r) => r.difference && r.known);
+      failed += bad.length;
+      console.log(`${bad.length ? 'FAIL' : 'ok  '} ${n} (recorded) xterm ${version}: ${known.length} known differences${bad.length ? `, ${bad.length} failures` : ''}`);
+      for (const r of bad.slice(0, 12)) console.log(`       ${r.where}: ${r.difference.slice(0, 400)}`);
+    }
+  }
+  if (failed) {
+    console.log(`fidelity (recorded): ${failed} failures`);
+    process.exit(1);
+  }
+  console.log(`fidelity (recorded): ok (${dirs.length} recordings)`);
+}
+
 async function main() {
   const opts = options(process.argv.slice(2));
   const versions = opts.xterm.length ? opts.xterm : VERSIONS;
+  if (opts.recorded) return mainRecorded(opts, versions);
   const report = [];
   let failed = 0;
   for (const fx of fixtures(opts.only)) {
