@@ -20,7 +20,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onTerminalProfile:perch.persistentShell"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -47,6 +48,17 @@
         "title": "Refresh",
         "category": "Perch",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "perch.open",
+        "title": "Open",
+        "category": "Perch",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "perch.newShell",
+        "title": "New Persistent Shell",
+        "category": "Perch"
       },
       {
         "command": "perch.kill",
@@ -87,9 +99,19 @@
       ],
       "view/item/context": [
         {
+          "command": "perch.open",
+          "when": "view == perch.sessions && viewItem == perch.session.live",
+          "group": "inline@0"
+        },
+        {
+          "command": "perch.open",
+          "when": "view == perch.sessions && viewItem == perch.session.live",
+          "group": "0_open"
+        },
+        {
           "command": "perch.kill",
           "when": "view == perch.sessions && viewItem == perch.session.live",
-          "group": "inline"
+          "group": "inline@1"
         },
         {
           "command": "perch.kill",
@@ -145,8 +167,44 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Append the directory of Perch's command-line copy to `PATH`, and set `PERCH_BIN`, in every new terminal in the editor, not only Perch's. A `perch` you installed yourself still wins. Run **Perch: Show Command-Line Path** to see the directory."
+        },
+        "perch.restoreTerminals": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Reopen the terminals of this workspace's Perch sessions when the window opens. A session attached in another window is left there."
+        },
+        "perch.shell": {
+          "type": [
+            "string",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "The program the **Persistent shell** profile starts in a session: a path, or an array of a path and its arguments, such as `[\"/bin/zsh\", \"-l\"]`. Empty uses `$SHELL`, with `-l` on macOS to match VS Code's default there."
+        },
+        "perch.linkedEnvironment": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "Environment variables whose values are socket paths, passed to `perch new --link-env`: each session sees a link that Perch re-points at the attached window's socket, so a reconnected session reaches the current window's agent or IPC socket. Changes apply to new sessions."
         }
       }
+    },
+    "terminal": {
+      "profiles": [
+        {
+          "id": "perch.persistentShell",
+          "title": "Persistent shell",
+          "icon": "terminal"
+        }
+      ]
     }
   },
   "scripts": {

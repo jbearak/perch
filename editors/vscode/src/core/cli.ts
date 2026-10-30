@@ -3,7 +3,7 @@
 // Running the perch binary. Each call has a time limit, and a failure
 // carries the command's own message.
 import { execFile } from 'child_process';
-import { parseList, Session } from './sessions';
+import { parseInfo, parseList, Session } from './sessions';
 
 export class PerchError extends Error {
   constructor(
@@ -54,6 +54,31 @@ export class PerchCli {
   async list(): Promise<Session[]> {
     const { stdout } = await runPerch(this.binary, ['list', '--json', '--all'], 10_000);
     return parseList(stdout);
+  }
+
+  /** `perch info <id>`, or undefined if there is no such session. */
+  async info(id: string): Promise<Session | undefined> {
+    try {
+      const { stdout } = await runPerch(this.binary, ['info', id, '--json'], 10_000);
+      return parseInfo(stdout);
+    } catch (err) {
+      if (err instanceof PerchError && /^no session /m.test(err.stderr.replace(/^perch: /m, ''))) return undefined;
+      throw err;
+    }
+  }
+
+  /**
+   * Whether `perch new` takes `--link-env`. The probe has no command, so it
+   * never starts a session: a binary with the flag stops at the missing
+   * command, one without it at the flag.
+   */
+  async supportsLinkEnv(): Promise<boolean> {
+    try {
+      await runPerch(this.binary, ['new', '--link-env', 'PATH'], 10_000);
+      return true;
+    } catch (err) {
+      return !(err instanceof PerchError && /--link-env\b.*not supported/.test(err.stderr));
+    }
   }
 
   /** Kill waits out the 5-second grace period. */

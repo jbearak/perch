@@ -4,6 +4,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { workspaceKey } from '../../core/labels';
 import { activated, bundledBinaryOrSkip, extensionId, perch } from './helpers';
 
 describe('activation', () => {
@@ -18,8 +19,10 @@ describe('activation', () => {
 
   it('labels its client with the workspace key and a window key', async () => {
     const { testing } = await activated();
-    // The test window has no workspace.
-    assert.match(testing.label, /^none#[0-9a-f]{8}$/);
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    assert.ok(folder, 'the tests run in a workspace');
+    assert.strictEqual(testing.label.split('#')[0], workspaceKey(folder.uri.toString()));
+    assert.match(testing.label, /^[0-9a-f]{16}#[0-9a-f]{8}$/);
   });
 
   it('makes the bundled binary executable and runs it', async function () {
