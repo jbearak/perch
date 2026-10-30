@@ -119,6 +119,34 @@ jobs:
           path: target/${{ env.MUSL }}/release/perch
           if-no-files-found: error
 
+  # M4: the release binary on real Linux hosts. A privileged container with
+  # systemd, logind and sshd (SSH drop, logind, agent forwarding, tmpfiles,
+  # a deleted binary), then rockylinux:8 and alpine:3. It fails, never
+  # skips, if systemd or logind cannot run.
+  linux-hosts:
+    name: Linux hosts ${{ matrix.arch }}
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: perch-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/perch
+      - run: chmod +x "$RUNNER_TEMP/perch/perch"
+      - name: host checks
+        run: tests/linux/host-checks.sh "$RUNNER_TEMP/perch/perch"
+      - name: old and minimal userlands
+        run: tests/linux/userland-checks.sh "$RUNNER_TEMP/perch/perch"
+
   macos:
     name: macOS arm64
     runs-on: macos-15
