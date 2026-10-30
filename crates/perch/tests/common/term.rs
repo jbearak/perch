@@ -10,6 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,8 @@ pub struct Pty {
     slave: OwnedFd,
     child: Child,
     output: Arc<Mutex<Vec<u8>>>,
+    /// While set, nothing reads the terminal: `perch` blocks writing to it.
+    paused: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -77,9 +80,15 @@ impl Pty {
         let output = Arc::new(Mutex::new(Vec::new()));
         let mut r = master.try_clone().expect("dup the master");
         let out = Arc::clone(&output);
+        let paused = Arc::new(AtomicBool::new(false));
+        let p = Arc::clone(&paused);
         let reader = std::thread::spawn(move || {
             let mut buf = [0u8; 65536];
             loop {
+                if p.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
                 match r.read(&mut buf) {
                     Ok(0) | Err(_) => return,
                     Ok(n) => out.lock().unwrap().extend_from_slice(&buf[..n]),
@@ -91,8 +100,15 @@ impl Pty {
             slave,
             child,
             output,
+            paused,
             reader: Some(reader),
         }
+    }
+
+    /// Stops reading the terminal, or starts again. A read already waiting
+    /// takes one more chunk first.
+    pub fn pause(&self, on: bool) {
+        self.paused.store(on, Ordering::SeqCst);
     }
 
     /// Types `bytes` into the terminal.
@@ -229,6 +245,14 @@ impl Recorder {
         self.send(kind::INPUT, bytes);
     }
 
+    /// Input that may find the connection already closed: a terminal's
+    /// late answer after the supervisor let it go.
+    pub fn late_input(&mut self, bytes: &[u8]) {
+        let _ = self
+            .stream
+            .write_all(&proto::encode(kind::INPUT, bytes).unwrap());
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.send(
             kind::RESIZE,
@@ -297,6 +321,24 @@ impl Recorder {
             String::from_utf8_lossy(needle),
             String::from_utf8_lossy(&self.output)
         );
+    }
+
+    /// Reads at most `max` bytes from the socket, waiting up to `timeout`,
+    /// and records the frames they complete: a client that reads slowly.
+    pub fn read_some(&mut self, max: usize, timeout: Duration) {
+        let mut buf = vec![0u8; max];
+        let _ = self.stream.set_read_timeout(Some(timeout));
+        match self.stream.read(&mut buf) {
+            Ok(0) => self.closed = true,
+            Ok(n) => self.decoder.push(&buf[..n]),
+            Err(_) => {}
+        }
+        while let Some(f) = self.decoder.next_frame().expect("valid frames") {
+            match f.kind {
+                kind::OUTPUT => self.output.extend_from_slice(&f.payload),
+                _ => self.frames.push(f),
+            }
+        }
     }
 
     /// Records whatever arrives within `quiet` of the last frame.

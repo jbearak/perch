@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+pub mod session;
 pub mod term;
 
 use std::ffi::OsStr;

@@ -2,11 +2,13 @@
 
 //! Perch: persistent terminal sessions.
 
+pub mod base64;
 pub mod cli;
 pub mod client;
 pub mod clock;
 #[cfg(feature = "test-hooks")]
 pub mod differential;
+pub mod env_links;
 pub mod flow;
 pub mod input;
 pub mod meta;

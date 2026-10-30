@@ -16,19 +16,23 @@ use crate::sys::{self, Lock};
 use crate::{clock, procinfo, supervisor};
 
 /// The label control clients send in `Hello`.
-const LABEL: &str = "perch-cli";
+pub(super) const LABEL: &str = "perch-cli";
 /// How long other control requests may take.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Opens the runtime directory and finds a session.
-fn find(query: &str) -> Result<(RuntimeDir, Entry), String> {
+pub(super) fn find(query: &str) -> Result<(RuntimeDir, Entry), String> {
     let rt = runtime::open_default()?;
     let entries = runtime::scan(&rt, Housekeeping::MarkLost);
     let entry = runtime::resolve(entries, query)?;
     Ok((rt, entry))
 }
 
-fn connect(rt: &RuntimeDir, e: &Entry, timeout: Duration) -> Result<Client, ClientError> {
+pub(super) fn connect(
+    rt: &RuntimeDir,
+    e: &Entry,
+    timeout: Duration,
+) -> Result<Client, ClientError> {
     Client::connect(&e.path(rt).join("sock"), LABEL, timeout)
 }
 

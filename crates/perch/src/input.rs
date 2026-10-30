@@ -45,7 +45,7 @@ struct Held {
 }
 
 /// One session's input queue.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Input {
     replies: VecDeque<Vec<u8>>,
     items: VecDeque<Vec<u8>>,
@@ -60,11 +60,33 @@ pub struct Input {
     /// matched; it just gets no priority. Without that, the supervisor
     /// would answer the same query again on detach.
     tail: Vec<u8>,
+    /// [`REPLY_HOLD`], or another length in tests.
+    hold: Duration,
+}
+
+impl Default for Input {
+    fn default() -> Input {
+        Input::new()
+    }
 }
 
 impl Input {
     pub fn new() -> Input {
-        Input::default()
+        Input::with_hold(REPLY_HOLD)
+    }
+
+    /// A queue that holds an incomplete sequence for `hold` instead of
+    /// [`REPLY_HOLD`].
+    pub fn with_hold(hold: Duration) -> Input {
+        Input {
+            replies: VecDeque::new(),
+            items: VecDeque::new(),
+            current: None,
+            queued: 0,
+            held: None,
+            tail: Vec::new(),
+            hold,
+        }
     }
 
     /// Queues a `send`, whole or not at all. With `paste`, the data is
@@ -153,7 +175,7 @@ impl Input {
                         // that read's deadline.
                         let deadline = match held_since {
                             Some(d) if i == 0 => d,
-                            _ => now + REPLY_HOLD,
+                            _ => now + self.hold,
                         };
                         self.held = Some(Held {
                             bytes: buf[i..].to_vec(),
@@ -202,6 +224,21 @@ impl Input {
     /// Bytes queued and not yet written.
     pub fn queued(&self) -> usize {
         self.queued
+    }
+
+    /// Replies waiting to be written.
+    pub fn replies_waiting(&self) -> usize {
+        self.replies.len()
+    }
+
+    /// Whether an item or reply is partly written.
+    pub fn writing(&self) -> bool {
+        self.current.is_some()
+    }
+
+    /// Whether an incomplete sequence from the client is held.
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
     }
 
     /// The bytes to write next: the rest of a partly written item, else the

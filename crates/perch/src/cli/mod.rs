@@ -3,9 +3,11 @@
 //! The command line.
 
 mod attach;
+mod doctor;
 mod list;
 mod new;
 mod selfinstall;
+mod send;
 mod session;
 mod version;
 
@@ -14,17 +16,22 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 usage: perch new [options] -- <command> [args...]   (attaches unless -d)
            --id ID  --name NAME  --kind KIND  --owner EXT  --annotate K=V
-           --cwd DIR  --env NAME=VALUE  --scrollback LINES (default 1000, at most 10000)
+           --cwd DIR  --env NAME=VALUE  --link-env NAME
+           --scrollback LINES (default 1000, at most 10000)
            -d, --detached  --label LABEL  --detach-key KEY|none  --restore full|screen
        perch attach <session> [--label LABEL] [--if-detached] [--detach-key KEY|none]
            [--restore full|screen] [--scrollback LINES]
        perch detach [<session>]
        perch list [--json] [--all]
        perch info <session> [--json]
+       perch send <session> [--text TEXT | --stdin] [--paste] [--submit]
+           exit 3: the input queue is full, nothing was sent;
+           exit 4: the connection dropped, the input may not have been sent
        perch kill <session> [--force] [--pid]
        perch dismiss <session>
        perch rename <session> <name>
        perch annotate <session> K=V... [--unset K]
+       perch doctor [--json]
        perch version [--json]";
 
 /// Run the command in `args` (without the program name).
@@ -38,6 +45,8 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("detach") => attach::detach(rest),
         Some("list" | "ls") => list::run(rest),
         Some("info") => session::info(rest),
+        Some("send") => send::run(rest),
+        Some("doctor") => doctor::run(rest),
         Some("kill") => session::kill(rest),
         Some("dismiss") => session::dismiss(rest),
         Some("rename") => session::rename(rest),

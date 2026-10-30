@@ -34,6 +34,8 @@ pub enum ClientError {
         code: String,
         message: String,
     },
+    /// The request is over the frame cap; nothing was sent.
+    TooLarge,
 }
 
 impl std::fmt::Display for ClientError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Refused(e) => write!(f, "refused ({}): {}", e.code, e.message),
             ClientError::Protocol(m) => write!(f, "protocol error: {m}"),
             ClientError::Failed { code, message } => write!(f, "{message} ({code})"),
+            ClientError::TooLarge => write!(f, "the request is over the 1 MiB frame limit"),
         }
     }
 }
@@ -116,8 +119,9 @@ impl Client {
         if let (Some(obj), Value::Object(extra)) = (req.as_object_mut(), fields) {
             obj.extend(extra);
         }
-        self.stream
-            .write_all(&proto::encode_json(kind::REQUEST, &req))?;
+        let frame = proto::encode(kind::REQUEST, &serde_json::to_vec(&req).expect("JSON"))
+            .map_err(|_| ClientError::TooLarge)?;
+        self.stream.write_all(&frame)?;
         loop {
             let frame = read_frame(&mut self.stream, &mut self.decoder, deadline)?;
             if frame.kind == kind::ERROR {

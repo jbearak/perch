@@ -296,6 +296,8 @@ pub struct Options {
     pub scrollback: u32,
     pub if_detached: bool,
     pub detach_key: Option<DetachKey>,
+    /// Values of the session's linked variables, for its links.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// How an attach ended.
@@ -543,7 +545,7 @@ fn handshake(
         restore,
         scrollback: opts.scrollback,
         if_detached,
-        env: Default::default(),
+        env: opts.env.clone(),
         pid: Some(sys::getpid()),
     };
     stream

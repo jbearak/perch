@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use self::log::log;
 pub use self::log::{CAP as LOG_CAP, FILE as LOG_FILE};
 pub use self::program::StartError;
-use crate::input::Input;
+use crate::input::{Input, QueueFull};
 use crate::meta::{self, Exit, Meta};
 use crate::model::feed::{Feeder, Step};
 use crate::model::{self as model_mod, Model};
@@ -37,7 +37,7 @@ use crate::queries::{self, ModelState, Queries, QueryId};
 use crate::runtime::{self, RuntimeDir};
 use crate::sys::{self, Lock, PollFd};
 use crate::transport::Transport;
-use crate::{clock, procinfo};
+use crate::{base64, clock, env_links, procinfo};
 
 /// How often the supervisor checks that its directory and socket are still
 /// its own.
@@ -56,7 +56,9 @@ const KILL_FINAL: Duration = Duration::from_secs(2);
 const MAX_CONN_BACKLOG: usize = 4 << 20;
 
 /// Operations this supervisor supports, announced in `Welcome`.
-pub const CAPABILITIES: &[&str] = &["info", "kill", "rename", "annotate", "detach", "attach"];
+pub const CAPABILITIES: &[&str] = &[
+    "info", "kill", "rename", "annotate", "detach", "attach", "send",
+];
 /// How long the supervisor of an attaching `perch new` waits for the
 /// creator's attach before giving up without starting the program.
 pub const CREATOR_DEADLINE: Duration = Duration::from_secs(30);
@@ -84,6 +86,9 @@ pub struct Config {
     pub scrollback: u32,
     /// The creator attaches: the program starts at its attach.
     pub attach: bool,
+    /// Linked variables and the creator's values, which the program's
+    /// environment already names by their links.
+    pub links: BTreeMap<String, OsString>,
 }
 
 /// What `perch new` learns from the supervisor.
@@ -308,6 +313,12 @@ struct Supervisor {
     /// creator has not attached.
     creator_deadline: Option<Instant>,
     attach_mode: bool,
+    /// Where each linked variable's link points now.
+    links: BTreeMap<String, OsString>,
+    /// Test hook: how many more bytes may be written to the PTY, or `None`
+    /// for no limit.
+    #[cfg(feature = "test-hooks")]
+    input_gate: Option<usize>,
     /// Turns of the poll loop, for tests that check it is idle.
     #[cfg(feature = "test-hooks")]
     loops: u64,
@@ -324,6 +335,22 @@ struct Ending {
 enum Tail {
     Screen(Vec<u8>),
     Note(ModelState),
+}
+
+/// Test hook: a transport that takes at most `left` more bytes.
+#[cfg(feature = "test-hooks")]
+struct Gated<'a, T> {
+    inner: T,
+    left: &'a mut usize,
+}
+
+#[cfg(feature = "test-hooks")]
+impl<T: Transport> Transport for Gated<'_, T> {
+    fn write(&mut self, bytes: &[u8]) -> usize {
+        let n = self.inner.write(&bytes[..bytes.len().min(*self.left)]);
+        *self.left -= n;
+        n
+    }
 }
 
 /// Writes to the PTY master without blocking.
@@ -419,6 +446,8 @@ impl Supervisor {
 
         let plan = program::Plan::new(&cfg.command, &cfg.env, &cfg.cwd, cfg.umask)
             .map_err(|e| fail(format!("cannot prepare the command: {e}")))?;
+        env_links::point(dir.as_fd(), &cfg.links)
+            .map_err(|e| fail(format!("cannot create the linked variables' links: {e}")))?;
 
         let (sig_r, sig_w) = sys::pipe().map_err(|e| fail(e.to_string()))?;
         sys::set_nonblocking(sig_r.as_raw_fd(), true).map_err(|e| fail(e.to_string()))?;
@@ -449,6 +478,7 @@ impl Supervisor {
             degraded: Vec::new(),
             scrollback: cfg.scrollback,
             ended_at: None,
+            linked_env: cfg.links.keys().cloned().collect(),
             extra: serde_json::Map::new(),
         };
         meta::write(dir.as_fd(), &meta)
@@ -495,7 +525,9 @@ impl Supervisor {
             feeder: Feeder::new(),
             model: Model::new(cfg.size.cols, cfg.size.rows, cfg.scrollback),
             queries: Queries::new(),
-            input: Input::new(),
+            // Scaled in tests, so a test can stretch it past a slow
+            // runner's pauses between the halves of a split reply.
+            input: Input::with_hold(clock::scaled(crate::input::REPLY_HOLD)),
             master_write_failed: false,
             epoch: now,
             ending: None,
@@ -506,6 +538,9 @@ impl Supervisor {
             #[cfg(feature = "test-hooks")]
             loops: 0,
             attach_mode: cfg.attach,
+            links: cfg.links,
+            #[cfg(feature = "test-hooks")]
+            input_gate: None,
         })
     }
 
@@ -551,7 +586,7 @@ impl Supervisor {
             }
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
-            let master_write = self.input.pending().is_some() && !self.master_write_failed;
+            let master_write = self.input_writable();
             let master_read = self.master_readable && self.read_budget() > 0;
             let master_idx = match &self.master {
                 Some(m) if master_read || master_write => {
@@ -634,8 +669,12 @@ impl Supervisor {
             self.client_flush(client_writable);
             self.handle_model_events();
             self.model.flush();
+            // A client let go above (too slow, say) joined `conns` after
+            // the poll set was built, at the end; it was not polled.
             for (k, c) in self.conns.iter_mut().enumerate() {
-                let p = fds[conn_base + k];
+                let Some(p) = fds.get(conn_base + k) else {
+                    break;
+                };
                 if p.readable || p.hangup {
                     read_conn(c);
                 }
@@ -975,7 +1014,16 @@ impl Supervisor {
         }
     }
 
-    /// Writes queued replies to the program without blocking.
+    /// Whether the input queue has bytes the PTY can be written now.
+    fn input_writable(&self) -> bool {
+        #[cfg(feature = "test-hooks")]
+        if self.input_gate == Some(0) {
+            return false;
+        }
+        self.input.pending().is_some() && !self.master_write_failed
+    }
+
+    /// Writes queued input and replies to the program without blocking.
     fn flush_input(&mut self) {
         let Some(m) = &self.master else { return };
         if self.master_write_failed {
@@ -985,6 +1033,12 @@ impl Supervisor {
             fd: m.as_raw_fd(),
             failed: &mut self.master_write_failed,
         };
+        #[cfg(feature = "test-hooks")]
+        if let Some(left) = &mut self.input_gate {
+            let mut gated = Gated { inner: t, left };
+            self.input.flush(&mut gated);
+            return;
+        }
         self.input.flush(&mut t);
     }
 
@@ -1073,7 +1127,11 @@ impl Supervisor {
             }
         }
         for (i, payload) in requests {
-            let resp = self.handle_request(&payload);
+            let Some(resp) = self.handle_request(&payload) else {
+                // Test hook: the connection drops before the response.
+                self.conns[i].dead = true;
+                continue;
+            };
             let c = &mut self.conns[i];
             // A reply echoes the request's `id`, so a request near the
             // frame cap can make one too large to send.
@@ -1098,19 +1156,30 @@ impl Supervisor {
         }
     }
 
-    fn handle_request(&mut self, payload: &[u8]) -> Value {
+    /// Answers a control request. `None` (only from a test hook) drops the
+    /// connection without an answer.
+    fn handle_request(&mut self, payload: &[u8]) -> Option<Value> {
         let Ok(Value::Object(req)) = serde_json::from_slice::<Value>(payload) else {
-            return proto::error_response(
+            return Some(proto::error_response(
                 &Value::Null,
                 "bad_request",
                 "a request must be a JSON object",
-            );
+            ));
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let Some(op) = req.get("op").and_then(Value::as_str) else {
-            return proto::error_response(&id, "bad_request", "missing `op`");
+            return Some(proto::error_response(&id, "bad_request", "missing `op`"));
         };
-        match op {
+        if op == "send" {
+            let resp = self.send(&id, &req);
+            #[cfg(feature = "test-hooks")]
+            if req.get("testDrop") == Some(&Value::Bool(true)) {
+                log("test hook: dropping a send's connection before its response");
+                return None;
+            }
+            return Some(resp);
+        }
+        Some(match op {
             "info" => proto::ok_response(&id, self.info()),
             "kill" => {
                 let force = req.get("force").and_then(Value::as_bool).unwrap_or(false);
@@ -1140,8 +1209,92 @@ impl Supervisor {
             }
             #[cfg(feature = "test-hooks")]
             "test-model" => self.test_model(&id, &req),
+            #[cfg(feature = "test-hooks")]
+            "test-input" => self.test_input(&id, &req),
             other => proto::error_response(&id, "unsupported", &format!("unknown op `{other}`")),
+        })
+    }
+
+    /// `send`: queues the bytes as one item, whole or not at all.
+    fn send(&mut self, id: &Value, req: &serde_json::Map<String, Value>) -> Value {
+        let data = match (req.get("data"), req.get("dataBase64")) {
+            (Some(Value::String(s)), None | Some(Value::Null)) => s.as_bytes().to_vec(),
+            (None | Some(Value::Null), Some(Value::String(b))) => match base64::decode(b) {
+                Some(d) => d,
+                None => {
+                    return proto::error_response(id, "bad_request", "`dataBase64` is not base64");
+                }
+            },
+            (None | Some(Value::Null), None | Some(Value::Null)) => Vec::new(),
+            _ => {
+                return proto::error_response(
+                    id,
+                    "bad_request",
+                    "give `data` (a string) or `dataBase64`, not both",
+                );
+            }
+        };
+        let flag = |k: &str| match req.get(k) {
+            None | Some(Value::Null) => Ok(false),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(proto::error_response(
+                id,
+                "bad_request",
+                &format!("`{k}` must be a boolean"),
+            )),
+        };
+        let (paste, submit) = match (flag("paste"), flag("submit")) {
+            (Ok(p), Ok(s)) => (p, s),
+            (Err(e), _) | (_, Err(e)) => return e,
+        };
+        if self.master.is_none()
+            || self.killing.is_some()
+            || self.ending.is_some()
+            || self.program_status.is_some()
+        {
+            return proto::error_response(id, "ending", "the session is ending");
         }
+        let paste_on = self.feeder.tracker().bracketed_paste();
+        match self.input.send(&data, paste, submit, paste_on) {
+            Ok(()) => {
+                self.last_input = Some(clock::unix_now());
+                proto::ok_response(id, json!({ "queued": true }))
+            }
+            Err(QueueFull) => proto::error_response(
+                id,
+                "queue_full",
+                "the session's input queue is full; nothing was queued",
+            ),
+        }
+    }
+
+    /// Test hooks: hold back what is written to the PTY (`gate`: the bytes
+    /// still allowed, or null for no limit), and the input queue's state.
+    #[cfg(feature = "test-hooks")]
+    fn test_input(&mut self, id: &Value, req: &serde_json::Map<String, Value>) -> Value {
+        match req.get("gate") {
+            None => {}
+            Some(Value::Null) => self.input_gate = None,
+            Some(v) => match v.as_u64() {
+                Some(n) => self.input_gate = Some(n as usize),
+                None => return proto::error_response(id, "bad_request", "`gate`: bytes or null"),
+            },
+        }
+        proto::ok_response(
+            id,
+            json!({
+                "queued": self.input.queued(),
+                "replies": self.input.replies_waiting(),
+                "writing": self.input.writing(),
+                "holding": self.input.holding(),
+                "gate": self.input_gate,
+                "client": self.client.as_ref().map(|c| json!({
+                    "phase": format!("{:?}", c.flow.phase()),
+                    "readBudget": c.flow.read_budget().min(u32::MAX as usize),
+                    "liveBytes": c.flow.live_bytes(),
+                })),
+            }),
+        )
     }
 
     fn annotate(&mut self, id: &Value, req: &serde_json::Map<String, Value>) -> Value {
@@ -1550,6 +1703,9 @@ impl Supervisor {
         };
         if !self.meta.degraded.iter().any(|d| d == DIRECTORY_RECREATED) {
             self.meta.degraded.push(DIRECTORY_RECREATED.into());
+        }
+        if let Err(e) = env_links::point(dir.as_fd(), &self.links) {
+            log(&format!("cannot recreate the linked variables' links: {e}"));
         }
         let published = meta::write(dir.as_fd(), &self.meta).and_then(|()| {
             sys::rename_noreplace_at(self.rt.fd.as_fd(), &build, OsStr::new(&self.meta.id))

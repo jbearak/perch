@@ -138,6 +138,10 @@ pub struct Meta {
     /// When the session became a tombstone, for the 7-day expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
+    /// Linked variables: each has a symlink `env/<NAME>` that follows the
+    /// attached client's value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_env: Vec<String>,
     /// Fields from newer versions, kept on rewrite.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -221,6 +225,7 @@ mod tests {
             degraded: vec![],
             scrollback: 1000,
             ended_at: None,
+            linked_env: Vec::new(),
             extra: Map::new(),
         }
     }
