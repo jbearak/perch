@@ -145,6 +145,11 @@ describe('API core', () => {
 
   it('gives other calls a code only where one fits', () => {
     assert.strictEqual(errorCode(failed(1, 'perch: no session `x`')), 'no_session');
+    // What `perch kill` says for a session that already ended.
+    assert.strictEqual(
+      errorCode(failed(1, 'perch: session abcd1234 has already ended (exited); `perch dismiss abcd1234` removes it')),
+      'no_session',
+    );
     assert.strictEqual(errorCode(failed(undefined, '', false, 'EACCES')), 'unavailable');
     assert.strictEqual(errorCode(failed(1, 'perch: something else')), undefined);
     const plain = new Error('x');
