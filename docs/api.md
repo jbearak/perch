@@ -273,6 +273,35 @@ How a window learns about an end: a session that exits while detached stays list
 
 `PerchApiError` has a `name` of `'PerchApiError'` and a `code` from the table above. Check `err.code`, not `instanceof`, because the class is not exported. Calls other than `send` reject with a `PerchApiError` when one of the codes fits (`attach`, `kill` and `annotate` use `no_session` for a session that does not exist or has ended, and the calls that act on sessions use `unavailable` when Perch cannot run here), and otherwise with the underlying `Error`.
 
+## Declaring consoles for Perch's list
+
+"Perch: New Persistent Terminal..." lists consoles that installed extensions offer, under "Consoles from extensions". Declare yours in your extension's `package.json`, under a top-level `perch` key:
+
+```json
+"perch": {
+  "launchers": [
+    { "label": "REPL console", "description": "My Extension", "icon": "terminal", "command": "myext.perch.newConsole" }
+  ]
+}
+```
+
+| Field | |
+|-------|---|
+| `label` | Required. What the list shows. |
+| `command` | Required. A command your extension contributes. |
+| `description` | Shown after the label. Default: your extension's `displayName`, or its ID if that is localized. |
+| `icon` | A codicon ID. Default: `terminal`. |
+
+Perch reads the declarations from the manifests of the extensions in its extension host, so your extension does not have to be active to be listed. When the user picks your console, Perch runs the command, which activates your extension. The command should:
+
+- start a new console in a Perch session, with `createSession`, or `prepareLaunch` and `createTerminal`, in any window, local or remote: the user asked for a persistent console;
+- start a new session every time, with no prompt to reuse an existing one;
+- show the terminal, and resolve once the console has started;
+- reject with a message the user can act on when it cannot start, for example when your program is not configured or `available()` is false; Perch shows the message;
+- throw `vscode.CancellationError` if the user cancels a prompt of yours; Perch shows nothing then.
+
+Contribute the command in `contributes.commands`, so that VS Code activates your extension for it (add an `onCommand:` activation event if your `engines.vscode` is below 1.74). If Perch's list is meant to be its only entry point, hide it from the Command Palette with `"menus": { "commandPalette": [{ "command": "...", "when": "false" }] }`.
+
 ## Conventions
 
 **Owner.** Pass your extension ID as `callerId`. Find your sessions with `listSessions({ owner: callerId })`. Sessions created by the user (Perch's own terminals) have no owner.

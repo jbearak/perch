@@ -81,7 +81,7 @@ export function resolveExecutable(file: string, host: ProfileHost): string | und
 }
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const codicon = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+export const codicon = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /**
  * One `terminal.integrated.profiles.<os>` entry as a launch, or undefined

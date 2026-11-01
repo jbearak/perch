@@ -39,7 +39,7 @@ The status bar shows the number of detached sessions, when there are any. Clicki
 | Command | What it does |
 |---------|--------------|
 | Perch: New Persistent Shell | Starts a shell in a new session and opens its terminal. |
-| Perch: New Persistent Terminal... | Starts one of your terminal profiles, or a command line, in a new session. See [Persistent terminals](#persistent-terminals). |
+| Perch: New Persistent Terminal... | Starts one of your terminal profiles, another extension's console, a REPL, or a command line, in a new session. See [Persistent terminals](#persistent-terminals). |
 | Perch: Open | Opens a running session, chosen from a list. |
 | Perch: Show Detached Sessions | The same list as the status bar item. |
 | Perch: Refresh | Refreshes the Sessions view. |
@@ -51,10 +51,11 @@ Every Perch terminal is its own session, and you can open as many as you like. E
 
 **Persistent shell** is a terminal profile. Pick it from the terminal panel's profile menu (the arrow next to `+`), or run "Perch: New Persistent Shell". The shell starts in the workspace's first folder. It is the program in `perch.shell`, or `$SHELL` if that is empty, with `-l` on macOS to match VS Code's default there.
 
-**Perch: New Persistent Terminal...** lists:
+**Perch: New Persistent Terminal...** lists, in groups:
 
-- **Persistent shell**, as above.
-- **Your terminal profiles** for the host's platform, from `terminal.integrated.profiles.osx` or `terminal.integrated.profiles.linux`: VS Code's built-in ones (bash, zsh, fish, tmux, pwsh) and any you added, except those you removed with `null`. Your default profile is marked "default". Picking one runs its `path` and `args` in a new session, with its `env`, icon and color. A profile is listed only if its program is found: an absolute path that is executable, or a name on `PATH`. When `path` is a list, the first one found is used.
+- **Terminals.** Persistent shell, as above, then **your terminal profiles** for the host's platform, from `terminal.integrated.profiles.osx` or `terminal.integrated.profiles.linux`: VS Code's built-in ones (bash, zsh, fish, tmux, pwsh) and any you added, except those you removed with `null`. Your default profile is marked "default". Picking one runs its `path` and `args` in a new session, with its `env`, icon and color. A profile is listed only if its program is found: an absolute path that is executable, or a name on `PATH`. When `path` is a list, the first one found is used.
+- **Consoles from extensions.** Consoles that installed extensions offer for Perch, such as a language extension's REPL console. Picking one asks that extension to start its console in a new session, so it keeps the extension's features (sending code, plots and so on). This happens in local windows too. Extensions declare these in their manifest; see [api.md](api.md#declaring-consoles-for-perchs-list).
+- **Programs.** Common REPLs found on `PATH`: Python (`python3`, else `python`), IPython, R, radian, Julia and Node.js. Each runs as is, with no arguments, in a new session. This is a plain REPL: an extension for that language does not treat it as its own console. On macOS, `/usr/bin/python3` is listed only once the developer tools are installed, because before that it only offers to install them. To pass arguments, add a terminal profile or use "Run a command...".
 - **Run a command...**, which asks for a command line and runs it with `/bin/sh -c` in a new session.
 
 Profiles are read the way VS Code reads them, with these differences:

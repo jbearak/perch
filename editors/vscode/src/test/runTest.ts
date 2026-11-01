@@ -19,6 +19,8 @@ import { bundledBinaryPath } from '../core/binary';
 
 async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, '../..');
+  // A second extension that declares consoles for Perch's list.
+  const launcherFixture = path.resolve(extensionDevelopmentPath, 'src/test/fixtures/launcher-ext');
   const extensionTestsPath = path.resolve(__dirname, 'suite/index');
   const version = process.env.PERCH_VSCODE_VERSION ?? '1.82.0';
   // Short paths under /tmp: VS Code's IPC sockets live in the user data
@@ -32,7 +34,7 @@ async function main(): Promise<void> {
     fs.mkdirSync(workspace, { recursive: true });
     await runTests({
       version,
-      extensionDevelopmentPath,
+      extensionDevelopmentPath: [extensionDevelopmentPath, launcherFixture],
       extensionTestsPath,
       extensionTestsEnv: {
         PERCH_RUNTIME_DIR: runtimeDir,

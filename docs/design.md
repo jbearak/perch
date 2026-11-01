@@ -1,6 +1,6 @@
 # Perch design
 
-Status: agreed by Sonnet and Terra, revision 17. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
+Status: agreed by Sonnet and Terra, revision 18. Revisions 8 and 9 replace the screen model (avt) with Ghostty's terminal library, at the maintainer's direction. Each section says what Perch does and why, and names the alternatives it rejected. [Review history](#review-history) lists what each review round changed.
 
 ## What Perch is
 
@@ -480,6 +480,8 @@ Users need `perch` inside sessions (`perch detach`) and over plain SSH (`perch a
 
 **Any terminal.** "Perch: New Persistent Terminal..." runs one of the user's terminal profiles, or a command line, in a new session. Stable API does not expose VS Code's resolved profiles, so the extension reads `terminal.integrated.profiles.<os>` itself: VS Code's built-in profiles merged with the user's. It resolves a profile's `path` the way VS Code does (the first executable absolute path, or a name on `PATH`), passes `args`, `env`, icon and color, resolves the variables that mean the same outside VS Code (`${env:NAME}`, `${userHome}`, `${workspaceFolder}`, `${workspaceFolderBasename}`, `${pathSeparator}`), leaves out profiles that use a variable depending on the editor's state (`${command:...}`, `${config:...}`, `${file}` and the like), and passes any other `${...}` text on unchanged, as VS Code does. `env` values of `null` unset the variable through `/usr/bin/env -u`. Auto-detected shells and other extensions' profiles are not in that setting and cannot be launched by another extension, so they are not listed. A command line runs as `/bin/sh -c <line>`. User text in the command and environment has its braces doubled, so `{dir}` and `{id}` reach the program literally.
 
+The same list offers consoles from other extensions and common REPLs. Extensions declare consoles in their `package.json` (`perch.launchers`: a label and a command), and Perch reads the declarations from `vscode.extensions.all`, so an extension that has not activated is still listed; picking one runs its command, which activates the extension, and the extension starts the console through the API. A runtime registration call would miss extensions that have not activated yet and would need rules for registering again on each lookup. The REPLs are a fixed list (Python, IPython, R, radian, Julia, Node.js) found on `PATH` and run bare; the list is data, and no kind gets special display.
+
 ### Creating a session from the extension
 
 Every session the extension creates starts inside a VS Code terminal, so the program gets the terminal's real environment. The steps, which `createSession` in the API also uses:
@@ -660,6 +662,10 @@ docs/                      design, plan, user docs
 - **Names and layout.** As above.
 
 ## Review history
+
+### Revision 18
+
+- "New Persistent Terminal..." also lists consoles that extensions declare in their manifests (`perch.launchers`) and common REPLs found on `PATH`.
 
 ### Revision 17
 
