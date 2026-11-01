@@ -61,6 +61,11 @@
         "category": "Perch"
       },
       {
+        "command": "perch.newTerminal",
+        "title": "New Persistent Terminal...",
+        "category": "Perch"
+      },
+      {
         "command": "perch.kill",
         "title": "Kill",
         "category": "Perch",

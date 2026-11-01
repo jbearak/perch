@@ -1,6 +1,6 @@
 # The Perch API for other extensions
 
-Other VS Code extensions can run their programs in Perch sessions, so that an R console or a Stata session survives a closed window or a dropped connection. This page describes version 1 of the API and how Raven and Sight are expected to use it.
+Other VS Code extensions can run their programs in Perch sessions, so that a REPL, a server or a long job they start survives a closed window or a dropped connection. This page describes version 1 of the API.
 
 Perch never types into a session on its own. Input reaches a session only from its attached terminal, or from `send` when an extension or user asks for it.
 
@@ -14,7 +14,7 @@ Perch activates on startup, before or after your extension, and it may be instal
 import * as vscode from 'vscode';
 import type { PerchApiV1, SessionInfo } from './perch-api'; // a copy of the types below
 
-const callerId = 'jbearak.sight'; // your own extension ID
+const callerId = 'publisher.my-extension'; // your own extension ID
 
 async function getPerch(): Promise<PerchApiV1 | undefined> {
   const ext = vscode.extensions.getExtension<{ getApi(version: number, callerId: string): unknown }>('jbearak.perch');
@@ -107,7 +107,7 @@ getApi(version: number, callerId: string): PerchApiV1 | undefined
 
 The extension's `exports` has one member, `getApi`. Version 1 is the only one. Any other version returns `undefined`; keep your behavior without Perch then.
 
-`callerId` is your extension's ID, such as `jbearak.raven-r`. Perch records it as the `owner` of the sessions you create through that API object, so you can find them again with `listSessions({ owner })`. Each `callerId` gets one API object; calling `getApi` again returns the same one. An empty `callerId` creates sessions without an owner. VS Code does not tell Perch who called it, so ownership is a convention for finding your own sessions, not a security boundary.
+`callerId` is your extension's ID, such as `publisher.my-extension`. Perch records it as the `owner` of the sessions you create through that API object, so you can find them again with `listSessions({ owner })`. Each `callerId` gets one API object; calling `getApi` again returns the same one. An empty `callerId` creates sessions without an owner. VS Code does not tell Perch who called it, so ownership is a convention for finding your own sessions, not a security boundary.
 
 ## Types
 
@@ -115,7 +115,7 @@ The extension's `exports` has one member, `getApi`. Version 1 is the only one. A
 interface SessionInfo {
   id: string;                  // 8 characters, [a-z0-9]
   name: string;
-  kind: string;                // 'r', 'stata', 'shell', ...
+  kind: string;                // free text, such as 'shell'
   owner?: string;              // the callerId that created it
   annotations: Record<string, string>;
   dir: string;                 // the session directory, {dir}
@@ -134,9 +134,9 @@ interface SessionInfo {
 interface CreateOptions {
   name: string;                // the session's and the terminal's name
   kind: string;
-  command: string[];           // {dir} and {id} expand
+  command: string[];           // {dir} and {id} expand; {{ and }} are literal braces
   cwd?: string;
-  env?: Record<string, string>; // {dir} and {id} expand in values
+  env?: Record<string, string>; // the same in values
   annotations?: Record<string, string>;
   terminal?: {
     location?: vscode.TerminalLocation;
@@ -180,7 +180,7 @@ Starts a session in a new terminal and resolves once the program is running.
 2. It creates a terminal running `perch new --id <id> ... -- <command>`, with `isTransient: true`. The program starts inside that terminal, so it gets the terminal's environment: `TERM`, `LANG`, `terminal.integrated.env.*` and so on, plus `PERCH_SESSION_ID`, `PERCH_SESSION_DIR` and your `env`.
 3. It shows the terminal unless `show` is `false`, and waits until `perch info` reports the session `running`.
 
-`running` means the program was started (`exec` succeeded). It does not mean the program is ready for input; check that yourself, as Raven does by waiting for its console socket.
+`running` means the program was started (`exec` succeeded). It does not mean the program is ready for input; check that yourself, for example by waiting for a socket the program creates in the session directory.
 
 It rejects with an `Error` if the terminal closes first, if the program cannot be started (the message says why, for example that the command was not found), or after 10 seconds. A program that starts and exits at once resolves with `state: 'exited'`.
 
@@ -195,7 +195,7 @@ Returns the session ID and the `TerminalOptions` for a new session without creat
 ```ts
 vscode.window.registerTerminalProfileProvider('myext.console', {
   provideTerminalProfile: () => {
-    const { id, options } = perch.prepareLaunch({ name: 'R', kind: 'r', command: [...] });
+    const { id, options } = perch.prepareLaunch({ name: 'REPL', kind: 'myrepl', command: [...] });
     pendingIds.add(id);
     return new vscode.TerminalProfile(options);
   },
@@ -222,7 +222,7 @@ The Perch terminals open in this window that have not closed, with their session
 
 ### attach
 
-Opens a terminal attached to a running session, or shows the one already open in this window, and returns it. If the session is attached in another window, Perch asks the user "R: thesis is open in another window. Move it here?" and rejects with an `Error` if they decline. It rejects with `no_session` if the session has ended or does not exist. `show: false` creates the terminal without showing it.
+Opens a terminal attached to a running session, or shows the one already open in this window, and returns it. If the session is attached in another window, Perch asks the user "myrepl: main is open in another window. Move it here?" and rejects with an `Error` if they decline. It rejects with `no_session` if the session has ended or does not exist. `show: false` creates the terminal without showing it.
 
 ### sessionForTerminal
 
@@ -238,9 +238,9 @@ Queues `text` (a string; anything else is a `TypeError`) as input to the session
 
 - `submit: true` appends a carriage return, which is what Enter sends.
 - `paste: true` wraps the text in bracketed-paste markers if the program has turned bracketed paste on, and sends it raw otherwise.
-- Perch adds nothing. It does not answer prompts such as Stata's `--more--`, and does not change the program's settings.
+- Perch adds nothing. It does not answer prompts such as a pager's `--More--`, and does not change the program's settings.
 
-`send` has terminal semantics. Whether the program reads the text as one line, several or a paste depends on the program, as with typing. A long line to a program reading in the terminal's line mode can be cut by the kernel's line limit. When you need to know that code ran, use a channel of your own, as Raven does with its console socket.
+`send` has terminal semantics. Whether the program reads the text as one line, several or a paste depends on the program, as with typing. A long line to a program reading in the terminal's line mode can be cut by the kernel's line limit. When you need to know that code ran, use a channel of your own, such as a socket the program listens on in the session directory.
 
 It rejects with a `PerchApiError`:
 
@@ -275,82 +275,22 @@ How a window learns about an end: a session that exits while detached stays list
 
 ## Conventions
 
-**Owner.** Pass your extension ID as `callerId`. Find your sessions with `listSessions({ owner: callerId })`. Sessions created by the user (persistent shells) have no owner.
+**Owner.** Pass your extension ID as `callerId`. Find your sessions with `listSessions({ owner: callerId })`. Sessions created by the user (Perch's own terminals) have no owner.
 
-**Kind.** A short lower-case word for the program: `r`, `stata`, `shell`. The Sessions view shows `r`, `stata` and `shell` as R, Stata and Shell with their own icons; other kinds are shown as given.
+**Kind.** A short lower-case word for the program, such as `python` or `node`. The Sessions view shows it as given, with a generic icon. Perch's own terminals use `shell`, shown as Shell with a terminal icon.
 
-**Annotations.** Use keys prefixed with your project's name, such as `raven.console`. Values are strings. They are for marking sessions, not for secrets or data that changes often; each change is a request to the session's supervisor.
+**Annotations.** Use keys prefixed with your project's name, such as `myext.socket`. Values are strings. They are for marking sessions, not for secrets or data that changes often; each change is a request to the session's supervisor.
 
-**The session directory.** `{dir}` in `command` and `env` is the session directory, mode 0700, which exists before the program starts. Programs and extensions may keep files there, such as sockets and descriptor files. It is removed when the session ends. Write files there atomically (write a temporary file, then rename it). If `degraded` includes `directory-recreated`, the directory was removed and recreated while the session ran, and files kept there are gone.
+**The session directory.** `{dir}` in `command` and `env` is the session directory, mode 0700, which exists before the program starts. Programs and extensions may keep files there, such as sockets and descriptor files. Paths there are short (`/tmp/perch-1000/k3x9q2ab/ipc`), well within the socket path limit. It is removed when the session ends. Write files there atomically (write a temporary file, then rename it), with mode 0600 for anything secret. If `degraded` includes `directory-recreated`, the directory was removed and recreated while the session ran, and files kept there, such as a socket your program listened on, are gone; fall back to `send`.
+
+**Literal braces.** `{dir}` and `{id}` expand in `command` and in `env` values, `{{` and `}}` are literal braces, and any other `{` or `}` is an error. Escape text that comes from the user or the file system (paths, arguments, command lines) by doubling its braces, such as `s.replace(/[{}]/g, (c) => c + c)`.
+
+**Choosing where to send.** `listSessions` returns sessions from every workspace and window on the host. Sessions with a terminal in this window (`terminals()`, `onDidAttach`) are the ones the user is working with here. Send to another session only when the user picks it.
+
+**Sending.** Use the program's own channel when it has one. Otherwise use `send`, not `terminal.sendText`: `sendText` reaches nothing while the session is detached.
 
 **Closing a terminal is a detach.** The program keeps running. Do not clean up when a Perch terminal closes; clean up on `onDidEndSession`.
 
-**No startup input.** Pass everything the program needs on its command line or in `env`. Do not `send` setup code at start.
+**No startup input.** Pass everything the program needs on its command line or in `env`. Do not `send` setup code at start; a program that is still starting can lose it.
 
-## Raven (R)
-
-Raven's console, `raven console`, keeps its own socket protocol for running code, with its `queued`, `done` and `error` replies. With Perch it changes how the console starts, how Raven finds it, and when Raven cleans up. Raven's extension ID is `jbearak.raven-r`.
-
-**Launch.** Start the console in a session, with its sockets in the session directory:
-
-```ts
-const { session, terminal } = await perch.createSession({
-  name: 'R',
-  kind: 'r',
-  command: [ravenBinary, 'console', '--ipc', '{dir}/ipc', '--dap', '{dir}/d', /* other options */ '--no-save', '--no-restore'],
-  cwd: workspaceFolder,
-  annotations: { 'raven.console': 'ipc' },
-});
-```
-
-`ravenBinary` is the full path of Raven's bundled binary. Paths in the session directory are short (`/tmp/perch-1000/k3x9q2ab/ipc`), well within the socket path limit. The `raven.console: 'ipc'` annotation tells Raven, and only Raven, that this session's console listens on `{dir}/ipc`.
-
-For R terminals from the profile picker, call `prepareLaunch` in Raven's `TerminalProfileProvider` and map terminals to sessions with `sessionForTerminal`.
-
-**Sending code.** Pick the target R session from `listSessions({ owner: 'jbearak.raven-r' })`, not only from open terminals, and connect to `<dir>/ipc` directly. A session with no terminal still receives code. Where Raven types code into a terminal today (`terminal.sendText`), use Perch's `send` for Perch sessions instead, because `sendText` reaches nothing while the session is detached. If `degraded` includes `directory-recreated`, the console's socket is gone for good, and `send` is the only route left.
-
-**Detached prompts.** Raven's console asks the terminal for the cursor position at each prompt. While no terminal is attached, Perch answers for it, so a detached console does not stall. After a screen model restart Perch cannot answer until the model is complete, and the console waits about 2 seconds at each prompt.
-
-**Descriptor files.** Keep two files in the session directory, each replaced atomically and mode 0600. R's side and the editor's side never write the same file.
-
-- The editor writes `raven-window.json`: the plot server's port and token and the data viewer's directory. The window that writes it receives plots and data viewers. A window writes it only when Perch attaches a terminal there (`onDidAttach`, including restore and adoption) or when the user sends code from that window to a detached session. A window that only lists a session never writes it. If two windows race, the later write wins, which is the window the user acted in last.
-- R's bootstrap profile writes `raven-r.json` (the R session's ID, the httpgd URL and token) whenever the device starts, and reads the port and token from `raven-window.json` at each request, falling back to its environment.
-
-Secrets go in these files, not in annotations.
-
-**Adoption.** When Raven gets the API, it subscribes to `onDidAttach` and `onDidEndSession`, then calls `terminals()` and `listSessions()`, as in [Finding Perch](#finding-perch). For each Raven terminal in this window, and on every later `onDidAttach`, it writes `raven-window.json`, registers the console socket, and reads `raven-r.json` to re-register the httpgd device. Sessions found only by `listSessions` are recorded as possible targets. Adoption sends no code to R and can run any number of times.
-
-**Plots made while detached.** While no window is connected, R's posts to the plot server fail. Because R records the httpgd URL in `raven-r.json` whenever the device starts, a window that adopts the session later finds those plots.
-
-**Cleanup.** Raven deletes the console socket's directory and marks the R session ended when an R terminal closes. For a Perch terminal, closing is a detach: skip both, and clean up on `onDidEndSession` instead. Perch removes the session directory itself.
-
-## Sight (Stata)
-
-Sight's extension ID is `jbearak.sight`.
-
-**Launch.** When Perch is available, start Stata in a session and keep the current terminal path otherwise:
-
-```ts
-const { session, terminal } = await perch.createSession({
-  name: 'Stata',
-  kind: 'stata',
-  command: [stataCli],
-  cwd: workspaceFolder,
-});
-```
-
-Sight passes the first `do` or `run` command to Stata on its command line, because typing it into a Stata that is still starting loses it. That works the same way here: append the command and the quoted path to `command`.
-
-**Sending.** Replace `terminal.sendText('do "<file>"')` with:
-
-```ts
-await perch.send(session.id, `do ${quotedPath}`, { submit: true });
-```
-
-Sends then work while the terminal is closed or attached in another window. The command is one short line, which suits `send`. On `outcome_unknown`, tell the user the command may not have run, and do not resend it.
-
-**Adoption.** When Sight gets the API, subscribe to `onDidAttach` and `onDidEndSession`, then find surviving Stata sessions with `terminals()` and `listSessions({ owner: 'jbearak.sight' })`, as in [Finding Perch](#finding-perch), so that the current Stata terminal survives a window reopen.
-
-**`--more--`.** Stata pauses at `--more--` when output fills the screen. A detached Stata waits there until someone attaches and presses a key, because Perch never answers it. Sight's documentation should tell users to put `set more off` in their `profile.do`.
-
-**Licenses.** A detached Stata may keep holding its license seat while it runs.
+**Programs that wait.** A program that pauses for a key, such as a pager or a `--More--` prompt, waits there while detached until someone attaches, because Perch never answers it. Programs that hold a resource, such as a license seat, keep holding it while detached.

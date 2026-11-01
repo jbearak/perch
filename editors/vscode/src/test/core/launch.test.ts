@@ -27,19 +27,19 @@ describe('launch', () => {
       label: '0123456789abcdef#01234567',
       scrollback: 5000,
       name: 'thesis',
-      kind: 'r',
-      command: ['R', '--no-save', '--'],
+      kind: 'python',
+      command: ['python3', '-q', '--'],
       cwd: '/home/me/thesis',
-      env: { R_LIBS: '{dir}/lib' },
+      env: { PYTHONPATH: '{dir}/lib' },
       annotations: { project: 'thesis' },
-      owner: 'jbearak.raven',
+      owner: 'example.ext',
       linkEnv: ['SSH_AUTH_SOCK'],
     });
     assert.deepStrictEqual(args, [
       'new', '--id', 'abcd1234', '--label', '0123456789abcdef#01234567', '--scrollback', '5000',
-      '--detach-key', 'none', '--restore', 'full', '--name', 'thesis', '--kind', 'r',
-      '--owner', 'jbearak.raven', '--cwd', '/home/me/thesis', '--annotate', 'project=thesis',
-      '--env', 'R_LIBS={dir}/lib', '--link-env', 'SSH_AUTH_SOCK', '--', 'R', '--no-save', '--',
+      '--detach-key', 'none', '--restore', 'full', '--name', 'thesis', '--kind', 'python',
+      '--owner', 'example.ext', '--cwd', '/home/me/thesis', '--annotate', 'project=thesis',
+      '--env', 'PYTHONPATH={dir}/lib', '--link-env', 'SSH_AUTH_SOCK', '--', 'python3', '-q', '--',
     ]);
     const bare = { id: 'abcd1234', label: 'l', scrollback: 1, name: '', kind: '', command: ['sh'] };
     // Undefined leaves the binary's default; an empty list links nothing.

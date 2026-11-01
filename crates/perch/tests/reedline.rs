@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Raven's console at a prompt while detached: `reedline-prompt` (reedline
+//! A reedline REPL at a prompt while detached: `reedline-prompt` (reedline
 //! 0.52.1, which asks for the cursor position at every prompt and waits up
 //! to 2 seconds for it) takes 200 sends and one 900 KB send with no prompt
 //! waiting for an answer. After a model restart the model is partial and

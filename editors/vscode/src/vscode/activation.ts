@@ -29,7 +29,7 @@ import { readSettings, Settings } from '../core/settings';
 import { Api, PerchApiV1 } from './api';
 import { CommandLine } from './commandLine';
 import { DetachedCount, SessionItem, SessionsProvider, SessionStore } from './sessionsView';
-import { CloseOutcome, CreateOptions, Notify, Terminals } from './terminals';
+import { AskCommand, CloseOutcome, CreateOptions, Notify, PickTerminal, Terminals } from './terminals';
 
 /** Asks the user to confirm; resolves true to go ahead. */
 export type Confirm = (message: string, detail: string, action: string) => Promise<boolean>;
@@ -68,6 +68,8 @@ export interface Testing {
   onDidClose: vscode.Event<CloseOutcome>;
   setNotify(notify: Notify | undefined): void;
   shellCommand(): string[];
+  /** "New Persistent Terminal..." with the picker and the command prompt given. */
+  newTerminal(pick: PickTerminal, ask?: AskCommand): Promise<{ session: Session; terminal: vscode.Terminal } | undefined>;
   /** Settles with the warning `perch doctor` led to, if any, once it has run. */
   doctorChecked: Promise<string | undefined>;
 }
@@ -316,6 +318,7 @@ export function activate(context: vscode.ExtensionContext): Exports {
     vscode.commands.registerCommand('perch.refresh', () => scheduler.now()),
     vscode.commands.registerCommand('perch.open', guard(open)),
     vscode.commands.registerCommand('perch.newShell', guard(() => terminals.newShell())),
+    vscode.commands.registerCommand('perch.newTerminal', guard(async () => void (await terminals.newTerminal()))),
     vscode.commands.registerCommand('perch.kill', guard(kill)),
     vscode.commands.registerCommand('perch.dismiss', guard(dismiss)),
     vscode.commands.registerCommand('perch.showLastOutput', guard(showLastOutput)),
@@ -364,6 +367,7 @@ export function activate(context: vscode.ExtensionContext): Exports {
         terminals.notify = n ?? ((m, ...items) => vscode.window.showInformationMessage(m, ...items));
       },
       shellCommand: () => terminals.shellOptions().command,
+      newTerminal: (pick, ask) => terminals.newTerminal(pick, ask),
       doctorChecked,
     },
   };

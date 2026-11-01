@@ -238,9 +238,9 @@ const recognizeFake = (t: FakeTerminal) => (t.exited ? undefined : recognize(t.s
 
 describe('adoption', () => {
   const created: FakeTerminal = {
-    name: 'R',
+    name: 'python',
     shellPath: '/old/extension/bin/linux-x64/perch',
-    shellArgs: newArgs({ id: 'aaaa1111', label, scrollback: 1000, name: 'R', kind: 'r', command: ['R'] }),
+    shellArgs: newArgs({ id: 'aaaa1111', label, scrollback: 1000, name: 'python', kind: 'python', command: ['python3'] }),
   };
   const opened: FakeTerminal = { name: 'shell', shellPath: '/x/perch', shellArgs: attachArgs('bbbb2222', label, 1000) };
   const plain: FakeTerminal = { name: 'zsh', shellPath: '/bin/zsh', shellArgs: ['-l'] };

@@ -206,11 +206,11 @@ mod tests {
         Meta {
             format: FORMAT,
             id: "k3x9q2ab".into(),
-            name: "R: thesis".into(),
-            kind: "r".into(),
-            owner: Some("jbearak.raven".into()),
-            annotations: BTreeMap::from([("raven.console".into(), "ipc".into())]),
-            command: vec!["raven".into(), "console".into()],
+            name: "thesis".into(),
+            kind: "python".into(),
+            owner: Some("example.ext".into()),
+            annotations: BTreeMap::from([("example.socket".into(), "ipc".into())]),
+            command: vec!["python3".into(), "-q".into()],
             cwd: "/home/me/thesis".into(),
             host: "login2".into(),
             created_at: "2026-10-29T15:04:05Z".into(),
@@ -236,13 +236,13 @@ mod tests {
         let base = m.to_json().len() as u64;
         let pad = (MAX_SIZE - LIFECYCLE_RESERVE - base) as usize;
         m.annotations
-            .insert("raven.console".into(), "i".repeat(pad + 3));
+            .insert("example.socket".into(), "i".repeat(pad + 3));
         assert!(m.fits());
         m.annotations
-            .insert("raven.console".into(), "i".repeat(pad + 4));
+            .insert("example.socket".into(), "i".repeat(pad + 4));
         assert!(!m.fits());
         m.annotations
-            .insert("raven.console".into(), "i".repeat(pad + 3));
+            .insert("example.socket".into(), "i".repeat(pad + 3));
 
         m.state = "exited".into();
         m.exit = Some(Exit {

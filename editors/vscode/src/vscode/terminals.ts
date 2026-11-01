@@ -4,10 +4,13 @@
 // them, recognizing and adopting the ones already open, and what a closed
 // terminal means. The extension never types into a session; a terminal's
 // process is `perch new` or `perch attach`.
+import * as fs from 'fs';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import { PerchCli } from '../core/cli';
 import { Launched } from '../core/api';
 import { attachArgs, newArgs, newSessionId, NewSession, recognize, Recognized, scrollbackLines, shellCommand } from '../core/launch';
+import { commandLaunch, Launchable, literal, profileKeys, profileLaunches } from '../core/profiles';
 import { waitUntilRunning } from '../core/readiness';
 import {
   adopt,
@@ -38,6 +41,31 @@ export interface CreateOptions {
     color?: vscode.ThemeColor;
   };
 }
+
+/** An item of "New Persistent Terminal...": a launch, or "Run a command..." without one. */
+export interface TerminalChoice extends vscode.QuickPickItem {
+  options?: CreateOptions;
+}
+
+/** Shows the choices; resolves with the one picked. */
+export type PickTerminal = (choices: TerminalChoice[]) => Thenable<TerminalChoice | undefined>;
+
+/** Asks for a command line to run. */
+export type AskCommand = () => Thenable<string | undefined>;
+
+const pickTerminal: PickTerminal = (choices) =>
+  vscode.window.showQuickPick(choices, {
+    title: 'New Persistent Terminal',
+    placeHolder: 'Select a terminal profile to run in a new Perch session',
+    matchOnDescription: true,
+  });
+
+const askCommand: AskCommand = () =>
+  vscode.window.showInputBox({
+    title: 'New Persistent Terminal',
+    prompt: 'A command line to run in a new Perch session, with /bin/sh -c',
+    placeHolder: 'htop',
+  });
 
 /** What happened when a Perch terminal closed, for the tests. */
 export interface CloseOutcome {
@@ -337,18 +365,52 @@ export class Terminals implements vscode.Disposable {
   /** The persistent shell's options. */
   shellOptions(): CreateOptions {
     const command = shellCommand(this.deps.settings().shell, process.platform, process.env.SHELL);
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri;
-    return {
-      name: 'Persistent shell',
-      kind: 'shell',
-      command,
-      cwd: cwd?.scheme === 'file' ? cwd.fsPath : undefined,
-    };
+    return { name: 'Persistent shell', kind: 'shell', command: command.map(literal), cwd: workspaceCwd() };
   }
 
   /** "Perch: New Persistent Shell". */
   async newShell(): Promise<void> {
     await this.createSession({ ...this.shellOptions(), show: true });
+  }
+
+  /**
+   * "Perch: New Persistent Terminal...": the persistent shell, each terminal
+   * profile Perch can run, or a command line. Each pick is a new session.
+   */
+  async newTerminal(
+    pick: PickTerminal = pickTerminal,
+    ask: AskCommand = askCommand,
+  ): Promise<{ session: Session; terminal: vscode.Terminal } | undefined> {
+    const chosen = await pick(this.terminalChoices());
+    if (chosen === undefined) return undefined;
+    let options = chosen.options;
+    if (options === undefined) {
+      const text = await ask();
+      if (text === undefined || text.trim() === '') return undefined;
+      options = launchOptions(commandLaunch(text));
+    }
+    return this.createSession({ ...options, show: true });
+  }
+
+  /** The items of "New Persistent Terminal...", from the settings as they are now. */
+  terminalChoices(): TerminalChoice[] {
+    const keys = profileKeys(process.platform);
+    if (keys === undefined) return [];
+    const config = vscode.workspace.getConfiguration('terminal.integrated');
+    const defaultName = config.get<unknown>(keys.defaultProfile);
+    const described = (name: string, display: string) => (name === defaultName ? `default · ${display}` : display);
+    const shell = this.shellOptions();
+    const shellDisplay = shellCommand(this.deps.settings().shell, process.platform, process.env.SHELL).join(' ');
+    const host = { env: process.env, home: os.homedir(), workspaceFolder: workspaceCwd(), isExecutable };
+    return [
+      { label: shell.name, description: described(shell.name, shellDisplay), options: shell },
+      ...profileLaunches(config.get<unknown>(keys.profiles), host).map((l) => ({
+        label: l.name,
+        description: described(l.name, l.display),
+        options: launchOptions(l),
+      })),
+      { label: 'Run a command...', description: 'Any command line, with /bin/sh -c' },
+    ];
   }
 
   /** The "Persistent shell" terminal profile. */
@@ -464,7 +526,37 @@ export class Terminals implements vscode.Disposable {
 }
 
 /** A Perch terminal from its creation options, unless it has already exited. */
-export function recognizeTerminal(t: vscode.Terminal): Recognized | undefined {
+export /** The first workspace folder, if it is on this host. */
+function workspaceCwd(): string | undefined {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri;
+  return cwd?.scheme === 'file' ? cwd.fsPath : undefined;
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    if (!fs.statSync(file).isFile()) return false;
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function launchOptions(l: Launchable): CreateOptions {
+  return {
+    name: l.name,
+    kind: l.kind,
+    command: l.command,
+    env: l.env,
+    cwd: workspaceCwd(),
+    terminal: {
+      iconPath: l.icon !== undefined ? new vscode.ThemeIcon(l.icon) : undefined,
+      color: l.color !== undefined ? new vscode.ThemeColor(l.color) : undefined,
+    },
+  };
+}
+
+function recognizeTerminal(t: vscode.Terminal): Recognized | undefined {
   if (t.exitStatus !== undefined) return undefined;
   const o = t.creationOptions as Readonly<vscode.TerminalOptions>;
   return recognize(o.shellPath, o.shellArgs);

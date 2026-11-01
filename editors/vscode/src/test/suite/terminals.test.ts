@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { recognize } from '../../core/launch';
 import type { Testing } from '../../vscode/activation';
+import type { TerminalChoice } from '../../vscode/terminals';
 import { activated, bundledBinaryOrSkip, info, nextClose, perch, waitFor } from './helpers';
 
 /** A client in "another window": a terminal Perch does not recognize as its own. */
@@ -152,7 +156,7 @@ describe('terminals', () => {
   });
 
   it('opens a detached session without asking', async () => {
-    const id = (await perch(binary, ['new', '-d', '--name', 'e2e open', '--kind', 'r', '--', 'sleep', '600'])).trim();
+    const id = (await perch(binary, ['new', '-d', '--name', 'e2e open', '--kind', 'python', '--', 'sleep', '600'])).trim();
     ids.push(id);
     await testing.refresh();
     let asked = false;
@@ -237,5 +241,103 @@ describe('terminals', () => {
     }
     const shell = testing.shellCommand();
     assert.strictEqual(shell[0], process.env.SHELL || '/bin/sh');
+  });
+
+  describe('new persistent terminal', () => {
+    const os_ = process.platform === 'darwin' ? 'osx' : 'linux';
+    const config = () => vscode.workspace.getConfiguration('terminal.integrated');
+    const global = vscode.ConfigurationTarget.Global;
+    let dir: string;
+    const pickLabel = (label: string) => (choices: TerminalChoice[]) => Promise.resolve(choices.find((c) => c.label === label));
+    const readFile = (file: string) => waitFor(file, async () => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') || undefined : undefined));
+    // Writes what the program saw to its first argument's file, then waits.
+    const report = 'printf "%s|%s|%s|%s\\n" "$0" "$PERCH_T_SET" "$PERCH_T_HOME" "${PERCH_T_DROP-unset}" > "$1"; exec sleep 600';
+
+    before(async () => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-profiles-'));
+      // The variable a profile unsets has to be in the terminal's environment first.
+      await config().update(`env.${os_}`, { PERCH_T_DROP: 'present' }, global);
+      await config().update(
+        `profiles.${os_}`,
+        {
+          'e2e profile': {
+            path: ['/nonexistent/sh', '/bin/sh'],
+            args: ['-c', report, 'zero{x}{dir}', path.join(dir, 'profile.txt')],
+            env: { PERCH_T_SET: 'set {id}', PERCH_T_HOME: '${env:HOME}', PERCH_T_DROP: null },
+          },
+          'e2e control': { path: 'sh', args: ['-c', report, 'control', path.join(dir, 'control.txt')] },
+          'e2e missing': { path: '/nonexistent/sh' },
+          'e2e command variable': { path: '/bin/sh', args: ['${command:pick}'] },
+        },
+        global,
+      );
+    });
+
+    after(async () => {
+      for (const key of [`env.${os_}`, `profiles.${os_}`, `defaultProfile.${os_}`]) await config().update(key, undefined, global);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('lists the persistent shell, the profiles Perch can run, and a command line', async () => {
+      let labels: string[] = [];
+      await testing.newTerminal((choices) => {
+        labels = choices.map((c) => c.label);
+        return Promise.resolve(undefined);
+      });
+      assert.strictEqual(labels[0], 'Persistent shell');
+      assert.strictEqual(labels.at(-1), 'Run a command...');
+      assert.ok(labels.includes('e2e profile') && labels.includes('e2e control'), labels.join(', '));
+      assert.ok(!labels.includes('e2e missing'), 'a profile whose path is missing');
+      assert.ok(!labels.includes('e2e command variable'), 'a profile with a variable Perch cannot resolve');
+    });
+
+    it('runs a profile with its arguments, variables and environment, braces kept', async () => {
+      const r = await testing.newTerminal(pickLabel('e2e profile'));
+      assert.ok(r);
+      ids.push(r.session.id);
+      assert.strictEqual(r.session.name, 'e2e profile');
+      assert.strictEqual(r.session.kind, 'shell');
+      const seen = await readFile(path.join(dir, 'profile.txt'));
+      assert.strictEqual(seen, `zero{x}{dir}|set {id}|${process.env.HOME}|unset\n`);
+      const control = await testing.newTerminal(pickLabel('e2e control'));
+      assert.ok(control);
+      ids.push(control.session.id);
+      assert.notStrictEqual(control.session.id, r.session.id);
+      assert.strictEqual(await readFile(path.join(dir, 'control.txt')), 'control|||present\n');
+    });
+
+    it('runs a command line typed by the user, braces kept', async () => {
+      const file = path.join(dir, 'command.txt');
+      const line = `printf '%s\\n' '{x} {dir}' > '${file}'; exec sleep 600`;
+      const r = await testing.newTerminal(pickLabel('Run a command...'), () => Promise.resolve(line));
+      assert.ok(r);
+      ids.push(r.session.id);
+      assert.strictEqual(r.session.kind, '');
+      assert.strictEqual(await readFile(file), '{x} {dir}\n');
+      // Cancelling the prompt creates nothing.
+      assert.strictEqual(await testing.newTerminal(pickLabel('Run a command...'), () => Promise.resolve(undefined)), undefined);
+    });
+
+    it('makes every new terminal persistent when Persistent shell is the default profile', async () => {
+      await config().update(`defaultProfile.${os_}`, 'Persistent shell', global);
+      const before = new Set(vscode.window.terminals);
+      await vscode.commands.executeCommand('workbench.action.terminal.new');
+      await vscode.commands.executeCommand('workbench.action.terminal.new');
+      const created = await waitFor('two new terminals', async () => {
+        const t = vscode.window.terminals.filter((x) => !before.has(x));
+        return t.length >= 2 ? t : undefined;
+      });
+      const launched = created.map((t) => {
+        others.push(t);
+        const o = t.creationOptions as vscode.TerminalOptions;
+        return recognize(o.shellPath, o.shellArgs);
+      });
+      for (const l of launched) {
+        assert.strictEqual(l?.mode, 'new', 'a Perch terminal creating its session');
+        ids.push(l.id);
+      }
+      assert.notStrictEqual(launched[0]?.id, launched[1]?.id);
+      for (const l of launched) await attachedBy(binary, l!.id, testing.label);
+    });
   });
 });

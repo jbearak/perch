@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `reedline-prompt OUT`: a reedline line editor at the version Raven's
-//! console uses, with bracketed paste on. Like Raven's console, it asks
-//! the terminal for the cursor position (DSR 6) as it draws each prompt,
-//! and crossterm waits up to 2 seconds for the answer.
+//! `reedline-prompt OUT`: a reedline line editor with bracketed paste on,
+//! as REPLs built on reedline use it. Like them, it asks the terminal for
+//! the cursor position (DSR 6) as it draws each prompt, and crossterm
+//! waits up to 2 seconds for the answer.
 //!
 //! For each line it reads, it appends a JSON line to OUT:
 //! `{"t": ms since start, "len": bytes, "head": the first 40 characters}`.

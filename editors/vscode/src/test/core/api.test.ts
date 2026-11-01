@@ -20,10 +20,10 @@ import { diffSessions, Session } from '../../core/sessions';
 function session(over: Partial<Session> = {}): Session {
   return {
     id: 'abcd1234',
-    name: 'R: thesis',
-    kind: 'r',
-    owner: 'jbearak.raven',
-    annotations: { 'raven.console': 'ipc' },
+    name: 'thesis',
+    kind: 'python',
+    owner: 'example.ext',
+    annotations: { 'example.socket': 'ipc' },
     dir: '/tmp/perch-501/abcd1234',
     degraded: [],
     cwd: '/home/me/thesis',
@@ -49,10 +49,10 @@ describe('API core', () => {
     const info = toSessionInfo(s, true);
     assert.deepStrictEqual(info, {
       id: 'abcd1234',
-      name: 'R: thesis',
-      kind: 'r',
-      owner: 'jbearak.raven',
-      annotations: { 'raven.console': 'ipc' },
+      name: 'thesis',
+      kind: 'python',
+      owner: 'example.ext',
+      annotations: { 'example.socket': 'ipc' },
       dir: '/tmp/perch-501/abcd1234',
       degraded: [],
       cwd: '/home/me/thesis',
@@ -86,14 +86,14 @@ describe('API core', () => {
 
   it('describes a session a terminal is still creating', () => {
     const info = startingInfo('abcd1234', '/tmp/perch-501', {
-      name: 'R',
-      kind: 'r',
-      owner: 'jbearak.raven',
+      name: 'python',
+      kind: 'python',
+      owner: 'example.ext',
       annotations: { a: 'b' },
     });
     assert.strictEqual(info.state, 'starting');
     assert.strictEqual(info.dir, '/tmp/perch-501/abcd1234');
-    assert.strictEqual(info.owner, 'jbearak.raven');
+    assert.strictEqual(info.owner, 'example.ext');
     assert.deepStrictEqual(info.annotations, { a: 'b' });
     assert.strictEqual(startingInfo('abcd1234', '/r').owner, undefined);
   });
@@ -101,10 +101,10 @@ describe('API core', () => {
   it('filters by owner and kind', () => {
     const info = toSessionInfo(session(), false);
     assert.ok(matchesFilter(info, undefined));
-    assert.ok(matchesFilter(info, { owner: 'jbearak.raven' }));
-    assert.ok(matchesFilter(info, { owner: 'jbearak.raven', kind: 'r' }));
-    assert.ok(!matchesFilter(info, { owner: 'jbearak.sight' }));
-    assert.ok(!matchesFilter(info, { kind: 'stata' }));
+    assert.ok(matchesFilter(info, { owner: 'example.ext' }));
+    assert.ok(matchesFilter(info, { owner: 'example.ext', kind: 'python' }));
+    assert.ok(!matchesFilter(info, { owner: 'other.ext' }));
+    assert.ok(!matchesFilter(info, { kind: 'node' }));
   });
 
   describe('send error codes', () => {
@@ -165,11 +165,11 @@ describe('API core', () => {
       '--paste',
       '--submit',
     ]);
-    assert.deepStrictEqual(annotateArgs('abcd1234', { a: '1', 'raven.x': 'v=w' }, ['b']), [
+    assert.deepStrictEqual(annotateArgs('abcd1234', { a: '1', 'example.x': 'v=w' }, ['b']), [
       'annotate',
       'abcd1234',
       'a=1',
-      'raven.x=v=w',
+      'example.x=v=w',
       '--unset',
       'b',
     ]);
