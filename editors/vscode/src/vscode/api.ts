@@ -28,12 +28,12 @@ export type { SessionInfo, ApiErrorCode } from '../core/api';
 
 export interface CreateOptions {
   name: string;
-  /** `r`, `stata`, `shell`, ... */
+  /** Free text, such as `shell`. */
   kind: string;
-  /** `{dir}` and `{id}` expand. */
+  /** `{dir}` and `{id}` expand; `{{` and `}}` are literal braces. */
   command: string[];
   cwd?: string;
-  /** `{dir}` and `{id}` expand. */
+  /** `{dir}` and `{id}` expand; `{{` and `}}` are literal braces. */
   env?: Record<string, string>;
   annotations?: Record<string, string>;
   terminal?: {

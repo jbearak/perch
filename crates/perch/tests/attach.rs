@@ -359,7 +359,7 @@ fn new_recorder(rt: &Rt, extra: &[&str]) -> (Pty, String) {
     (a, id)
 }
 
-/// The invariant from the brief: Perch never writes into a session on its
+/// The no-injection invariant: Perch never writes into a session on its
 /// own. Through attach, detach, takeover, every restore mode, resizes and
 /// kill, the program reads exactly the bytes that were typed.
 #[test]

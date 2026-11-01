@@ -185,7 +185,7 @@ Branch `docs/design`: `docs/design.md`, `docs/plan.md`, `docs/research/`, `docs/
 
 ### M7. Documentation
 
-README, `docs/usage.md`, `docs/api.md` (integration guide with the Raven and Sight guidance), `docs/cli.md`. Reviewed by Sonnet and Terra until both agree, then merged.
+README, `docs/usage.md`, `docs/api.md` (the integration guide for other extensions), `docs/cli.md`. Reviewed by Sonnet and Terra until both agree, then merged.
 
 ## Verification matrix
 
@@ -216,7 +216,7 @@ README, `docs/usage.md`, `docs/api.md` (integration guide with the Raven and Sig
 | Reply behind a large send | M3a, M3e | Pure and write-gated tests |
 | Concurrent binary copies | M5a | Rust `self-install` test |
 | Shell integration after reattach mid-command | M5b | Not run |
-| No injection (brief) | M3d | `stdin-recorder` invariant test |
+| No injection | M3d | `stdin-recorder` invariant test |
 
 ## Fuzzing
 

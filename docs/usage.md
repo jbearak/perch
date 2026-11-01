@@ -13,14 +13,14 @@ The Perch icon in the activity bar opens the Sessions view. Its title names the 
 The view lists every session on the host for your user, from any workspace and including sessions started with the `perch` command. Running sessions come first, newest first, then ended ones. Each item shows the name and a line such as:
 
 ```text
-R · ~/thesis · 3h · about 4.1 GB · detached
+Shell · ~/project · 3h · about 120 MB · detached
 ```
 
 That is the kind, the working directory, the age, the memory of the program and everything it started, and the state: `attached here`, `attached` (in another window or terminal), `detached`, `exited, exit code 0`, `lost`, `starting` or `unresponsive`. A session with a problem shows `warning: directory-recreated` and a warning icon.
 
 Actions on a running session:
 
-- **Open** (terminal icon): opens a terminal attached to the session. If the session is attached in another window, Perch asks "R: thesis is open in another window. Move it here?" first. The other window's terminal stays open and says the session moved.
+- **Open** (terminal icon): opens a terminal attached to the session. If the session is attached in another window, Perch asks "Shell: build is open in another window. Move it here?" first. The other window's terminal stays open and says the session moved.
 - **Kill** (trash icon): asks for confirmation, showing the kind, directory, age and memory, then ends the program and everything it started in its terminal.
 
 Actions on an ended session (`exited` or `lost`):
@@ -39,16 +39,32 @@ The status bar shows the number of detached sessions, when there are any. Clicki
 | Command | What it does |
 |---------|--------------|
 | Perch: New Persistent Shell | Starts a shell in a new session and opens its terminal. |
+| Perch: New Persistent Terminal... | Starts one of your terminal profiles, or a command line, in a new session. See [Persistent terminals](#persistent-terminals). |
 | Perch: Open | Opens a running session, chosen from a list. |
 | Perch: Show Detached Sessions | The same list as the status bar item. |
 | Perch: Refresh | Refreshes the Sessions view. |
 | Perch: Show Command-Line Path | Shows where the command-line copy of `perch` is, with a button to copy the path. |
 
-## Persistent shells
+## Persistent terminals
 
-"Persistent shell" is a terminal profile. Pick it from the terminal panel's profile menu (the arrow next to `+`), or run "Perch: New Persistent Shell". The shell starts in the workspace's first folder. It is the program in `perch.shell`, or `$SHELL` if that is empty, with `-l` on macOS to match VS Code's default there. Perch does not use your default VS Code terminal profile.
+Every Perch terminal is its own session, and you can open as many as you like. Each one is an ordinary VS Code terminal running `perch new` or `perch attach`, so scrollback, selection, links and search work as in any terminal.
 
-Persistent shells and the terminals Perch opens are ordinary VS Code terminals running `perch new` or `perch attach`. Scrollback, selection, links and search work as in any terminal.
+**Persistent shell** is a terminal profile. Pick it from the terminal panel's profile menu (the arrow next to `+`), or run "Perch: New Persistent Shell". The shell starts in the workspace's first folder. It is the program in `perch.shell`, or `$SHELL` if that is empty, with `-l` on macOS to match VS Code's default there.
+
+**Perch: New Persistent Terminal...** lists:
+
+- **Persistent shell**, as above.
+- **Your terminal profiles** for the host's platform, from `terminal.integrated.profiles.osx` or `terminal.integrated.profiles.linux`: VS Code's built-in ones (bash, zsh, fish, tmux, pwsh) and any you added, except those you removed with `null`. Your default profile is marked "default". Picking one runs its `path` and `args` in a new session, with its `env`, icon and color. A profile is listed only if its program is found: an absolute path that is executable, or a name on `PATH`. When `path` is a list, the first one found is used.
+- **Run a command...**, which asks for a command line and runs it with `/bin/sh -c` in a new session.
+
+Profiles are read the way VS Code reads them, with these differences:
+
+- Perch resolves `${env:NAME}`, `${userHome}`, `${workspaceFolder}`, `${workspaceFolderBasename}`, `${pathSeparator}` and `${/}`. A profile that uses a VS Code variable that depends on the editor, such as `${command:...}`, `${config:...}` or `${file}`, is not listed. Other text in `${...}`, such as a shell's `${HOME}`, is passed on as it is, as VS Code does.
+- An `env` entry set to `null` removes the variable: Perch starts the program through `/usr/bin/env -u NAME`.
+- `overrideName` is ignored; the session is named after the profile.
+- Shells VS Code detects by itself but that are not in your settings, and profiles contributed by other extensions, are not listed. Add a profile to your settings to run such a shell, or use "Run a command...".
+
+To make every new terminal persistent, make **Persistent shell** your default profile: run "Terminal: Select Default Profile" and pick it, or set `terminal.integrated.defaultProfile.osx` or `.linux` to `"Persistent shell"`. Then `+` and "Terminal: Create New Terminal" open a new Perch session each time. The setting applies to every window on that platform. In a remote window, Perch must be installed on the remote host.
 
 VS Code's shell integration (command decorations, command navigation) is not injected into a Perch terminal, because VS Code injects it only into shells it starts itself. You can install it by hand in your shell's startup file, as VS Code's documentation describes under "Manual installation".
 
@@ -85,7 +101,7 @@ A session's program runs under its own small supervisor process, outside VS Code
 
 When Perch starts on a host it runs `perch doctor`. If sessions there are not expected to survive logout, or a check fails, it shows a warning once per host. Run `perch doctor` in a terminal to see the details; [cli.md](cli.md#perch-doctor) explains each check. Perch cannot change host policy. On Linux, `loginctl enable-linger` keeps your service manager running after logout where your site allows it.
 
-Stata note: a detached Stata session may keep holding a license seat while it runs.
+Some programs hold a resource while they run, such as a license seat, and keep holding it while detached.
 
 ## Plain SSH and other terminals
 
@@ -159,7 +175,7 @@ Other variables, such as `DISPLAY`, are not updated.
 
 **When the model fails.** If the screen model crashes, falls far behind or uses too much memory, the program keeps running and Perch starts a new model, at most 3 times an hour. A new model has not seen earlier output, so it is `partial` (`perch info` shows it): attaching then prints a notice and asks the program to redraw by resizing the terminal. A partial model becomes complete only when the program resets the terminal.
 
-**Programs waiting for an answer while detached.** With no terminal attached, Perch answers the cursor-position and device-attribute queries that programs such as Raven's console and fish send at their prompt. It does not answer color or feature queries; a program that waits for one waits for its own timeout. After a model restart Perch cannot answer cursor-position queries until the model is complete, so a detached Raven console then waits about 2 seconds at each prompt.
+**Programs waiting for an answer while detached.** With no terminal attached, Perch answers the cursor-position and device-attribute queries that line editors such as reedline and fish send at their prompt. It does not answer color or feature queries; a program that waits for one waits for its own timeout. After a model restart Perch cannot answer cursor-position queries until the model is complete, so a detached program built on reedline then waits about 2 seconds at each prompt.
 
 **History and memory.** A session keeps at most 10,000 lines of history. The model holds about 19 MB for 10,000 lines at 120 columns, and about 62 MB at 500 columns.
 

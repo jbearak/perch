@@ -114,11 +114,10 @@ export function displayName(s: Session): string {
   return s.name !== '' ? s.name : s.id;
 }
 
-const kindNames: Record<string, string> = { r: 'R', stata: 'Stata', shell: 'Shell' };
-
-/** `R`, `Stata`, `Shell`, or the kind as given; `Program` if empty. */
+/** `Shell`, or the kind as given; `Program` if empty. */
 export function kindName(kind: string): string {
-  return kindNames[kind] ?? (kind !== '' ? kind : 'Program');
+  if (kind === 'shell') return 'Shell';
+  return kind !== '' ? kind : 'Program';
 }
 
 /** `exit code 0`, `killed by signal 9 (SIGKILL)`, as the CLI words it. */
@@ -195,7 +194,7 @@ export function stateText(s: Session, label: string): string {
   }
 }
 
-/** `R · ~/thesis · 3h · about 4.1 GB · detached`. */
+/** `Shell · ~/project · 3h · about 120 MB · detached`. */
 export function describe(s: Session, ctx: DescribeContext): string {
   const parts = [kindName(s.kind)];
   if (s.cwd !== '') parts.push(homeRelative(s.cwd, ctx.home));
@@ -297,14 +296,5 @@ export function iconName(s: Session): string {
 
 /** The codicon for a kind of session. */
 export function kindIcon(kind: string): string {
-  switch (kind) {
-    case 'r':
-      return 'graph';
-    case 'stata':
-      return 'table';
-    case 'shell':
-      return 'terminal';
-    default:
-      return 'window';
-  }
+  return kind === 'shell' ? 'terminal' : 'window';
 }

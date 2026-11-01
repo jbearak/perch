@@ -40,13 +40,13 @@ fn golden_meta_json() {
     let rt = Rt::new();
     let id = rt.new_session(&[
         "--name",
-        "R: thesis",
+        "thesis",
         "--kind",
-        "r",
+        "python",
         "--owner",
-        "jbearak.raven",
+        "example.ext",
         "--annotate",
-        "raven.console=ipc",
+        "example.socket=ipc",
         "--",
         "sleep",
         "1000",

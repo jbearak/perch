@@ -9,6 +9,7 @@ import {
   iconName,
   isEmptyDiff,
   killConfirmation,
+  kindName,
   memoryText,
   parseList,
   Session,
@@ -24,8 +25,8 @@ const ctx = { now, home: '/home/me', label };
 function session(over: Partial<Session> = {}): Session {
   return {
     id: 'k3x9q2ab',
-    name: 'R: thesis',
-    kind: 'r',
+    name: 'thesis',
+    kind: 'python',
     annotations: {},
     dir: '/tmp/perch-501/k3x9q2ab',
     degraded: [],
@@ -44,7 +45,7 @@ describe('sessions', () => {
       schema: 1,
       sessions: [
         {
-          annotations: { 'raven.console': 'ipc', bad: 3 },
+          annotations: { 'example.socket': 'ipc', bad: 3 },
           attached: false,
           clientLabel: null,
           cols: 80,
@@ -60,7 +61,7 @@ describe('sessions', () => {
           kind: '',
           lastOutputAt: null,
           name: 'a running one',
-          owner: 'jbearak.raven',
+          owner: 'example.ext',
           state: 'running',
           somethingNew: true,
         },
@@ -83,8 +84,8 @@ describe('sessions', () => {
     });
     const list = parseList(stdout);
     assert.strictEqual(list.length, 2);
-    assert.deepStrictEqual(list[0].annotations, { 'raven.console': 'ipc' });
-    assert.strictEqual(list[0].owner, 'jbearak.raven');
+    assert.deepStrictEqual(list[0].annotations, { 'example.socket': 'ipc' });
+    assert.strictEqual(list[0].owner, 'example.ext');
     assert.strictEqual(list[0].clientLabel, undefined);
     assert.strictEqual(list[0].exit, undefined);
     assert.deepStrictEqual(list[1].exit, { code: 7 });
@@ -112,33 +113,40 @@ describe('sessions', () => {
   });
 
   it('describes a session for the list', () => {
-    assert.strictEqual(describeSession(session({ memoryBytes: 4_100_000_000 }), ctx), 'R · ~/thesis · 3h · about 4.1 GB · detached');
+    assert.strictEqual(describeSession(session({ memoryBytes: 4_100_000_000 }), ctx), 'python · ~/thesis · 3h · about 4.1 GB · detached');
     assert.strictEqual(
       describeSession(session({ kind: '', cwd: '/srv/x', attached: true, clientLabel: 'perch-cli' }), ctx),
       'Program · /srv/x · 3h · attached',
     );
-    assert.strictEqual(describeSession(session({ attached: true, clientLabel: label }), ctx), 'R · ~/thesis · 3h · attached here');
+    assert.strictEqual(describeSession(session({ attached: true, clientLabel: label }), ctx), 'python · ~/thesis · 3h · attached here');
     assert.strictEqual(
       describeSession(session({ state: 'exited', exit: { code: 1 }, degraded: ['directory-recreated'] }), ctx),
-      'R · ~/thesis · 3h · exited, exit code 1 · warning: directory-recreated',
+      'python · ~/thesis · 3h · exited, exit code 1 · warning: directory-recreated',
     );
     assert.strictEqual(stateText(session({ state: 'lost' }), label), 'lost');
     assert.strictEqual(stateText(session({ state: 'unresponsive' }), label), 'unresponsive');
   });
 
   it('picks icons by kind, then by state', () => {
-    assert.strictEqual(iconName(session()), 'graph');
     assert.strictEqual(iconName(session({ kind: 'shell' })), 'terminal');
-    assert.strictEqual(iconName(session({ kind: 'julia' })), 'window');
+    assert.strictEqual(iconName(session()), 'window');
+    for (const kind of ['r', 'stata', '']) assert.strictEqual(iconName(session({ kind })), 'window');
     assert.strictEqual(iconName(session({ state: 'exited' })), 'circle-slash');
     assert.strictEqual(iconName(session({ state: 'lost' })), 'warning');
     assert.strictEqual(iconName(session({ degraded: ['directory-recreated'] })), 'warning');
   });
 
+  it('names only the shell kind; others show as given', () => {
+    assert.strictEqual(kindName('shell'), 'Shell');
+    assert.strictEqual(kindName('r'), 'r');
+    assert.strictEqual(kindName('python'), 'python');
+    assert.strictEqual(kindName(''), 'Program');
+  });
+
   it('confirms a kill with name, kind, directory, age and memory', () => {
     const c = killConfirmation(session({ memoryBytes: 2_000_000 }), ctx);
-    assert.strictEqual(c.message, 'Kill R: thesis?');
-    assert.match(c.detail, /Kind: R\n/);
+    assert.strictEqual(c.message, 'Kill thesis?');
+    assert.match(c.detail, /Kind: python\n/);
     assert.match(c.detail, /Working directory: ~\/thesis\n/);
     assert.match(c.detail, /Age: 3h\n/);
     assert.match(c.detail, /Memory: about 2.0 MB/);

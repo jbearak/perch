@@ -41,18 +41,18 @@ describe('readiness', () => {
 
   it('fails with the exec error the session reports', async () => {
     const d = deps([session({ state: 'exited', exit: { error: 'cannot run `nope`: No such file or directory' } })]);
-    await assert.rejects(waitUntilRunning('R', d), (e: Error) => e instanceof SessionStartError && /R could not start: cannot run `nope`/.test(e.message));
+    await assert.rejects(waitUntilRunning('python', d), (e: Error) => e instanceof SessionStartError && /python could not start: cannot run `nope`/.test(e.message));
   });
 
   it('fails when the terminal closes first', async () => {
-    await assert.rejects(waitUntilRunning('R', deps([undefined], { after: 3, code: 127 })), /R could not start: the command was not found \(exit code 127\)/);
-    await assert.rejects(waitUntilRunning('R', deps([undefined], { after: 1, code: 2 })), /its terminal closed with exit code 2/);
-    await assert.rejects(waitUntilRunning('R', deps([undefined], { after: 1, code: null })), /an unknown status/);
+    await assert.rejects(waitUntilRunning('python', deps([undefined], { after: 3, code: 127 })), /python could not start: the command was not found \(exit code 127\)/);
+    await assert.rejects(waitUntilRunning('python', deps([undefined], { after: 1, code: 2 })), /its terminal closed with exit code 2/);
+    await assert.rejects(waitUntilRunning('python', deps([undefined], { after: 1, code: null })), /an unknown status/);
   });
 
   it('gives up after 10 seconds', async () => {
     const d = deps([undefined]);
-    await assert.rejects(waitUntilRunning('R', d), /R did not start within 10 seconds/);
+    await assert.rejects(waitUntilRunning('python', d), /python did not start within 10 seconds/);
     assert.ok(d.calls >= 100 && d.calls <= 102, `${d.calls} polls`);
   });
 

@@ -1,6 +1,6 @@
 {
   "annotations": {
-    "raven.console": "ipc"
+    "example.socket": "ipc"
   },
   "command": [
     "sleep",
@@ -13,9 +13,9 @@
   "format": 1,
   "host": "<host>",
   "id": "<id>",
-  "kind": "r",
-  "name": "R: thesis",
-  "owner": "jbearak.raven",
+  "kind": "python",
+  "name": "thesis",
+  "owner": "example.ext",
   "perchVersion": "<perchVersion>",
   "pid": "<pid>",
   "pidStart": "<pidStart>",

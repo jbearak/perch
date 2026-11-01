@@ -48,9 +48,9 @@ Starts `<command>` in a new session. Without `-d` it then attaches the current t
 |--------|--------|
 | `-d`, `--detached` | Start the session without attaching. Prints the session ID once the program is running. |
 | `--id ID` | Use this ID: 8 characters from `a-z` and `0-9`. By default Perch picks one. |
-| `--name NAME` | The session's name. Default: the command's file name (`R` for `/usr/bin/R`). |
-| `--kind KIND` | A free-form kind, such as `r`, `stata` or `shell`. Default: empty. |
-| `--owner EXT` | The extension that owns the session, such as `jbearak.sight`. |
+| `--name NAME` | The session's name. Default: the command's file name (`python3` for `/usr/bin/python3`). |
+| `--kind KIND` | A free-form kind, such as `shell` or `python`. Default: empty. |
+| `--owner EXT` | The extension that owns the session, such as `publisher.my-extension`. |
 | `--annotate K=V` | An annotation. Repeat for more. |
 | `--cwd DIR` | The program's working directory. A relative path is taken from the current directory. Default: the current directory. With `--cwd`, `PWD` is set to it. |
 | `--env NAME=VALUE` | Set a variable in the program's environment. Repeat for more. |
@@ -68,8 +68,8 @@ The terminal size comes from the terminal `perch new` runs in, or 80 columns by 
 Examples:
 
 ```sh
-# Start R and attach to it.
-perch new --name thesis --kind r -- R --no-save
+# Start a Python REPL and attach to it.
+perch new --name thesis --kind python -- python3 -q
 
 # Start a build in the background and print its ID.
 perch new -d --name build -- make -j8
@@ -112,7 +112,7 @@ If the program was killed by a signal, the exit status is 128 plus the signal's 
 
 #### The detach key
 
-The detach key is `Ctrl-\` by default, as in dtach and abduco. In a normal terminal `Ctrl-\` sends SIGQUIT, which would kill R, so catching it also removes that hazard. `--detach-key` takes `ctrl-<letter>` (also written `c-x` or `^X`), `ctrl-\`, `ctrl-]`, `ctrl-^`, `ctrl-_`, `ctrl-@`, `ctrl-[` or `none`. With `none` every key goes to the program. Perch recognizes the key in its plain form and in the forms terminals send with the kitty keyboard protocol or modifyOtherKeys.
+The detach key is `Ctrl-\` by default, as in dtach and abduco. In a normal terminal `Ctrl-\` sends SIGQUIT, which kills most programs, often with a core dump, so catching it also removes that hazard. `--detach-key` takes `ctrl-<letter>` (also written `c-x` or `^X`), `ctrl-\`, `ctrl-]`, `ctrl-^`, `ctrl-_`, `ctrl-@`, `ctrl-[` or `none`. With `none` every key goes to the program. Perch recognizes the key in its plain form and in the forms terminals send with the kitty keyboard protocol or modifyOtherKeys.
 
 ```sh
 perch attach thesis
@@ -213,8 +213,8 @@ The queue holds 1 MiB. Perch sends exactly the bytes you give it; it adds nothin
 | 1 | Nothing was sent: no such session, it has ended, the input is over 1 MiB, or the session could not be reached. |
 
 ```sh
-perch send stata --text 'do "analysis.do"' --submit
-printf 'summary(fit)\n' | perch send thesis --stdin
+perch send build --text 'make test' --submit
+printf 'print(fit)\n' | perch send thesis --stdin
 ```
 
 ### perch kill
@@ -335,7 +335,7 @@ Every `perch` process refuses a runtime directory that is a symbolic link, is no
 
 The directory is in `/tmp` because it must be on the local machine (a shared home directory over NFS would show one node's sessions on another), the socket paths must be short, and `$XDG_RUNTIME_DIR` is removed at logout. A reboot clears it. Each supervisor touches its files every hour, so cleaners such as `systemd-tmpfiles` that remove old files in `/tmp` leave live sessions alone.
 
-Other programs can keep their own files in a session directory; Raven keeps its console socket there. If the directory is removed while the session runs, the supervisor recreates it within a minute and the session's `degraded` list gains `directory-recreated`. Files other programs kept there are gone.
+Other programs can keep their own files in a session directory, such as a socket they listen on. If the directory is removed while the session runs, the supervisor recreates it within a minute and the session's `degraded` list gains `directory-recreated`. Files other programs kept there are gone.
 
 ## Environment variables
 
