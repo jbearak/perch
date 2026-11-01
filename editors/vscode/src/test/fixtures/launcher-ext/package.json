@@ -1,0 +1,30 @@
+{
+  "name": "perch-launcher-fixture",
+  "displayName": "Perch launcher fixture",
+  "publisher": "perch-test",
+  "version": "0.0.1",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "perchTest.newConsole", "title": "New fixture console" },
+      { "command": "perchTest.reject", "title": "Reject" },
+      { "command": "perchTest.cancel", "title": "Cancel" }
+    ]
+  },
+  "perch": {
+    "launchers": [
+      { "label": "Fixture console", "description": "Fixture", "icon": "beaker", "command": "perchTest.newConsole" },
+      { "label": "Rejecting console", "command": "perchTest.reject" },
+      { "label": "Cancelled console", "command": "perchTest.cancel" }
+    ]
+  }
+}

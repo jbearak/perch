@@ -10,8 +10,10 @@ import * as vscode from 'vscode';
 import { PerchCli } from '../core/cli';
 import { Launched } from '../core/api';
 import { attachArgs, newArgs, newSessionId, NewSession, recognize, Recognized, scrollbackLines, shellCommand } from '../core/launch';
+import { declaredLaunchers } from '../core/launchers';
 import { commandLaunch, Launchable, literal, profileKeys, profileLaunches } from '../core/profiles';
 import { waitUntilRunning } from '../core/readiness';
+import { programLaunches } from '../core/repls';
 import {
   adopt,
   closeAction,
@@ -42,9 +44,15 @@ export interface CreateOptions {
   };
 }
 
-/** An item of "New Persistent Terminal...": a launch, or "Run a command..." without one. */
+/**
+ * An item of "New Persistent Terminal...": a launch (`options`), another
+ * extension's console (`command`), a separator, or "Run a command..."
+ * (none of these).
+ */
 export interface TerminalChoice extends vscode.QuickPickItem {
   options?: CreateOptions;
+  /** The command that starts another extension's console. */
+  command?: string;
 }
 
 /** Shows the choices; resolves with the one picked. */
@@ -382,7 +390,17 @@ export class Terminals implements vscode.Disposable {
     ask: AskCommand = askCommand,
   ): Promise<{ session: Session; terminal: vscode.Terminal } | undefined> {
     const chosen = await pick(this.terminalChoices());
-    if (chosen === undefined) return undefined;
+    if (chosen === undefined || chosen.kind === vscode.QuickPickItemKind.Separator) return undefined;
+    if (chosen.command !== undefined) {
+      try {
+        await vscode.commands.executeCommand(chosen.command);
+      } catch (err) {
+        // The user cancelled a prompt of the extension's.
+        if (err instanceof Error && err.name === 'Canceled') return undefined;
+        throw err;
+      }
+      return undefined;
+    }
     let options = chosen.options;
     if (options === undefined) {
       const text = await ask();
@@ -402,14 +420,30 @@ export class Terminals implements vscode.Disposable {
     const shell = this.shellOptions();
     const shellDisplay = shellCommand(this.deps.settings().shell, process.platform, process.env.SHELL).join(' ');
     const host = { env: process.env, home: os.homedir(), workspaceFolder: workspaceCwd(), isExecutable };
-    return [
+    const terminals: TerminalChoice[] = [
       { label: shell.name, description: described(shell.name, shellDisplay), options: shell },
       ...profileLaunches(config.get<unknown>(keys.profiles), host).map((l) => ({
         label: l.name,
         description: described(l.name, l.display),
         options: launchOptions(l),
       })),
-      { label: 'Run a command...', description: 'Any command line, with /bin/sh -c' },
+    ];
+    const consoles: TerminalChoice[] = declaredLaunchers(vscode.extensions.all, (m) => this.output(m)).map((l) => ({
+      label: l.label,
+      description: l.description,
+      iconPath: new vscode.ThemeIcon(l.icon),
+      command: l.command,
+    }));
+    const programs: TerminalChoice[] = programLaunches({ ...host, platform: process.platform, exists: fs.existsSync }).map(
+      (l) => ({ label: l.name, description: l.display, options: launchOptions(l) }),
+    );
+    const group = (label: string, items: TerminalChoice[]): TerminalChoice[] =>
+      items.length === 0 ? [] : [{ label, kind: vscode.QuickPickItemKind.Separator }, ...items];
+    return [
+      ...group('Terminals', terminals),
+      ...group('Consoles from extensions', consoles),
+      ...group('Programs', programs),
+      ...group('', [{ label: 'Run a command...', description: 'Any command line, with /bin/sh -c' }]),
     ];
   }
 

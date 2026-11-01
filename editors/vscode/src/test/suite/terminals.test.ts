@@ -280,10 +280,15 @@ describe('terminals', () => {
 
     it('lists the persistent shell, the profiles Perch can run, and a command line', async () => {
       let labels: string[] = [];
+      let headings: string[] = [];
       await testing.newTerminal((choices) => {
-        labels = choices.map((c) => c.label);
+        const separator = (c: TerminalChoice) => c.kind === vscode.QuickPickItemKind.Separator;
+        labels = choices.filter((c) => !separator(c)).map((c) => c.label);
+        headings = choices.filter(separator).map((c) => c.label);
         return Promise.resolve(undefined);
       });
+      assert.deepStrictEqual(headings.slice(0, 2), ['Terminals', 'Consoles from extensions']);
+      assert.strictEqual(headings.at(-1), '');
       assert.strictEqual(labels[0], 'Persistent shell');
       assert.strictEqual(labels.at(-1), 'Run a command...');
       assert.ok(labels.includes('e2e profile') && labels.includes('e2e control'), labels.join(', '));
@@ -316,6 +321,53 @@ describe('terminals', () => {
       assert.strictEqual(await readFile(file), '{x} {dir}\n');
       // Cancelling the prompt creates nothing.
       assert.strictEqual(await testing.newTerminal(pickLabel('Run a command...'), () => Promise.resolve(undefined)), undefined);
+    });
+
+    it("starts another extension's declared console through its command", async () => {
+      let fixture: TerminalChoice | undefined;
+      const r = await testing.newTerminal((choices) => {
+        fixture = choices.find((c) => c.label === 'Fixture console');
+        return Promise.resolve(fixture);
+      });
+      assert.strictEqual(r, undefined, 'the extension created the session, not Perch');
+      assert.strictEqual(fixture?.description, 'Fixture');
+      assert.strictEqual((fixture?.iconPath as vscode.ThemeIcon | undefined)?.id, 'beaker');
+      const owner = 'perch-test.perch-launcher-fixture';
+      const s = await waitFor('the fixture console', async () => {
+        await testing.refresh();
+        return testing.sessions().find((x) => x.owner === owner && x.state === 'running');
+      });
+      ids.push(s.id);
+      assert.strictEqual(s.name, 'fixture console');
+      assert.ok(testing.terminalFor(s.id), 'its terminal is open in this window');
+    });
+
+    it("reports a declared console's failure, and stays quiet when it is cancelled", async () => {
+      await assert.rejects(testing.newTerminal(pickLabel('Rejecting console')), /The fixture console could not start/);
+      assert.strictEqual(await testing.newTerminal(pickLabel('Cancelled console')), undefined);
+    });
+
+    it('lists programs found on PATH and runs them bare', async () => {
+      const bin = path.join(dir, 'bin');
+      fs.mkdirSync(bin);
+      const out = path.join(dir, 'python.txt');
+      fs.writeFileSync(path.join(bin, 'python3'), `#!/bin/sh\nprintf '%s\\n' "$#" > '${out}'\nexec sleep 600\n`, { mode: 0o755 });
+      const saved = process.env.PATH;
+      process.env.PATH = `${bin}:${saved ?? ''}`;
+      try {
+        let python: TerminalChoice | undefined;
+        const r = await testing.newTerminal((choices) => {
+          python = choices.find((c) => c.label === 'Python');
+          return Promise.resolve(python);
+        });
+        assert.ok(r);
+        ids.push(r.session.id);
+        assert.strictEqual(python?.description, path.join(bin, 'python3'));
+        assert.strictEqual(r.session.kind, 'python');
+        assert.strictEqual(await readFile(out), '0\n', 'no arguments');
+      } finally {
+        process.env.PATH = saved;
+      }
     });
 
     it('makes every new terminal persistent when Persistent shell is the default profile', async () => {

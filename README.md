@@ -16,7 +16,7 @@ Perch keeps terminal sessions running after you close the VS Code window or lose
 
 ## Quick start
 
-1. Open the terminal panel's profile menu (the arrow next to `+`) and pick **Persistent shell**, or run "Perch: New Persistent Shell". To run another of your terminal profiles, or any command, in a session, run "Perch: New Persistent Terminal...".
+1. Open the terminal panel's profile menu (the arrow next to `+`) and pick **Persistent shell**, or run "Perch: New Persistent Shell". To run another of your terminal profiles, an extension's console, a REPL such as Python, or any command, in a session, run "Perch: New Persistent Terminal...".
 2. Start something long, such as a build or a REPL.
 3. Close the terminal, or the window. The program keeps running.
 4. Open the Perch view in the activity bar and click **Open** on the session. When you reopen the workspace, Perch reopens its sessions by itself.
