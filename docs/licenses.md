@@ -50,6 +50,7 @@ Rust crates are checked by `cargo deny` (see `deny.toml`), and the code linked i
 | @humanfs/types | 0.15.0 | Apache-2.0 |
 | @humanwhocodes/module-importer | 1.0.1 | Apache-2.0 |
 | @humanwhocodes/retry | 0.4.3 | Apache-2.0 |
+| @isaacs/nonrecursive-glob-match | 1.1.0 | BlueOak-1.0.0 |
 | @keyv/bigmap | 1.3.1 | MIT |
 | @keyv/serialize | 1.1.1 | MIT |
 | @types/esrecurse | 4.3.1 | MIT |
@@ -169,7 +170,7 @@ Rust crates are checked by `cargo deny` (see `deny.toml`), and the code linked i
 | log-symbols | 4.1.0 | MIT |
 | log-symbols | 6.0.0 | MIT |
 | mimic-function | 5.0.1 | MIT |
-| minimatch | 10.2.6 | BlueOak-1.0.0 |
+| minimatch | 11.0.5 | BlueOak-1.0.0 |
 | minimatch | 5.1.9 | ISC |
 | mocha | 10.8.2 | MIT |
 | ms | 2.1.3 | MIT |
