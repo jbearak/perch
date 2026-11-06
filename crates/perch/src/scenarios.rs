@@ -1,27 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Scripted scenarios across `flow`, `input` and `queries`, wired the way the
-//! supervisor wires them, with exact bytes at the client's socket and at the
-//! PTY; and property tests that no scenario gives two replies to one query.
+//! Scripted scenarios through the supervisor's [`Exchange`], with exact bytes
+//! at the client's socket and at the PTY, a scripted model and client
+//! terminal; and property tests that no scenario gives two replies to one
+//! query.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use proptest::prelude::*;
 
-use crate::flow::{self, ClientFlow, Frame, Phase};
+use crate::exchange::{ClientIo, Exchange, Need};
+use crate::flow::{self, ClientFlow, Phase};
 use crate::input::{Input, QueueFull};
-use crate::queries::{self, Kind, ModelState, NoReply, Queries, QueryId};
+use crate::queries::{self, Kind, ModelState, NoReply, QueryId};
 use crate::transport::Scripted;
 
 const MS: Duration = Duration::from_millis(1);
 const S: Duration = Duration::from_secs(1);
+/// An output frame's length and type, ahead of its payload.
+const HEADER: usize = 5;
 
-/// The attached client, as the supervisor sees it.
+/// The attached client, as the scenario scripts it.
 struct Client {
-    flow: ClientFlow,
     /// Supervisor to client.
     sock: Scripted,
+    /// What the client has made of its socket's bytes so far.
+    frames: Deframer,
     /// Client to supervisor, sent and not yet read.
     unread: Vec<u8>,
     /// Bytes of client input the supervisor has read.
@@ -35,6 +40,51 @@ struct Client {
     terminal_free: Duration,
 }
 
+impl ClientIo for Client {
+    type Sock<'a> = &'a mut Scripted;
+
+    fn socket(&mut self) -> Option<&mut Scripted> {
+        Some(&mut self.sock)
+    }
+
+    fn failed(&self) -> bool {
+        false
+    }
+}
+
+/// The payloads of the output frames the client receives, as they arrive.
+#[derive(Default)]
+struct Deframer {
+    header: Vec<u8>,
+    /// Payload bytes left in the current frame.
+    left: usize,
+}
+
+impl Deframer {
+    fn push(&mut self, mut bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        while !bytes.is_empty() {
+            if self.left == 0 {
+                let n = (HEADER - self.header.len()).min(bytes.len());
+                self.header.extend_from_slice(&bytes[..n]);
+                bytes = &bytes[n..];
+                if self.header.len() == HEADER {
+                    assert_eq!(self.header[4], crate::proto::kind::OUTPUT);
+                    let len = u32::from_be_bytes(self.header[..4].try_into().unwrap());
+                    self.left = len as usize - 1;
+                    self.header.clear();
+                }
+                continue;
+            }
+            let n = self.left.min(bytes.len());
+            out.extend_from_slice(&bytes[..n]);
+            self.left -= n;
+            bytes = &bytes[n..];
+        }
+        out
+    }
+}
+
 /// A client's terminal: it answers each query it receives after `delay`,
 /// writing the reply in two pieces `split` apart when `split` is set.
 #[derive(Debug, Clone, Copy)]
@@ -43,14 +93,10 @@ struct Terminal {
     split: Option<Duration>,
 }
 
-/// How the supervisor settled each query, and what the program received.
+/// What happened besides the exchange's own accounting.
 #[derive(Default)]
 struct Record {
-    answers: Vec<(QueryId, Vec<u8>)>,
-    unanswered: Vec<(QueryId, NoReply)>,
-    expired: Vec<QueryId>,
     detached: Vec<&'static str>,
-    stalls: usize,
     model_failures: usize,
     /// Per query, client replies that reached the program, by their end
     /// offset in that client's input.
@@ -59,11 +105,11 @@ struct Record {
 
 struct Harness {
     now: Duration,
-    queries: Queries,
-    input: Input,
+    exchange: Exchange<Client>,
     pty: Scripted,
-    client: Option<Client>,
     next_frame: u64,
+    /// Program output read so far.
+    fed: u64,
     /// The model's DSR 6 replies: when each arrives. `None` never replies.
     model_delay: Option<Duration>,
     model_replies: Vec<(Duration, QueryId, Vec<u8>)>,
@@ -84,11 +130,10 @@ impl Harness {
         pty.open();
         Harness {
             now: S,
-            queries: Queries::new(),
-            input: Input::new(),
+            exchange: Exchange::with_input(Input::new()),
             pty,
-            client: None,
             next_frame: 1,
+            fed: 0,
             model_delay: Some(MS),
             model_replies: Vec::new(),
             terminal_writes: Vec::new(),
@@ -100,34 +145,80 @@ impl Harness {
         }
     }
 
+    fn client(&self) -> Option<&Client> {
+        self.exchange.client().map(|c| &c.io)
+    }
+
+    fn client_mut(&mut self) -> Option<&mut Client> {
+        self.exchange.client_mut().map(|c| &mut c.io)
+    }
+
     /// What the program has read from its terminal since the last call.
     fn program_reads(&mut self) -> Vec<u8> {
         self.pty.take()
     }
 
-    /// What the client has received since the last call.
+    /// What the client has received since the last call, as output.
     fn client_receives(&mut self) -> Vec<u8> {
-        self.client.as_mut().expect("a client").sock.take()
+        let c = self.client_mut().expect("a client");
+        let bytes = c.sock.take();
+        c.frames.push(&bytes)
     }
 
     fn client_flow(&self) -> &ClientFlow {
-        &self.client.as_ref().expect("a client").flow
+        self.exchange.client().expect("a client").flow()
+    }
+
+    /// The supervisor's answers, in order.
+    fn answers(&self) -> Vec<(QueryId, Vec<u8>)> {
+        self.settled(|e| match e {
+            queries::Event::Answer { id, bytes } => Some((*id, bytes.clone())),
+            _ => None,
+        })
+    }
+
+    fn unanswered(&self) -> Vec<(QueryId, NoReply)> {
+        self.settled(|e| match e {
+            queries::Event::Unanswered { id, why } => Some((*id, *why)),
+            _ => None,
+        })
+    }
+
+    fn expired(&self) -> Vec<QueryId> {
+        self.settled(|e| match e {
+            queries::Event::Expired { id } => Some(*id),
+            _ => None,
+        })
+    }
+
+    fn settled<T>(&self, f: impl Fn(&queries::Event) -> Option<T>) -> Vec<T> {
+        self.exchange.settled.iter().filter_map(f).collect()
     }
 
     /// How many bytes the supervisor may read from the PTY.
     fn read_budget(&self) -> usize {
-        self.client
-            .as_ref()
-            .map_or(usize::MAX, |c| c.flow.read_budget())
+        self.exchange.read_budget()
     }
 
     /// The supervisor reads `bytes` of program output from the PTY. With a
     /// query, the bytes end with it, as the tracker cuts frames.
     fn output(&mut self, bytes: &[u8], query: Option<Kind>) -> Option<QueryId> {
+        self.read(bytes, None, query)
+    }
+
+    /// [`Harness::output`], where a long sequence ends `long_end` bytes in.
+    fn read(
+        &mut self,
+        bytes: &[u8],
+        long_end: Option<usize>,
+        query: Option<Kind>,
+    ) -> Option<QueryId> {
         assert!(bytes.len() <= self.read_budget(), "read while paused");
         let id = QueryId(self.next_frame);
         self.next_frame += 1;
-        let mut frame = Frame::new(bytes);
+        let base = self.fed;
+        self.fed += bytes.len() as u64;
+        let mut cuts = Vec::new();
         if let Some(kind) = query {
             self.kinds.insert(id, kind);
             if kind == Kind::Dsr6
@@ -136,37 +227,29 @@ impl Harness {
                 let reply = format!("\x1b[{};1R", id.0).into_bytes();
                 self.model_replies.push((self.now + delay, id, reply));
             }
-            let client_owns = self.queries.client_owns();
-            let events = self.queries.query(id, kind, self.now);
-            self.on_query_events(events);
-            if client_owns {
-                frame.queries.push(id);
+            if self.exchange.query(id, kind, self.now) {
+                cuts.push((self.fed, id));
             }
         }
-        if let Some(client) = &mut self.client {
-            let lagging = client.flow.phase() == Phase::Lagging;
-            assert_eq!(
-                self.queries.client_owns(),
-                !lagging,
-                "the client owns queries exactly when it gets live output"
-            );
-            assert_eq!(client.flow.push_live(frame, self.now), !lagging);
-        } else {
-            assert!(!self.queries.client_owns());
+        if let Some(end) = long_end {
+            self.exchange.long_sequence_ended(base + end as u64);
         }
+        self.exchange.client_output(bytes, base, &cuts, self.now);
         self.pump();
         query.map(|_| id)
     }
 
     fn send(&mut self, data: &[u8], paste: bool, submit: bool) -> Result<(), QueueFull> {
-        let result = self.input.send(data, paste, submit, self.bracketed_paste);
+        let result = self
+            .exchange
+            .send(data, paste, submit, self.bracketed_paste);
         self.pump();
         result
     }
 
     /// The client's terminal writes `bytes` to the socket.
     fn client_writes(&mut self, bytes: &[u8]) {
-        let client = self.client.as_mut().expect("a client");
+        let client = self.client_mut().expect("a client");
         client.unread.extend_from_slice(bytes);
         client.sent += bytes.len();
     }
@@ -175,7 +258,7 @@ impl Harness {
     /// a keystroke never lands inside one, even when the reply reaches the
     /// supervisor in two reads.
     fn client_types(&mut self, bytes: &[u8]) {
-        let Some(client) = &self.client else { return };
+        let Some(client) = self.client() else { return };
         let at = self.now.max(client.terminal_free);
         let generation = self.client_gen;
         self.terminal_writes
@@ -185,13 +268,14 @@ impl Harness {
 
     /// The supervisor reads what the client has sent.
     fn read_client(&mut self) {
-        let Some(client) = &mut self.client else {
+        let now = self.now;
+        let Some(client) = self.client_mut() else {
             return;
         };
         let bytes = std::mem::take(&mut client.unread);
         client.read += bytes.len();
         let read = client.read;
-        self.input.client_read(&bytes, self.now, &mut self.queries);
+        self.exchange.client_input(&bytes, now);
         let generation = self.client_gen;
         self.reply_ends.retain(|(g, id, end)| {
             if *g == generation && *end <= read {
@@ -206,7 +290,7 @@ impl Harness {
 
     /// The client reads up to `n` bytes from its socket.
     fn client_reads(&mut self, n: usize) {
-        if let Some(client) = &mut self.client {
+        if let Some(client) = self.client_mut() {
             client.sock.allow(n);
         }
         self.pump();
@@ -219,35 +303,41 @@ impl Harness {
     }
 
     fn attach_with(&mut self, restore: &[u8], terminal: Option<Terminal>) {
-        if self.client.is_some() {
+        self.connect(terminal);
+        self.resync(restore);
+    }
+
+    /// A client attaches with no restore, inside a long sequence or not.
+    fn attach_live(&mut self, in_long: bool, held: &[u8]) {
+        self.connect(None);
+        self.exchange.start_live(in_long, held, self.now);
+        self.pump();
+    }
+
+    fn connect(&mut self, terminal: Option<Terminal>) {
+        if self.exchange.client().is_some() {
             self.depart("takeover");
         }
         self.client_gen += 1;
-        self.client = Some(Client {
-            flow: ClientFlow::new(self.now),
+        let client = Client {
             sock: Scripted::new(),
+            frames: Deframer::default(),
             unread: Vec::new(),
             read: 0,
             sent: 0,
             terminal,
             terminal_free: self.now,
-        });
-        self.resync(restore);
+        };
+        self.exchange.attach(client, self.now);
     }
 
     fn resync(&mut self, restore: &[u8]) {
-        let client = self.client.as_mut().expect("a client");
-        assert!(client.flow.snapshot_ready());
-        let epoch = client.flow.request_snapshot();
-        self.queries.snapshot_requested();
+        assert!(self.client_flow().snapshot_ready());
+        let epoch = self.exchange.request_restore(false).expect("a client");
         // The model builds the snapshot at once here; nothing is read from
         // the PTY in between either way.
-        assert_eq!(client.flow.read_budget(), 0);
-        assert!(
-            client
-                .flow
-                .restore_enqueued(epoch, vec![Frame::new(restore)], self.now)
-        );
+        assert_eq!(self.read_budget(), 0);
+        assert!(self.exchange.restore_ready(epoch, restore, &[], self.now));
     }
 
     fn detach(&mut self) {
@@ -258,14 +348,15 @@ impl Harness {
     /// then answers what is still outstanding, then discards its input.
     fn depart(&mut self, why: &'static str) {
         self.read_client();
-        self.input.client_left();
-        let events = self.queries.client_left(self.now);
-        self.client = None;
+        let (_, needs) = self
+            .exchange
+            .client_leaves(Vec::new(), self.now)
+            .expect("a client");
         let generation = self.client_gen;
         self.reply_ends.retain(|(g, _, _)| *g != generation);
         self.terminal_writes.retain(|(_, g, _, _)| *g != generation);
         self.rec.detached.push(why);
-        self.on_query_events(events);
+        self.act(needs);
         self.pump();
     }
 
@@ -274,8 +365,7 @@ impl Harness {
             // A new generation: replies from the old one are discarded.
             self.model_replies.clear();
         }
-        let events = self.queries.set_model(state);
-        self.on_query_events(events);
+        self.exchange.model_state(state);
         self.pump();
     }
 
@@ -284,9 +374,7 @@ impl Harness {
         let end = self.now + dt;
         loop {
             let next = [
-                self.input.next_deadline(),
-                self.queries.next_deadline(),
-                self.client.as_ref().and_then(|c| c.flow.next_deadline()),
+                self.exchange.next_deadline(),
                 self.model_replies.iter().map(|r| r.0).min(),
                 self.terminal_writes.iter().map(|w| w.0).min(),
             ]
@@ -309,62 +397,52 @@ impl Harness {
             .partition(|r| r.0 <= now);
         self.model_replies = rest;
         for (_, id, bytes) in due {
-            let events = self.queries.model_reply(id, &bytes, now);
-            self.on_query_events(events);
+            self.exchange.model_reply(id, &bytes, now);
         }
         let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.terminal_writes)
             .into_iter()
             .partition(|w| w.0 <= now);
         self.terminal_writes = rest;
         for (_, generation, end_of, bytes) in due {
-            if generation == self.client_gen && self.client.is_some() {
+            if generation == self.client_gen && self.exchange.client().is_some() {
                 self.client_writes(&bytes);
                 if let Some(id) = end_of {
-                    let sent = self.client.as_ref().map_or(0, |c| c.sent);
+                    let sent = self.client().map_or(0, |c| c.sent);
                     self.reply_ends.push((generation, id, sent));
                 }
             }
         }
-        self.input.tick(now);
-        let events = self.queries.tick(now);
-        self.on_query_events(events);
-        if let Some(client) = &mut self.client {
-            let events = client.flow.tick(now);
-            self.on_flow_events(events);
-        }
+        let needs = self.exchange.tick(now);
+        self.act(needs);
         self.pump();
     }
 
-    /// Writes what the client's socket and the PTY accept.
+    /// Writes what the client's socket and the PTY accept, as the
+    /// supervisor's loop does, again after each need it acts on.
     fn pump(&mut self) {
-        while let Some(client) = &mut self.client {
-            let mut events = client.flow.flush(&mut client.sock, self.now);
-            if client.sock.writable() {
-                events.extend(client.flow.writable());
-            }
-            if events.is_empty() {
+        loop {
+            let writable = self.client().is_some_and(|c| c.sock.writable());
+            let needs = self.exchange.flush_client(writable, self.now);
+            let delivered = std::mem::take(&mut self.exchange.delivered);
+            self.terminal_receives(&delivered);
+            if needs.is_empty() {
                 break;
             }
-            self.on_flow_events(events);
+            self.act(needs);
         }
-        self.input.flush(&mut self.pty);
+        self.exchange.flush_input(&mut self.pty);
     }
 
-    fn on_flow_events(&mut self, events: Vec<flow::Event>) {
-        for event in events {
-            match event {
-                flow::Event::Delivered(ids) => {
-                    self.queries.delivered(&ids, self.now);
-                    self.terminal_receives(&ids);
+    fn act(&mut self, needs: Vec<Need>) {
+        for need in needs {
+            match need {
+                Need::FailModel => {
+                    self.rec.model_failures += 1;
+                    self.set_model(ModelState::Failed);
                 }
-                flow::Event::Stalled { dropped } => {
-                    self.rec.stalls += 1;
-                    let events = self.queries.stalled(&dropped, self.now);
-                    self.on_query_events(events);
-                }
-                flow::Event::TooSlow => self.depart("too_slow"),
-                flow::Event::ResyncDue => self.resync(b"<resync>"),
-                flow::Event::RestoreDelivered => {}
+                Need::Resync => self.resync(b"<resync>"),
+                Need::DetachTooSlow => self.depart("too_slow"),
+                Need::ClientGone => unreachable!("scripted sockets do not fail"),
             }
         }
     }
@@ -373,7 +451,7 @@ impl Harness {
         let Some(Terminal {
             delay: Some(delay),
             split,
-        }) = self.client.as_ref().and_then(|c| c.terminal)
+        }) = self.client().and_then(|c| c.terminal)
         else {
             return;
         };
@@ -384,8 +462,9 @@ impl Harness {
                 Kind::Da1 => format!("\x1b[?62;{}c", id.0).into_bytes(),
                 Kind::Da2 => format!("\x1b[>{};0c", id.0).into_bytes(),
             };
-            let client = self.client.as_mut().expect("a client");
-            let at = (self.now + delay).max(client.terminal_free);
+            let now = self.now;
+            let client = self.client_mut().expect("a client");
+            let at = (now + delay).max(client.terminal_free);
             client.terminal_free = at + split.unwrap_or_default();
             let generation = self.client_gen;
             match split {
@@ -399,23 +478,6 @@ impl Harness {
                 None => self
                     .terminal_writes
                     .push((at, generation, Some(*id), reply)),
-            }
-        }
-    }
-
-    fn on_query_events(&mut self, events: Vec<queries::Event>) {
-        for event in events {
-            match event {
-                queries::Event::Answer { id, bytes } => {
-                    self.input.push_reply(bytes.clone());
-                    self.rec.answers.push((id, bytes));
-                }
-                queries::Event::Unanswered { id, why } => self.rec.unanswered.push((id, why)),
-                queries::Event::Expired { id } => self.rec.expired.push(id),
-                queries::Event::ModelMissedDeadlines => {
-                    self.rec.model_failures += 1;
-                    self.set_model(ModelState::Failed);
-                }
             }
         }
     }
@@ -435,7 +497,7 @@ fn detached_queries_are_answered_with_fixed_and_model_replies() {
     assert_eq!(h.program_reads(), b"\x1b[0n\x1b[?1;2c\x1b[>0;0;0c");
     h.advance(MS);
     assert_eq!(h.program_reads(), b"\x1b[4;1R");
-    assert!(h.queries.is_idle());
+    assert!(h.exchange.queries_idle());
 }
 
 #[test]
@@ -471,7 +533,7 @@ fn a_reply_behind_a_large_send_goes_first_unless_the_send_has_started() {
     h.pty.open();
     h.advance(MS);
     assert_eq!(h.program_reads(), b"0123456789\x1b[2;2R");
-    assert!(h.rec.answers.is_empty(), "the client answered both");
+    assert!(h.answers().is_empty(), "the client answered both");
 }
 
 #[test]
@@ -491,7 +553,7 @@ fn a_client_reply_split_across_reads_still_goes_first() {
     h.advance(MS);
     assert_eq!(h.program_reads(), b"\x1b[1;2Rqueued sendabcd");
     h.detach();
-    assert!(h.rec.answers.is_empty());
+    assert!(h.answers().is_empty());
 }
 
 #[test]
@@ -501,11 +563,11 @@ fn a_stall_drops_unstarted_frames_and_the_supervisor_answers_their_queries() {
     h.client_reads(usize::MAX);
     assert_eq!(h.client_receives(), b"<restore>");
     // The client takes part of the first frame, then stops reading.
-    h.client.as_mut().unwrap().sock = Scripted::new();
+    h.client_mut().unwrap().sock = Scripted::new();
     h.output(b"one \x1b[c", Some(Kind::Da1));
     h.output(b"two", None);
     h.output(b"three", None);
-    h.client_reads(2);
+    h.client_reads(HEADER + 2);
     h.output(b"\x1b[5n", Some(Kind::Dsr5));
     h.output(b"\x1b[6n", Some(Kind::Dsr6));
     assert_eq!(h.client_receives(), b"on");
@@ -529,7 +591,7 @@ fn a_stall_drops_unstarted_frames_and_the_supervisor_answers_their_queries() {
     h.read_client();
     assert_eq!(h.program_reads(), b"\x1b[?62c");
     h.detach();
-    assert_eq!(ids(&h.rec.answers), [4, 5, 6]);
+    assert_eq!(ids(&h.answers()), [4, 5, 6]);
 }
 
 #[test]
@@ -554,7 +616,7 @@ fn three_stalls_in_ten_minutes_detach_the_client_as_too_slow() {
     h.attach(b"R");
     h.client_reads(usize::MAX);
     for round in 0..3 {
-        h.client.as_mut().unwrap().sock = Scripted::new();
+        h.client_mut().unwrap().sock = Scripted::new();
         h.output(b"x", None);
         h.output(b"\x1b[c", Some(Kind::Da1));
         h.advance(5 * S);
@@ -564,7 +626,7 @@ fn three_stalls_in_ten_minutes_detach_the_client_as_too_slow() {
             assert_eq!(h.client_flow().phase(), Phase::Live);
         }
     }
-    assert!(h.client.is_none());
+    assert!(h.exchange.client().is_none());
     assert_eq!(h.rec.detached, ["too_slow"]);
     assert_eq!(h.program_reads(), b"\x1b[?1;2c\x1b[?1;2c\x1b[?1;2c");
 }
@@ -584,8 +646,8 @@ fn takeover_reads_the_old_clients_input_before_answering() {
     // The old terminal's reply goes ahead of its typed bytes, and the
     // supervisor answers only the query it had not answered.
     assert_eq!(h.program_reads(), b"\x1b[?62;22ctyped\x1b[2;1R");
-    assert_eq!(h.rec.answers, [(dsr6, b"\x1b[2;1R".to_vec())]);
-    assert!(!h.rec.answers.iter().any(|(id, _)| *id == da1));
+    assert_eq!(h.answers(), [(dsr6, b"\x1b[2;1R".to_vec())]);
+    assert!(!h.answers().iter().any(|(id, _)| *id == da1));
     assert_eq!(h.rec.detached, ["takeover"]);
     // The new client owns the queries read from now on.
     h.client_reads(usize::MAX);
@@ -619,7 +681,7 @@ fn a_detach_answers_every_outstanding_query_once() {
     assert_eq!(h.program_reads(), b"\x1b[0n\x1b[2;1R\x1b[>0;0;0c");
     h.advance(10 * S);
     assert_eq!(h.program_reads(), b"");
-    assert!(h.queries.is_idle());
+    assert!(h.exchange.queries_idle());
 }
 
 #[test]
@@ -629,14 +691,14 @@ fn an_unanswered_forwarded_query_expires_after_two_seconds() {
     h.client_reads(usize::MAX);
     let id = h.output(b"\x1b[>c", Some(Kind::Da2)).unwrap();
     h.advance(1999 * MS);
-    assert!(h.rec.expired.is_empty());
+    assert!(h.expired().is_empty());
     h.advance(MS);
-    assert_eq!(h.rec.expired, [id]);
+    assert_eq!(h.expired(), [id]);
     // A detach now answers nothing; the program waits for its own timeout,
     // as with a terminal that does not support the query.
     h.detach();
     assert_eq!(h.program_reads(), b"");
-    assert!(h.rec.answers.is_empty());
+    assert!(h.answers().is_empty());
 }
 
 #[test]
@@ -651,7 +713,7 @@ fn a_keystroke_shaped_like_a_reply_can_consume_a_query() {
     h.read_client();
     h.detach();
     assert_eq!(h.program_reads(), b"\x1b[1;2R");
-    assert!(h.rec.answers.is_empty());
+    assert!(h.answers().is_empty());
 }
 
 #[test]
@@ -683,7 +745,7 @@ fn every_unanswered_dsr6_case() {
     h.advance(MS);
     assert_eq!(h.program_reads(), b"\x1b[0n\x1b[7;1R");
     assert_eq!(
-        h.rec.unanswered,
+        h.unanswered(),
         [
             (missed, NoReply::ModelMissedDeadline),
             (late, NoReply::ModelMissedDeadline),
@@ -706,6 +768,37 @@ fn a_query_held_back_at_the_snapshot_completes_in_the_clients_output() {
     h.output(b"\x1b[c", Some(Kind::Da1));
     assert_eq!(h.program_reads(), b"\x1b[?1;2c");
     assert_eq!(h.client_receives(), b"R\x1b[c");
+}
+
+#[test]
+fn a_client_attached_inside_a_long_sequence_gets_output_from_its_end() {
+    let mut h = Harness::new();
+    h.attach_live(true, b"\x1b_Gstart");
+    h.client_reads(usize::MAX);
+    // The rest of the sequence, withheld; then a read that ends it, with a
+    // query after the end.
+    h.output(b"more of it", None);
+    assert_eq!(h.client_receives(), b"");
+    let id = h
+        .read(b"end\x1b\\after\x1b[6n", Some(5), Some(Kind::Dsr6))
+        .unwrap();
+    assert_eq!(h.client_receives(), b"after\x1b[6n");
+    // The query is the client's, and its frame reached it.
+    h.client_writes(format!("\x1b[{};2R", id.0).as_bytes());
+    h.read_client();
+    h.advance(10 * S);
+    assert_eq!(h.program_reads(), format!("\x1b[{};2R", id.0).as_bytes());
+    assert!(h.answers().is_empty());
+    assert!(h.exchange.queries_idle());
+}
+
+#[test]
+fn a_client_attached_between_sequences_gets_the_held_bytes_first() {
+    let mut h = Harness::new();
+    h.attach_live(false, b"\x1b[3");
+    h.client_reads(usize::MAX);
+    h.output(b"1mred", None);
+    assert_eq!(h.client_receives(), b"\x1b[31mred");
 }
 
 #[test]
@@ -809,13 +902,13 @@ fn run(ops: &[Op]) -> Harness {
                 h.attach_with(b"<restore>", Some(terminal));
             }
             Op::Detach => {
-                if h.client.is_some() {
+                if h.exchange.client().is_some() {
                     h.detach();
                 }
             }
             Op::ClientReads(n) => h.client_reads(*n),
             Op::ClientStops => {
-                if let Some(client) = &mut h.client {
+                if let Some(client) = h.client_mut() {
                     client.sock.close();
                 }
             }
@@ -848,7 +941,7 @@ fn run(ops: &[Op]) -> Harness {
 /// reached the program.
 fn replies(h: &Harness) -> BTreeMap<QueryId, usize> {
     let mut count = BTreeMap::new();
-    for (id, _) in &h.rec.answers {
+    for (id, _) in &h.answers() {
         *count.entry(*id).or_default() += 1;
     }
     for (id, _) in &h.rec.client_replies {
@@ -865,7 +958,7 @@ proptest! {
         let mut h = run(&ops);
         // Everything still in flight settles: the client leaves, and time
         // passes past every deadline.
-        if h.client.is_some() {
+        if h.exchange.client().is_some() {
             h.detach();
         }
         h.pty.open();
@@ -874,11 +967,11 @@ proptest! {
         for (id, n) in replies(&h) {
             prop_assert!(n <= 1, "query {id:?} got {n} replies");
         }
-        prop_assert!(h.queries.is_idle(), "every query settles");
-        prop_assert_eq!(h.input.queued(), 0, "every reply is written");
-        let settled: Vec<QueryId> = h.rec.answers.iter().map(|a| a.0)
-            .chain(h.rec.unanswered.iter().map(|u| u.0))
-            .chain(h.rec.expired.iter().copied())
+        prop_assert!(h.exchange.queries_idle(), "every query settles");
+        prop_assert_eq!(h.exchange.input().queued(), 0, "every reply is written");
+        let settled: Vec<QueryId> = h.answers().iter().map(|a| a.0)
+            .chain(h.unanswered().iter().map(|u| u.0))
+            .chain(h.expired().iter().copied())
             .collect();
         let mut unique = settled.clone();
         unique.sort();

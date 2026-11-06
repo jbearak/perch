@@ -18,29 +18,23 @@
 use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
-use std::time::Instant;
 
 use serde_json::json;
 
 use super::log::log;
 use super::{Conn, Phase, Supervisor, read_conn, send_error};
-use crate::flow::{self, ClientFlow, Frame};
+use crate::exchange::{self, ClientIo, Need};
 use crate::meta::Exit;
 use crate::proto::{
     self, Attach, Attached, DetachReason, Detached, ErrorBody, Exited, RestoreMode, kind,
 };
-use crate::queries::QueryId;
 use crate::restore::{self, Mode, Restore};
 use crate::transport::Transport;
 use crate::{clock, env_links, sys};
 
-/// The most raw bytes in one output frame.
-const MAX_PAYLOAD: usize = proto::MAX_FRAME - 1;
-
-/// The live client.
-pub(super) struct Client {
+/// The live client's connection and terminal; the exchange keeps its flow.
+pub(super) struct Peer {
     pub(super) conn: Conn,
-    pub(super) flow: ClientFlow,
     pub(super) label: String,
     pub(super) pid: Option<i32>,
     /// The client's terminal, clamped.
@@ -49,14 +43,40 @@ pub(super) struct Client {
     pub(super) scrollback: u32,
     /// A restore asked of the model and not yet enqueued.
     pending: Option<Pending>,
-    /// Output is withheld: the client attached in the middle of a long
-    /// sequence, which has not ended yet.
-    withhold: bool,
     /// An input frame waiting for room in the input queue. Nothing more is
     /// read from the client until it fits.
     waiting_input: Option<Vec<u8>>,
     /// Writing to the client's socket failed.
     write_failed: bool,
+}
+
+impl ClientIo for Peer {
+    type Sock<'a> = Sock<'a>;
+
+    /// Control frames go first; output frames are written only once none
+    /// waits, and control frames are only queued while no output frame is
+    /// partly written.
+    fn socket(&mut self) -> Option<Sock<'_>> {
+        let mut sock = Sock {
+            stream: &self.conn.stream,
+            failed: &mut self.write_failed,
+        };
+        while !self.conn.out.is_empty() {
+            let n = sock.write(&self.conn.out);
+            if n == 0 {
+                break;
+            }
+            self.conn.out.drain(..n);
+        }
+        self.conn.out.is_empty().then_some(Sock {
+            stream: &self.conn.stream,
+            failed: &mut self.write_failed,
+        })
+    }
+
+    fn failed(&self) -> bool {
+        self.write_failed
+    }
 }
 
 struct Pending {
@@ -69,7 +89,7 @@ struct Pending {
 }
 
 /// Writes to a client's socket without blocking.
-struct Sock<'a> {
+pub(super) struct Sock<'a> {
     stream: &'a UnixStream,
     failed: &'a mut bool,
 }
@@ -94,26 +114,6 @@ impl Transport for Sock<'_> {
     }
 }
 
-fn output_frame(bytes: &[u8]) -> Vec<u8> {
-    proto::encode(kind::OUTPUT, bytes).expect("output frames are cut under the cap")
-}
-
-/// The restore's bytes as output frames.
-fn restore_frames(bytes: &[u8]) -> Vec<Frame> {
-    bytes
-        .chunks(MAX_PAYLOAD)
-        .map(|c| Frame::new(output_frame(c)))
-        .collect()
-}
-
-/// Queues the bytes the feeder holds back as live output. An unfinished
-/// sequence can be up to 16 MiB, so it goes in frames under the cap.
-fn push_held(flow: &mut ClientFlow, held: &[u8], now: std::time::Duration) {
-    for c in held.chunks(MAX_PAYLOAD) {
-        flow.push_live(Frame::new(output_frame(c)), now);
-    }
-}
-
 /// `perch attach`'s exit status for a program's end.
 pub fn exit_status(exit: &Exit, start_failure: Option<u8>) -> u8 {
     if let Some(code) = start_failure {
@@ -127,16 +127,38 @@ pub fn exit_status(exit: &Exit, start_failure: Option<u8>) -> u8 {
 }
 
 impl Supervisor {
-    /// How many bytes may be read from the PTY now.
-    pub(super) fn read_budget(&self) -> usize {
-        self.client
-            .as_ref()
-            .map_or(usize::MAX, |c| c.flow.read_budget())
+    /// The attached client's connection and terminal.
+    pub(super) fn peer(&self) -> Option<&Peer> {
+        self.exchange.client().map(|c| &c.io)
+    }
+
+    fn peer_mut(&mut self) -> Option<&mut Peer> {
+        self.exchange.client_mut().map(|c| &mut c.io)
+    }
+
+    /// Acts on what the exchange could not do itself.
+    pub(super) fn act(&mut self, needs: Vec<Need>) {
+        for need in needs {
+            match need {
+                Need::FailModel => self
+                    .model
+                    .fail("it missed 3 DSR 6 deadlines within a minute"),
+                Need::Resync => self.request_restore(Mode::Screen),
+                Need::DetachTooSlow => {
+                    log("the client stalled 3 times within 10 minutes: detaching it");
+                    self.client_leaves(Some(DetachReason::TooSlow));
+                }
+                Need::ClientGone => {
+                    log("cannot write to the client; it is gone");
+                    self.client_leaves(None);
+                }
+            }
+        }
     }
 
     /// An `Attach` frame on a connection that sent an attach `Hello`.
     pub(super) fn attach(&mut self, mut conn: Conn, req: Attach) {
-        if self.client.is_some() {
+        if self.exchange.client().is_some() {
             if req.if_detached {
                 conn.out.extend(proto::encode_json(kind::BUSY, &json!({})));
                 conn.closing = true;
@@ -160,19 +182,18 @@ impl Supervisor {
             conn.label, req.restore
         ));
         self.relink(&req.env);
-        self.client = Some(Client {
+        let peer = Peer {
             label: conn.label.clone(),
             conn,
-            flow: ClientFlow::new(self.elapsed()),
             pid: req.pid,
             cols,
             rows,
             scrollback: req.scrollback,
             pending: None,
-            withhold: false,
             waiting_input: None,
             write_failed: false,
-        });
+        };
+        self.exchange.attach(peer, self.elapsed());
 
         // The creator's attach: the program starts now, at its size.
         if self.plan.is_some() {
@@ -181,22 +202,16 @@ impl Supervisor {
             if let Err(msg) = self.spawn_program() {
                 self.start_failed_attached(msg, 1);
             }
-            self.queries.snapshot_requested();
+            self.exchange.start_with_program();
             return;
         }
         match req.restore {
             RestoreMode::Full => self.request_restore(Mode::Full),
             RestoreMode::Screen => self.request_restore(Mode::Screen),
             RestoreMode::None => {
-                self.queries.snapshot_requested();
-                let withhold = self.feeder.in_long_sequence();
-                let held = self.feeder.held().to_vec();
                 let now = self.elapsed();
-                let c = self.client.as_mut().expect("attached");
-                c.withhold = withhold;
-                if !withhold {
-                    push_held(&mut c.flow, &held, now);
-                }
+                self.exchange
+                    .start_live(self.feeder.in_long_sequence(), self.feeder.held(), now);
                 self.set_size(cols, rows);
             }
         }
@@ -217,15 +232,15 @@ impl Supervisor {
     /// Asks for the client's restore and stops PTY reads until it is
     /// enqueued. Queries read from now on are the client's.
     pub(super) fn request_restore(&mut self, mode: Mode) {
-        let in_long = self.feeder.in_long_sequence();
         let held = self.feeder.held().to_vec();
         let paste = self.feeder.tracker().bracketed_paste();
-        let Some(c) = self.client.as_mut() else {
+        let Some(epoch) = self
+            .exchange
+            .request_restore(self.feeder.in_long_sequence())
+        else {
             return;
         };
-        let epoch = c.flow.request_snapshot();
-        self.queries.snapshot_requested();
-        c.withhold = in_long;
+        let c = self.peer().expect("attached");
         let rc = restore::Client {
             cols: c.cols,
             rows: c.rows,
@@ -234,7 +249,7 @@ impl Supervisor {
         let (cols, rows) = rc.size();
         match self.model.request_restore(mode, rc, paste) {
             Some(id) => {
-                c.pending = Some(Pending {
+                self.peer_mut().expect("attached").pending = Some(Pending {
                     epoch,
                     id,
                     held,
@@ -250,19 +265,11 @@ impl Supervisor {
     /// it, and resizes the model and the PTY to the restore's size.
     fn enqueue_restore(&mut self, epoch: u64, r: Restore, held: Vec<u8>) {
         let now = self.elapsed();
-        let Some(c) = self.client.as_mut() else {
-            return;
-        };
-        if !c
-            .flow
-            .restore_enqueued(epoch, restore_frames(&r.bytes), now)
-        {
+        if !self.exchange.restore_ready(epoch, &r.bytes, &held, now) {
             return;
         }
         let Restore { size, nudge, .. } = r;
-        if !c.withhold {
-            push_held(&mut c.flow, &held, now);
-        }
+        let c = self.peer().expect("attached");
         let (want_cols, want_rows) = (c.cols, c.rows);
         self.set_size(size.0, size.1);
         if let Some(n) = nudge {
@@ -277,7 +284,7 @@ impl Supervisor {
 
     /// The model answered a restore request, or failed while one waited.
     pub(super) fn model_restore(&mut self, id: Option<u64>, fallback: bool, bytes: Vec<u8>) {
-        let Some(c) = self.client.as_mut() else {
+        let Some(c) = self.peer_mut() else {
             return;
         };
         let matches = match (&c.pending, id) {
@@ -301,7 +308,7 @@ impl Supervisor {
 
     /// The model failed: a restore waiting on it is built without it.
     pub(super) fn model_failed_restore(&mut self) {
-        if self.client.as_ref().is_some_and(|c| c.pending.is_some()) {
+        if self.peer().is_some_and(|c| c.pending.is_some()) {
             self.model_restore(None, true, Vec::new());
         }
     }
@@ -326,7 +333,7 @@ impl Supervisor {
     fn client_resized(&mut self, cols: u16, rows: u16) {
         let cols = cols.clamp(1, restore::MAX_CELLS);
         let rows = rows.clamp(1, restore::MAX_CELLS);
-        let Some(c) = self.client.as_mut() else {
+        let Some(c) = self.peer_mut() else {
             return;
         };
         c.cols = cols;
@@ -337,53 +344,9 @@ impl Supervisor {
         }
     }
 
-    /// Output read from the PTY at `base`, for the client: cut at the end
-    /// of each query (`cuts`), and nothing before `from` if the client was
-    /// withholding a long sequence that ended there.
-    pub(super) fn client_output(&mut self, chunk: &[u8], base: u64, cuts: &[(u64, QueryId)]) {
-        let now = self.elapsed();
-        let Some(c) = self.client.as_mut() else {
-            return;
-        };
-        if c.withhold {
-            return;
-        }
-        let mut pos = 0;
-        for &(end, id) in cuts {
-            let end = usize::try_from(end - base).expect("within the chunk");
-            if end <= pos {
-                continue;
-            }
-            let frame = Frame::with_query(output_frame(&chunk[pos..end]), id);
-            if !c.flow.push_live(frame, now) {
-                return;
-            }
-            pos = end;
-        }
-        if pos < chunk.len() {
-            c.flow
-                .push_live(Frame::new(output_frame(&chunk[pos..])), now);
-        }
-    }
-
-    /// The long sequence ended at `at`. A client withholding it gets the
-    /// output after it, which is `chunk[at - base..]` of this read.
-    pub(super) fn long_sequence_ended(&mut self, at: u64, base: u64, len: usize) -> Option<usize> {
-        let c = self.client.as_mut()?;
-        if !c.withhold {
-            return None;
-        }
-        c.withhold = false;
-        Some(
-            usize::try_from(at - base)
-                .expect("within the chunk")
-                .min(len),
-        )
-    }
-
     /// The live client's socket: reads frames and acts on them.
     pub(super) fn client_readable(&mut self) {
-        let Some(c) = self.client.as_mut() else {
+        let Some(c) = self.peer_mut() else {
             return;
         };
         if c.waiting_input.is_none() {
@@ -391,8 +354,7 @@ impl Supervisor {
         }
         self.client_frames();
         let gone = self
-            .client
-            .as_ref()
+            .peer()
             .is_some_and(|c| c.conn.dead || (c.conn.eof && c.waiting_input.is_none()));
         if gone {
             log("client disconnected");
@@ -404,15 +366,16 @@ impl Supervisor {
     fn client_frames(&mut self) {
         loop {
             let now = self.elapsed();
-            let Some(c) = self.client.as_mut() else {
+            let room = self.exchange.input_room();
+            let Some(c) = self.peer_mut() else {
                 return;
             };
             if let Some(bytes) = c.waiting_input.take() {
-                if bytes.len() > self.input.room() {
+                if bytes.len() > room {
                     c.waiting_input = Some(bytes);
                     return;
                 }
-                self.input.client_read(&bytes, now, &mut self.queries);
+                self.exchange.client_input(&bytes, now);
                 self.last_input = Some(clock::unix_now());
                 continue;
             }
@@ -440,75 +403,19 @@ impl Supervisor {
 
     /// Writes what the client is due and applies the stall rule.
     pub(super) fn client_flush(&mut self, writable: bool) {
-        let now = self.elapsed();
-        let Some(c) = self.client.as_mut() else {
-            return;
-        };
-        let mut events = Vec::new();
-        {
-            let mut sock = Sock {
-                stream: &c.conn.stream,
-                failed: &mut c.write_failed,
-            };
-            // Control frames go first; they are only queued while no
-            // output frame is partly written.
-            while !c.conn.out.is_empty() {
-                let n = sock.write(&c.conn.out);
-                if n == 0 {
-                    break;
-                }
-                c.conn.out.drain(..n);
-            }
-            if c.conn.out.is_empty() {
-                events.extend(c.flow.flush(&mut sock, now));
-            }
-        }
-        if writable && c.conn.out.is_empty() {
-            events.extend(c.flow.writable());
-        }
-        events.extend(c.flow.tick(now));
-        if c.write_failed {
-            log("cannot write to the client; it is gone");
-            self.client_leaves(None);
-            return;
-        }
-        self.flow_events(events);
-    }
-
-    fn flow_events(&mut self, events: Vec<flow::Event>) {
-        let now = self.elapsed();
-        for e in events {
-            match e {
-                flow::Event::Delivered(ids) => self.queries.delivered(&ids, now),
-                flow::Event::RestoreDelivered => {}
-                flow::Event::Stalled { dropped } => {
-                    log("the client stalled; output was dropped and it will be resynced");
-                    let ev = self.queries.stalled(&dropped, now);
-                    self.apply_queries(ev);
-                }
-                flow::Event::TooSlow => {
-                    log("the client stalled 3 times within 10 minutes: detaching it");
-                    self.client_leaves(Some(DetachReason::TooSlow));
-                    return;
-                }
-                flow::Event::ResyncDue => self.request_restore(Mode::Screen),
-            }
-        }
+        let needs = self.exchange.flush_client(writable, self.elapsed());
+        self.act(needs);
     }
 
     /// Whether the client's socket should be polled for writing.
     pub(super) fn client_wants_write(&self) -> bool {
-        self.client.as_ref().is_some_and(|c| {
-            !c.conn.out.is_empty()
-                || c.flow.pending().is_some()
-                || c.flow.phase() == flow::Phase::Lagging
-        })
+        let queued = self.peer().is_some_and(|c| !c.conn.out.is_empty());
+        self.exchange.client_wants_write(queued)
     }
 
     /// Whether the client's socket should be polled for reading.
     pub(super) fn client_wants_read(&self) -> bool {
-        self.client
-            .as_ref()
+        self.peer()
             .is_some_and(|c| !c.conn.eof && c.waiting_input.is_none())
     }
 
@@ -517,10 +424,9 @@ impl Supervisor {
     /// read and passed on first; queries still outstanding are answered;
     /// later input from it is discarded.
     pub(super) fn client_leaves(&mut self, reason: Option<DetachReason>) {
-        let Some(mut c) = self.client.take() else {
+        let Some(c) = self.peer_mut() else {
             return;
         };
-        let now = self.elapsed();
         if !c.conn.dead {
             read_conn(&mut c.conn);
         }
@@ -530,41 +436,29 @@ impl Supervisor {
                 input.push(f.payload);
             }
         }
-        for bytes in input {
-            let room = self.input.room();
-            if bytes.len() > room {
-                log(&format!(
-                    "the input queue is full: {} bytes of a leaving client's input were dropped",
-                    bytes.len() - room
-                ));
-            }
-            self.input
-                .client_read(&bytes[..bytes.len().min(room)], now, &mut self.queries);
-        }
-        self.input.client_left();
-        let events = self.queries.client_left(now);
-        self.apply_queries(events);
+        let now = self.elapsed();
+        let (c, needs) = self.exchange.client_leaves(input, now).expect("attached");
         log(&format!(
             "client {} left{}",
-            c.label,
+            c.io.label,
             reason.map_or_else(String::new, |r| format!(" ({r:?})"))
         ));
-        let Some(reason) = reason else {
-            return;
-        };
-        if c.conn.dead || c.write_failed {
-            return;
+        if let Some(reason) = reason
+            && !c.io.conn.dead
+            && !c.io.write_failed
+        {
+            let last = proto::encode_json(kind::DETACHED, &Detached { reason });
+            self.send_last(c, last);
         }
-        let last = proto::encode_json(kind::DETACHED, &Detached { reason });
-        self.send_last(c, last);
+        self.act(needs);
     }
 
     /// A leaving client's last frame, after the rest of any frame partly
     /// written; then its connection closes.
-    fn send_last(&mut self, c: Client, frame: Vec<u8>) {
-        let mut conn = c.conn;
-        if let Some(rest) = c.flow.started() {
-            let mut out = rest.to_vec();
+    fn send_last(&mut self, c: exchange::Attached<Peer>, frame: Vec<u8>) {
+        let rest = c.flow().started().map(<[u8]>::to_vec);
+        let mut conn = c.io.conn;
+        if let Some(mut out) = rest {
             out.append(&mut conn.out);
             conn.out = out;
         }
@@ -577,16 +471,13 @@ impl Supervisor {
     /// Whether the client has been sent everything it is due, or never
     /// will be: what the program's end waits for before `exited`.
     pub(super) fn client_drained(&self) -> bool {
-        self.client.as_ref().is_none_or(|c| {
-            c.pending.is_none()
-                && (c.flow.pending().is_none() || c.flow.phase() == flow::Phase::Lagging)
-        })
+        self.peer().is_none_or(|c| c.pending.is_none()) && self.exchange.client_drained()
     }
 
     /// The session ends with a client attached: it gets `exited`, after
     /// any frame partly written, and the directory is removed.
     pub(super) fn exited_to_client(&mut self, exit: &Exit, start_failure: Option<u8>) {
-        let Some(c) = self.client.take() else {
+        let Some(c) = self.exchange.client_ends() else {
             return;
         };
         let last = proto::encode_json(
@@ -609,11 +500,5 @@ impl Supervisor {
         };
         self.exited_to_client(&exit, Some(code));
         self.start_failure = Some(code);
-    }
-
-    /// When the client's flow has something to do.
-    pub(super) fn client_deadline(&self) -> Option<Instant> {
-        let c = self.client.as_ref()?;
-        c.flow.next_deadline().map(|d| self.epoch + d)
     }
 }

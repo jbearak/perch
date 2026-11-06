@@ -28,12 +28,13 @@ use serde_json::{Value, json};
 use self::log::log;
 pub use self::log::{CAP as LOG_CAP, FILE as LOG_FILE};
 pub use self::program::StartError;
+use crate::exchange::Exchange;
 use crate::input::{Input, QueueFull};
 use crate::meta::{self, Exit, Meta};
 use crate::model::feed::{Feeder, Step};
 use crate::model::{self as model_mod, Model};
 use crate::proto::{self, Decoder, DetachReason, ErrorBody, Hello, Welcome, kind};
-use crate::queries::{self, ModelState, Queries, QueryId};
+use crate::queries::{ModelState, QueryId};
 use crate::runtime::{self, RuntimeDir};
 use crate::sys::{self, Lock, PollFd};
 use crate::transport::Transport;
@@ -296,16 +297,14 @@ struct Supervisor {
     /// The output side: tracker and what the model is fed.
     feeder: Feeder,
     model: Model,
-    queries: Queries,
-    input: Input,
+    /// Queries, the program's input and the attached client's output.
+    exchange: Exchange<attach::Peer>,
     /// Writing to the master failed for good.
     master_write_failed: bool,
-    /// The origin of the time `queries` and `input` count in.
+    /// The origin of the time the exchange counts in.
     epoch: Instant,
     /// The session is ending with a tombstone, waiting for the tail.
     ending: Option<Ending>,
-    /// The attached client.
-    client: Option<attach::Client>,
     last_input: Option<i64>,
     /// The program could not start for an attached creator: the exit code.
     start_failure: Option<u8>,
@@ -524,14 +523,14 @@ impl Supervisor {
             cwd: cfg.cwd,
             feeder: Feeder::new(),
             model: Model::new(cfg.size.cols, cfg.size.rows, cfg.scrollback),
-            queries: Queries::new(),
             // Scaled in tests, so a test can stretch it past a slow
             // runner's pauses between the halves of a split reply.
-            input: Input::with_hold(clock::scaled(crate::input::REPLY_HOLD)),
+            exchange: Exchange::with_input(Input::with_hold(clock::scaled(
+                crate::input::REPLY_HOLD,
+            ))),
             master_write_failed: false,
             epoch: now,
             ending: None,
-            client: None,
             last_input: None,
             start_failure: None,
             creator_deadline: None,
@@ -587,7 +586,7 @@ impl Supervisor {
             let mut fds = vec![PollFd::new(self.sig_r.as_raw_fd(), true, false)];
             fds.push(PollFd::new(self.listener.as_raw_fd(), true, false));
             let master_write = self.input_writable();
-            let master_read = self.master_readable && self.read_budget() > 0;
+            let master_read = self.master_readable && self.exchange.read_budget() > 0;
             let master_idx = match &self.master {
                 Some(m) if master_read || master_write => {
                     fds.push(PollFd::new(m.as_raw_fd(), master_read, master_write));
@@ -595,7 +594,7 @@ impl Supervisor {
                 }
                 _ => None,
             };
-            let client_idx = self.client.as_ref().map(|c| {
+            let client_idx = self.peer().map(|c| {
                 fds.push(PollFd::new(
                     c.conn.stream.as_raw_fd(),
                     self.client_wants_read(),
@@ -657,10 +656,8 @@ impl Supervisor {
                 self.model.read();
             }
             self.model.tick();
-            let now = self.elapsed();
-            let events = self.queries.tick(now);
-            self.apply_queries(events);
-            self.input.tick(now);
+            let needs = self.exchange.tick(self.elapsed());
+            self.act(needs);
             self.handle_model_events();
             self.model.flush();
             self.handle_model_events();
@@ -718,7 +715,7 @@ impl Supervisor {
     /// chance to go out before the supervisor exits.
     fn flush_before_exit(&mut self) {
         if let Some(exit) = self.meta.exit.clone()
-            && self.client.is_some()
+            && self.exchange.client().is_some()
         {
             self.exited_to_client(&exit, self.start_failure);
         }
@@ -733,10 +730,7 @@ impl Supervisor {
 
     fn next_wake(&self) -> Option<Instant> {
         let mut t = self.next_identity.min(self.next_touch);
-        for d in [self.queries.next_deadline(), self.input.next_deadline()]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(d) = self.exchange.next_deadline() {
             t = t.min(self.epoch + d);
         }
         if let Some(d) = self.model.next_deadline() {
@@ -746,9 +740,6 @@ impl Supervisor {
             if matches!(c.phase, Phase::AwaitHello | Phase::AwaitAttach) {
                 t = t.min(c.hello_deadline);
             }
-        }
-        if let Some(d) = self.client_deadline() {
-            t = t.min(d);
         }
         if let Some(d) = self.creator_deadline {
             t = t.min(d);
@@ -828,7 +819,7 @@ impl Supervisor {
                     "exitCode": err.exit_code(),
                 }));
                 // An attached creator hears it in `exited`.
-                if self.client.is_some() {
+                if self.exchange.client().is_some() {
                     self.start_failed_attached(msg.clone(), err.exit_code());
                     delivered = true;
                 }
@@ -866,7 +857,7 @@ impl Supervisor {
         let fd = m.as_raw_fd();
         let mut buf = vec![0u8; 64 * 1024];
         for _ in 0..rounds {
-            let budget = self.read_budget().min(buf.len());
+            let budget = self.exchange.read_budget().min(buf.len());
             if budget == 0 {
                 return false;
             }
@@ -902,25 +893,18 @@ impl Supervisor {
         let base = self.feeder.tracker().fed();
         // Where the client's frames are cut: after each query it owns.
         let mut cuts = Vec::new();
-        let mut from = None;
         for step in self.feeder.push(chunk) {
             match step {
                 Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
                 Step::Query { id, kind, end } => {
                     // The model's state may have changed on this read
-                    // already: `queries` must know before the query.
+                    // already: the exchange must know before the query.
                     self.handle_model_events();
-                    if self.queries.client_owns() {
+                    if self.exchange.query(id, kind, self.elapsed()) {
                         cuts.push((end, id));
                     }
-                    let events = self.queries.query(id, kind, self.elapsed());
-                    self.apply_queries(events);
                 }
-                Step::LongEnd { at } => {
-                    if let Some(i) = self.long_sequence_ended(at, base, chunk.len()) {
-                        from = Some(i);
-                    }
-                }
+                Step::LongEnd { at } => self.exchange.long_sequence_ended(at),
                 Step::Reset => self.model.reset_seen(),
                 Step::Discarded => {
                     log("a sequence over 16 MiB was not given to the model");
@@ -932,35 +916,14 @@ impl Supervisor {
                 }
             }
         }
-        match from {
-            Some(i) => {
-                let cuts: Vec<_> = cuts
-                    .into_iter()
-                    .filter(|&(e, _)| e > base + i as u64)
-                    .collect();
-                self.client_output(&chunk[i..], base + i as u64, &cuts);
-            }
-            None => self.client_output(chunk, base, &cuts),
-        }
+        self.exchange
+            .client_output(chunk, base, &cuts, self.elapsed());
         self.model.restart_if_due(self.feeder.at_ground_point());
         self.handle_model_events();
     }
 
     fn elapsed(&self) -> Duration {
         self.epoch.elapsed()
-    }
-
-    fn apply_queries(&mut self, events: Vec<queries::Event>) {
-        for e in events {
-            match e {
-                queries::Event::Answer { bytes, .. } => self.input.push_reply(bytes),
-                queries::Event::Unanswered { .. } | queries::Event::Expired { .. } => {}
-                queries::Event::ModelMissedDeadlines => {
-                    self.model
-                        .fail("it missed 3 DSR 6 deadlines within a minute");
-                }
-            }
-        }
     }
 
     /// Acts on what the model said or did, until nothing is left.
@@ -973,8 +936,7 @@ impl Supervisor {
             for e in events {
                 match e {
                     model_mod::Event::State(state) => {
-                        let events = self.queries.set_model(state);
-                        self.apply_queries(events);
+                        self.exchange.model_state(state);
                         if state == ModelState::Failed {
                             self.model_failed_restore();
                         }
@@ -985,10 +947,8 @@ impl Supervisor {
                         bytes,
                     } => self.model_restore(Some(id), fallback, bytes),
                     model_mod::Event::Reply { frame, bytes } => {
-                        let events =
-                            self.queries
-                                .model_reply(QueryId(frame), &bytes, self.elapsed());
-                        self.apply_queries(events);
+                        self.exchange
+                            .model_reply(QueryId(frame), &bytes, self.elapsed());
                     }
                     model_mod::Event::Snapshot { id, tail } => {
                         if let Some(e) = &mut self.ending
@@ -1008,7 +968,7 @@ impl Supervisor {
         if self.input_gate == Some(0) {
             return false;
         }
-        self.input.pending().is_some() && !self.master_write_failed
+        self.exchange.input().pending().is_some() && !self.master_write_failed
     }
 
     /// Writes queued input and replies to the program without blocking.
@@ -1024,10 +984,10 @@ impl Supervisor {
         #[cfg(feature = "test-hooks")]
         if let Some(left) = &mut self.input_gate {
             let mut gated = Gated { inner: t, left };
-            self.input.flush(&mut gated);
+            self.exchange.flush_input(&mut gated);
             return;
         }
-        self.input.flush(&mut t);
+        self.exchange.flush_input(&mut t);
     }
 
     fn accept(&mut self) {
@@ -1138,7 +1098,7 @@ impl Supervisor {
             let conn = self.conns.remove(i);
             self.attach(conn, a);
             // What the client sent after `Attach` came in the same reads.
-            if self.client.is_some() {
+            if self.exchange.client().is_some() {
                 self.client_readable();
             }
         }
@@ -1188,7 +1148,7 @@ impl Supervisor {
             },
             "annotate" => self.annotate(&id, &req),
             "detach" => {
-                let attached = self.client.is_some();
+                let attached = self.exchange.client().is_some();
                 if attached {
                     log("detach requested");
                     self.client_leaves(Some(DetachReason::Detach));
@@ -1243,7 +1203,7 @@ impl Supervisor {
             return proto::error_response(id, "ending", "the session is ending");
         }
         let paste_on = self.feeder.tracker().bracketed_paste();
-        match self.input.send(&data, paste, submit, paste_on) {
+        match self.exchange.send(&data, paste, submit, paste_on) {
             Ok(()) => {
                 self.last_input = Some(clock::unix_now());
                 proto::ok_response(id, json!({ "queued": true }))
@@ -1271,15 +1231,15 @@ impl Supervisor {
         proto::ok_response(
             id,
             json!({
-                "queued": self.input.queued(),
-                "replies": self.input.replies_waiting(),
-                "writing": self.input.writing(),
-                "holding": self.input.holding(),
+                "queued": self.exchange.input().queued(),
+                "replies": self.exchange.input().replies_waiting(),
+                "writing": self.exchange.input().writing(),
+                "holding": self.exchange.input().holding(),
                 "gate": self.input_gate,
-                "client": self.client.as_ref().map(|c| json!({
-                    "phase": format!("{:?}", c.flow.phase()),
-                    "readBudget": c.flow.read_budget().min(u32::MAX as usize),
-                    "liveBytes": c.flow.live_bytes(),
+                "client": self.exchange.client().map(|c| json!({
+                    "phase": format!("{:?}", c.flow().phase()),
+                    "readBudget": c.flow().read_budget().min(u32::MAX as usize),
+                    "liveBytes": c.flow().live_bytes(),
                 })),
             }),
         )
@@ -1384,9 +1344,9 @@ impl Supervisor {
             "state": self.meta.state,
             "exit": self.meta.exit,
             "pid": self.meta.pid,
-            "attached": self.client.is_some(),
-            "clientLabel": self.client.as_ref().map(|c| c.label.clone()),
-            "clientPid": self.client.as_ref().and_then(|c| c.pid),
+            "attached": self.exchange.client().is_some(),
+            "clientLabel": self.peer().map(|c| c.label.clone()),
+            "clientPid": self.peer().and_then(|c| c.pid),
             "rows": self.size.rows,
             "cols": self.size.cols,
             "lastOutputAt": self.last_output.map(clock::rfc3339),
@@ -1482,7 +1442,7 @@ impl Supervisor {
         }
         let Some(k) = &self.killing else {
             let status = self.program_status?;
-            if self.client.is_some() {
+            if self.exchange.client().is_some() {
                 // Exit while attached: the output still in the PTY goes to
                 // the client, then `exited`, and nothing is left behind.
                 if !self.read_master_rounds(64) || !self.client_drained() {
@@ -1529,7 +1489,7 @@ impl Supervisor {
         match origin {
             // The requester, or the attached client, knows the session
             // ended: leave nothing behind.
-            _ if self.client.is_some() => {
+            _ if self.exchange.client().is_some() => {
                 self.remove_dir();
                 Some(0)
             }
