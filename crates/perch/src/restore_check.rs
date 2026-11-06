@@ -283,9 +283,7 @@ fn has_rep(bytes: &[u8]) -> bool {
 ///   cursor. (A saved cursor's, and the hidden primary screen's, are made
 ///   before the program's margins are set.)
 fn unwritable_cursor(model: &Model) -> Result<bool, String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(&model.dump().map_err(|e| format!("dump: {e:?}"))?)
-            .map_err(|e| format!("dump: {e}"))?;
+    let v = dump_state(model)?;
     let r = &v["scrolling_region"];
     let c = &v["screens"][v["active"].as_str().unwrap_or("primary")]["cursor"];
     let (x, y) = (c["x"].as_u64(), c["y"].as_u64());
@@ -316,14 +314,10 @@ fn compare(
     blank_styles: &[String],
     insert_at_restore: bool,
 ) -> Result<(), String> {
-    let dump = |m: &Model| -> Result<serde_json::Value, String> {
-        serde_json::from_slice(&m.dump().map_err(|e| format!("dump: {e:?}"))?)
-            .map_err(|e| format!("dump: {e}"))
-    };
-    let mut expected = dump(model)?;
+    let mut expected = dump_state(model)?;
     expected["history_sent"] = serde_json::json!(history_sent);
     expected["history_exact"] = serde_json::json!(exact);
-    let got = dump(terminal)?;
+    let got = dump_state(terminal)?;
     let diffs: Vec<String> = restore::differences(&expected, &got, mode)
         .into_iter()
         .filter(|d| !known(&expected, d, blank_styles, insert_at_restore))
