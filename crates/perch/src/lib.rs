@@ -9,6 +9,7 @@ pub mod clock;
 #[cfg(feature = "test-hooks")]
 pub mod differential;
 pub mod env_links;
+pub mod exchange;
 pub mod flow;
 pub mod input;
 pub mod meta;

@@ -11,6 +11,12 @@ pub trait Transport {
     fn write(&mut self, bytes: &[u8]) -> usize;
 }
 
+impl<T: Transport + ?Sized> Transport for &mut T {
+    fn write(&mut self, bytes: &[u8]) -> usize {
+        (**self).write(bytes)
+    }
+}
+
 /// A transport for tests: it accepts up to a budget the test sets, as a
 /// socket or PTY whose reader drains exactly that much, and records every
 /// byte accepted.
