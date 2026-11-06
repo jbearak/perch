@@ -264,6 +264,28 @@ pub fn partial(client: Client, bracketed_paste: bool) -> Restore {
     }
 }
 
+/// The restore a client gets from what the model process answered: the
+/// `bytes` it built, with the resize nudge when it fell back to the
+/// partial-model restore (`fallback`). Empty `bytes`, when the model built
+/// none or failed before answering, get the partial-model restore built
+/// here.
+pub fn from_model(
+    bytes: Vec<u8>,
+    fallback: bool,
+    client: Client,
+    bracketed_paste: bool,
+) -> Restore {
+    if bytes.is_empty() {
+        return partial(client, bracketed_paste);
+    }
+    let (cols, rows) = client.size();
+    Restore {
+        bytes,
+        size: (cols, rows),
+        nudge: fallback.then(|| Nudge::for_size(cols, rows)),
+    }
+}
+
 /// How a terminal fed a restore differs from the model it was built from,
 /// both seen through `perch_vt_dump`: one line per difference, empty when
 /// they agree. This is the second-`perch-vt` oracle, and it is
@@ -441,6 +463,23 @@ mod tests {
         hay.windows(needle.len())
             .position(|w| w == needle)
             .unwrap_or_else(|| panic!("{:?} not in output", String::from_utf8_lossy(needle)))
+    }
+
+    #[test]
+    fn a_restore_from_the_model_answer() {
+        let built = from_model(b"screen".to_vec(), false, CLIENT, true);
+        assert_eq!(built.bytes, b"screen");
+        assert_eq!((built.size, built.nudge), ((20, 4), None));
+        let fallback = from_model(b"notice".to_vec(), true, CLIENT, true);
+        assert_eq!(fallback.bytes, b"notice");
+        assert_eq!(fallback.nudge, Some(Nudge::for_size(20, 4)));
+        // None built, or the model failed: built here, with its nudge.
+        for fallback in [false, true] {
+            assert_eq!(
+                from_model(Vec::new(), fallback, CLIENT, true),
+                partial(CLIENT, true)
+            );
+        }
     }
 
     #[test]

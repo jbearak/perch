@@ -21,6 +21,9 @@
 //!
 //! Each model process has a generation, and everything it says carries it.
 //! Anything from an older generation is discarded.
+//!
+//! Every change of [`ModelState`] is an [`Event::State`], in order with
+//! the other events, so the supervisor learns of it in one place.
 
 pub mod feed;
 mod process;
@@ -69,9 +72,9 @@ pub fn memory_limit() -> u64 {
 /// What the supervisor acts on after talking to the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// The model failed and was killed. Queries waiting on it go
-    /// unanswered.
-    Failed,
+    /// The model's state changed. To [`ModelState::Failed`]: the model
+    /// failed and was killed, and queries waiting on it go unanswered.
+    State(ModelState),
     /// The DSR 6 reply to the query ending frame `frame`.
     Reply { frame: u64, bytes: Vec<u8> },
     /// A snapshot the supervisor asked for.
@@ -180,22 +183,33 @@ impl Model {
                     snapshot: None,
                     next_memory_check: Instant::now() + clock::scaled(MEMORY_CHECK),
                 });
-                self.state = if partial {
+                self.set_state(if partial {
                     ModelState::Partial
                 } else {
                     ModelState::Ok
-                };
+                });
                 self.limit_logged = false;
             }
             Err(e) => {
                 log(&format!("cannot fork the model process: {e}"));
+                // Said even when it had failed already: the supervisor's
+                // queries assume a complete model until told otherwise, so
+                // a first model that cannot start must be reported.
                 self.state = ModelState::Failed;
+                self.events.push(Event::State(ModelState::Failed));
             }
         }
     }
 
     pub fn state(&self) -> ModelState {
         self.state
+    }
+
+    fn set_state(&mut self, state: ModelState) {
+        if state != self.state {
+            self.state = state;
+            self.events.push(Event::State(state));
+        }
     }
 
     pub fn generation(&self) -> u32 {
@@ -249,27 +263,22 @@ impl Model {
     }
 
     /// The program reset the terminal with RIS: a partial model is
-    /// complete again. Returns whether it was partial.
-    pub fn reset_seen(&mut self) -> bool {
+    /// complete again.
+    pub fn reset_seen(&mut self) {
         if self.state == ModelState::Partial && self.link.is_some() {
-            self.state = ModelState::Ok;
+            self.set_state(ModelState::Ok);
             log(&format!(
                 "model (generation {}) is complete again after RIS",
                 self.generation
             ));
-            return true;
         }
-        false
     }
 
-    /// The model cannot know the screen any more. Returns whether it was
-    /// complete.
-    pub fn mark_partial(&mut self) -> bool {
+    /// The model cannot know the screen any more.
+    pub fn mark_partial(&mut self) {
         if self.state == ModelState::Ok {
-            self.state = ModelState::Partial;
-            return true;
+            self.set_state(ModelState::Partial);
         }
-        false
     }
 
     /// Asks a complete model for the tail of its screen. `None` if there is
@@ -349,17 +358,15 @@ impl Model {
             "model process {} (generation {}) failed: {why}; passthrough continues",
             link.pid, self.generation
         ));
-        self.state = ModelState::Failed;
-        self.events.push(Event::Failed);
+        self.set_state(ModelState::Failed);
     }
 
     /// Starts a fresh, partial model if one is due: the model has failed,
     /// fewer than [`RESTART_LIMIT`] restarts happened in the last
-    /// [`RESTART_WINDOW`], and the stream is at `ground`. Returns whether
-    /// it started one.
-    pub fn restart_if_due(&mut self, ground: bool) -> bool {
+    /// [`RESTART_WINDOW`], and the stream is at `ground`.
+    pub fn restart_if_due(&mut self, ground: bool) {
         if self.link.is_some() || self.generation == 0 || !ground {
-            return false;
+            return;
         }
         let now = Instant::now();
         let window = clock::scaled(RESTART_WINDOW);
@@ -377,11 +384,10 @@ impl Model {
                 ));
                 self.limit_logged = true;
             }
-            return false;
+            return;
         }
         self.restarts.push_back(now);
         self.start(true);
-        self.link.is_some()
     }
 
     /// The socket and whether there is something to write.
