@@ -94,7 +94,8 @@ export function activate(context: vscode.ExtensionContext): Exports {
   };
   const label = clientLabel(workspaceKey(workspaceUri()), windowKey());
   const home = os.homedir();
-  const describeContext = (): DescribeContext => ({ now: Date.now(), home, label });
+  // Read when the view or a command describes a session, after `terminals` exists.
+  const describeContext = (): DescribeContext => ({ now: Date.now(), home, labels: terminals.labels() });
 
   const binaryFor = (s: Settings) =>
     resolveBinary({
@@ -248,7 +249,7 @@ export function activate(context: vscode.ExtensionContext): Exports {
   const showLastOutput = async (arg: unknown): Promise<void> => {
     const s = sessionFrom(arg);
     if (s === undefined) return;
-    const doc = await vscode.workspace.openTextDocument({ content: lastOutput(s, label), language: 'plaintext' });
+    const doc = await vscode.workspace.openTextDocument({ content: lastOutput(s, terminals.labels()), language: 'plaintext' });
     await vscode.window.showTextDocument(doc, { preview: true });
   };
 
@@ -441,8 +442,8 @@ function makeBundledExecutable(extensionPath: string, output: vscode.OutputChann
 }
 
 /** The document "Show last output" opens. */
-function lastOutput(s: Session, label: string): string {
-  const header = `${displayName(s)} (${s.id}): ${stateText(s, label)}`;
+function lastOutput(s: Session, labels: readonly string[]): string {
+  const header = `${displayName(s)} (${s.id}): ${stateText(s, labels)}`;
   if (s.state === 'lost') {
     return `${header}\n\nIts supervisor ended unexpectedly, so no output was saved. ` +
       `${path.join(s.dir, 'supervisor.log')} may say why.\n`;

@@ -61,15 +61,6 @@ export function toSessionInfo(s: Session, attachedHere: boolean): SessionInfo {
   return info;
 }
 
-/**
- * Whether a session is attached by this window: by this activation's label,
- * or by one of this window's terminals, whose label may be an earlier
- * activation's (a terminal adopted after an extension host restart).
- */
-export function isAttachedHere(s: Session, labels: readonly string[]): boolean {
-  return s.attached && s.clientLabel !== undefined && labels.includes(s.clientLabel);
-}
-
 /** Where sessions live: `$PERCH_RUNTIME_DIR`, else `/tmp/perch-<uid>`, as the binary decides. */
 export function runtimeDir(env: Readonly<Record<string, string | undefined>>, uid: number, cwd: string): string {
   const configured = env.PERCH_RUNTIME_DIR;

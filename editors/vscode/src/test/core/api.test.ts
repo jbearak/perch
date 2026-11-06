@@ -6,7 +6,6 @@ import {
   apiError,
   EndReporter,
   errorCode,
-  isAttachedHere,
   matchesFilter,
   PerchApiError,
   runtimeDir,
@@ -70,12 +69,6 @@ describe('API core', () => {
     assert.strictEqual(toSessionInfo(session({ attached: false }), true).attachedHere, false);
   });
 
-  it('counts a session attached by any of this window’s labels as attached here', () => {
-    const s = session();
-    assert.ok(isAttachedHere(s, ['bbbbbbbbbbbbbbbb#22222222', 'aaaaaaaaaaaaaaaa#11111111']));
-    assert.ok(!isAttachedHere(s, ['bbbbbbbbbbbbbbbb#22222222']));
-    assert.ok(!isAttachedHere(session({ attached: false }), ['aaaaaaaaaaaaaaaa#11111111']));
-  });
 
   it('finds the runtime directory as the binary does', () => {
     assert.strictEqual(runtimeDir({}, 501, '/'), '/tmp/perch-501');
