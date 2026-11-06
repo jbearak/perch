@@ -19,6 +19,15 @@ export const EXIT_BUSY = 75;
 /** `vscode.TerminalExitReason`, by name. */
 export type ExitReason = 'unknown' | 'shutdown' | 'process' | 'user' | 'extension';
 
+/** What happened when a Perch terminal closed. */
+export interface CloseOutcome {
+  id: string;
+  reason: ExitReason;
+  code: number | undefined;
+  /** `forget`, `keep`, `ignore`, or for code 75 `busy` or `ended`. */
+  result: string;
+}
+
 /**
  * What a closed Perch terminal means for its session's place in the
  * restore set. `User`, and `Process` with any code but 75, remove it.

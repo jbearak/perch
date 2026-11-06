@@ -101,16 +101,16 @@ export class Api implements vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   private readonly attached = new vscode.EventEmitter<{ session: SessionInfo; terminal: vscode.Terminal }>();
   private readonly ended = new vscode.EventEmitter<SessionInfo>();
-  private readonly reporter = new EndReporter();
+  private readonly reporter: EndReporter;
   private readonly disposables: vscode.Disposable[];
   private readonly apis = new Map<string, PerchApiV1>();
-  /**
-   * Sessions this window's terminals attached to, as last seen: one created
-   * from a profile may start and end between two listings.
-   */
-  private readonly seen = new Map<string, Session>();
 
   constructor(private readonly deps: ApiDeps) {
+    this.reporter = new EndReporter({
+      info: (id) => deps.cli().info(id),
+      find: (id) => deps.find(id),
+      now: () => performance.now(),
+    });
     this.disposables = [
       this.changed,
       this.attached,
@@ -123,37 +123,13 @@ export class Api implements vscode.Disposable {
         for (const s of this.reporter.ended(diff.ended)) this.ended.fire(this.info(s));
       }),
       deps.terminals.onDidAttach(({ session, terminal }) => {
-        this.seen.set(session.id, session);
+        this.reporter.attached(session);
         this.attached.fire({ session: this.info(session), terminal });
       }),
-      deps.terminals.onDidClose((o: CloseOutcome) => void this.terminalClosed(o)),
+      deps.terminals.onDidClose((o: CloseOutcome) => {
+        void this.reporter.closed(o).then((s) => s && this.ended.fire(this.info(s)));
+      }),
     ];
-  }
-
-  /**
-   * A terminal of this window ended with its process. If `perch info`
-   * confirms the program ended (a tombstone, or no session at all; a
-   * detach leaves it running), report it now rather than wait for a
-   * listing, which never shows a session that came and went between two.
-   */
-  private async terminalClosed(o: CloseOutcome): Promise<void> {
-    if (o.reason !== 'process' || o.result === 'busy') return;
-    // The program's exit, as this window's terminal received it.
-    this.reporter.terminalExit(o.id, o.code);
-    const known = (): Session | undefined => this.deps.find(o.id) ?? this.seen.get(o.id);
-    let now: Session | undefined;
-    try {
-      now = await this.deps.cli().info(o.id);
-    } catch {
-      // Unknown: the next successful listing decides.
-      this.reporter.unconfirmed(o.id, known());
-      this.seen.delete(o.id);
-      return;
-    }
-    if (now !== undefined && !isEnded(now)) return;
-    const s = this.reporter.confirmedEnd(now, known());
-    this.seen.delete(o.id);
-    if (s !== undefined) this.ended.fire(this.info(s));
   }
 
   /** `exports.getApi`: an API object for the version, or undefined. */

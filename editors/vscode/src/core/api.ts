@@ -5,6 +5,7 @@
 // reporting each session's end once.
 import * as path from 'path';
 import { PerchError } from './cli';
+import { CloseOutcome } from './restore';
 import { isEnded, Session, SessionExit } from './sessions';
 
 /** The API versions `getApi` serves. */
@@ -159,41 +160,62 @@ export function apiError(err: unknown, code: ApiErrorCode | undefined): Error {
   return err instanceof Error ? err : new Error(message);
 }
 
+export interface EndReporterDeps {
+  /** `perch info`: the session now, undefined if gone. Throws when it cannot tell. */
+  info(id: string): Promise<Session | undefined>;
+  /** The latest listing's view of a session. */
+  find(id: string): Session | undefined;
+  /** The clock listings are timed by (their `startedAt`). */
+  now(): number;
+}
+
 /**
  * Reports each session's end once. A listing shows a session ending as a
  * tombstone with its exit status, or as a session gone without one. A
  * session that exits while attached leaves no tombstone, so its exit is
- * known only to the window whose terminal received it.
+ * known only to the window whose terminal received it, and one that
+ * starts and ends between two listings is known only from its attach.
  */
 export class EndReporter {
   private readonly reported = new Set<string>();
   private readonly exits = new Map<string, SessionExit>();
   /** Unconfirmed ends: the session as last seen, and when it was left pending. */
   private readonly pending = new Map<string, { known: Session | undefined; since: number }>();
+  /** Sessions this window's terminals attached to, as last seen. */
+  private readonly seen = new Map<string, Session>();
 
-  /** This window's terminal of the session ended with the program's exit code. */
-  terminalExit(id: string, code: number | undefined): void {
-    if (code !== undefined) this.exits.set(id, { code });
+  constructor(private readonly deps: EndReporterDeps) {}
+
+  /** A terminal of this window attached to the session. */
+  attached(s: Session): void {
+    this.seen.set(s.id, s);
   }
 
   /**
-   * This window's terminal of the session closed with the program's exit,
-   * and `perch info` confirms it ended: `ended` is the tombstone, or
-   * undefined if the session left none (it exited while attached). `known`
-   * is the session as last seen here. Returns it to report, at most once.
+   * A terminal of this window closed. If it ended with its process (not a
+   * busy attach) and `perch info` confirms the program ended (a tombstone,
+   * or no session at all; a detach leaves it running), resolves to the
+   * session to report, at most once, rather than wait for a listing. If
+   * `perch info` fails, the next successful listing decides.
    */
-  confirmedEnd(ended: Session | undefined, known: Session | undefined): Session | undefined {
-    const s = ended ?? (known && { ...known, state: 'exited' as const, attached: false, exit: undefined });
+  async closed(o: CloseOutcome): Promise<Session | undefined> {
+    if (o.reason !== 'process' || o.result === 'busy') return undefined;
+    if (o.code !== undefined) this.exits.set(o.id, { code: o.code });
+    const known = (): Session | undefined => this.deps.find(o.id) ?? this.seen.get(o.id);
+    let now: Session | undefined;
+    try {
+      now = await this.deps.info(o.id);
+    } catch {
+      this.pending.set(o.id, { known: known(), since: this.deps.now() });
+      this.seen.delete(o.id);
+      return undefined;
+    }
+    if (now !== undefined && !isEnded(now)) return undefined;
+    // `now` is the tombstone, or undefined if the session left none (it
+    // exited while attached).
+    const s = now ?? withUnknownEnd(known());
+    this.seen.delete(o.id);
     return s === undefined ? undefined : this.ended([s])[0];
-  }
-
-  /**
-   * Confirming an end failed (`perch info` did not answer). The session
-   * stays pending until a successful listing decides; `known` is the
-   * session as last seen here. `now` is on the clock listings are timed by.
-   */
-  unconfirmed(id: string, known: Session | undefined, now: number = performance.now()): void {
-    this.pending.set(id, { known, since: now });
   }
 
   /**
@@ -214,8 +236,8 @@ export class EndReporter {
         continue;
       }
       this.pending.delete(id);
-      const r = this.confirmedEnd(s, known);
-      if (r !== undefined) out.push(r);
+      const ended = s ?? withUnknownEnd(known);
+      if (ended !== undefined) out.push(...this.ended([ended]));
     }
     return out;
   }
@@ -232,4 +254,9 @@ export class EndReporter {
     }
     return out;
   }
+}
+
+/** A session last seen live, as ended with its exit status unknown. */
+function withUnknownEnd(known: Session | undefined): Session | undefined {
+  return known && { ...known, state: 'exited', attached: false, exit: undefined };
 }
