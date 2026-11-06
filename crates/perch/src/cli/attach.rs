@@ -107,7 +107,7 @@ pub(super) fn run(args: &[String]) -> ExitCode {
         ));
     }
     let opts = Options {
-        sock: e.path(&rt).join("sock"),
+        sock: e.sock_path(&rt),
         label: label.unwrap_or_else(default_label),
         restore,
         reattach: restore,
