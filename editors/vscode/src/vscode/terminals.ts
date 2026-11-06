@@ -545,9 +545,8 @@ export class Terminals implements vscode.Disposable {
   }
 }
 
-/** A Perch terminal from its creation options, unless it has already exited. */
-export /** The first workspace folder, if it is on this host. */
-function workspaceCwd(): string | undefined {
+/** The first workspace folder, if it is on this host. */
+export function workspaceCwd(): string | undefined {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri;
   return cwd?.scheme === 'file' ? cwd.fsPath : undefined;
 }
@@ -576,6 +575,7 @@ function launchOptions(l: Launchable): CreateOptions {
   };
 }
 
+/** A Perch terminal from its creation options, unless it has already exited. */
 function recognizeTerminal(t: vscode.Terminal): Recognized | undefined {
   if (t.exitStatus !== undefined) return undefined;
   const o = t.creationOptions as Readonly<vscode.TerminalOptions>;

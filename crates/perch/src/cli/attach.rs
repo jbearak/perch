@@ -9,7 +9,7 @@ use serde_json::json;
 use super::{Args, fail, usage_error};
 use crate::client::attach::{self, DetachKey, Options};
 use crate::proto::RestoreMode;
-use crate::runtime::{self, Entry, Housekeeping, RuntimeDir};
+use crate::runtime::{self, Entry, Housekeeping};
 use crate::{env_links, procinfo, sys};
 
 /// History rows a `full` restore sends when `--scrollback` is not given.
@@ -42,8 +42,7 @@ pub fn parse_scrollback(v: &str) -> Result<u32, String> {
 /// this process really is in it: its terminal session is the program's
 /// (`getsid`). A process that left with its own `setsid` keeps the variable
 /// but is not trusted.
-pub fn current_session(rt: &RuntimeDir, entries: &[Entry]) -> Option<String> {
-    let _ = rt;
+pub fn current_session(entries: &[Entry]) -> Option<String> {
     let id = std::env::var("PERCH_SESSION_ID").ok()?;
     let e = entries.iter().find(|e| e.meta.id == id && e.live)?;
     let pid = e.meta.pid?;
@@ -88,7 +87,7 @@ pub(super) fn run(args: &[String]) -> ExitCode {
         Err(e) => return fail(&e),
     };
     let entries = runtime::scan(&rt, Housekeeping::MarkLost);
-    if let Some(here) = current_session(&rt, &entries)
+    if let Some(here) = current_session(&entries)
         && let Ok(e) = runtime::resolve(entries.clone(), &session)
         && e.meta.id == here
     {
@@ -134,7 +133,7 @@ pub(super) fn detach(args: &[String]) -> ExitCode {
     let entries = runtime::scan(&rt, Housekeeping::MarkLost);
     let query = match session {
         Some(s) => s,
-        None => match current_session(&rt, &entries) {
+        None => match current_session(&entries) {
             Some(id) => id,
             None if std::env::var_os("PERCH_SESSION_ID").is_some() => {
                 return fail(
