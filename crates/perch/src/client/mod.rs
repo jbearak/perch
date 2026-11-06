@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The client side: control mode (connect, `Hello`, requests) here, and
-//! `perch attach`'s relay in [`attach`].
+//! The client side: the handshake both modes start with ([`Connection`])
+//! and control mode (requests) here, and `perch attach`'s relay in
+//! [`attach`].
 
 pub mod attach;
 
@@ -65,6 +66,61 @@ impl From<io::Error> for ClientError {
     }
 }
 
+impl ClientError {
+    /// An `Error` frame's refusal.
+    pub(crate) fn refused(frame: &Frame) -> ClientError {
+        ClientError::Refused(
+            serde_json::from_slice(&frame.payload)
+                .unwrap_or_else(|_| ErrorBody::new("unknown", "unreadable Error frame")),
+        )
+    }
+}
+
+/// A connection past `Hello` and `Welcome`, in either mode. Its decoder
+/// holds any bytes read after the `Welcome`.
+pub(crate) struct Connection {
+    pub(crate) stream: UnixStream,
+    pub(crate) decoder: Decoder,
+    pub(crate) welcome: Welcome,
+}
+
+impl Connection {
+    /// Sends `hello` on a connected `stream` and reads the `Welcome`, or
+    /// the `Error` refusing it, by `deadline`. Writes time out after
+    /// `write_timeout`.
+    pub(crate) fn handshake(
+        mut stream: UnixStream,
+        hello: &Hello,
+        deadline: Instant,
+        write_timeout: Duration,
+    ) -> Result<Connection, ClientError> {
+        stream.set_write_timeout(Some(write_timeout))?;
+        stream.write_all(&proto::encode_json(kind::HELLO, hello))?;
+        let mut decoder = Decoder::new();
+        let frame = read_frame(&mut stream, &mut decoder, deadline)?;
+        match frame.kind {
+            kind::WELCOME => {
+                let welcome: Welcome = serde_json::from_slice(&frame.payload)
+                    .map_err(|e| ClientError::Protocol(format!("bad Welcome: {e}")))?;
+                Ok(Connection {
+                    stream,
+                    decoder,
+                    welcome,
+                })
+            }
+            kind::ERROR => Err(ClientError::refused(&frame)),
+            k => Err(ClientError::Protocol(format!(
+                "expected Welcome, got frame type {k}"
+            ))),
+        }
+    }
+
+    /// The next frame, by `deadline`.
+    pub(crate) fn read_frame(&mut self, deadline: Instant) -> Result<Frame, ClientError> {
+        read_frame(&mut self.stream, &mut self.decoder, deadline)
+    }
+}
+
 /// A connection in control mode.
 pub struct Client {
     stream: UnixStream,
@@ -78,30 +134,18 @@ impl Client {
     /// within `timeout`.
     pub fn connect(sock: &Path, label: &str, timeout: Duration) -> Result<Client, ClientError> {
         let deadline = Instant::now() + timeout;
-        let mut stream = UnixStream::connect(sock)?;
-        stream.set_write_timeout(Some(timeout))?;
-        stream.write_all(&proto::encode_json(kind::HELLO, &Hello::control(label)))?;
-        let mut decoder = Decoder::new();
-        let frame = read_frame(&mut stream, &mut decoder, deadline)?;
-        match frame.kind {
-            kind::WELCOME => {
-                let welcome: Welcome = serde_json::from_slice(&frame.payload)
-                    .map_err(|e| ClientError::Protocol(format!("bad Welcome: {e}")))?;
-                Ok(Client {
-                    stream,
-                    decoder,
-                    next_id: 1,
-                    welcome,
-                })
-            }
-            kind::ERROR => Err(ClientError::Refused(
-                serde_json::from_slice(&frame.payload)
-                    .unwrap_or_else(|_| ErrorBody::new("unknown", "unreadable Error frame")),
-            )),
-            k => Err(ClientError::Protocol(format!(
-                "expected Welcome, got frame type {k}"
-            ))),
-        }
+        let stream = UnixStream::connect(sock)?;
+        let Connection {
+            stream,
+            decoder,
+            welcome,
+        } = Connection::handshake(stream, &Hello::control(label), deadline, timeout)?;
+        Ok(Client {
+            stream,
+            decoder,
+            next_id: 1,
+            welcome,
+        })
     }
 
     /// Sends `{"id":..,"op":op,...fields}` and waits up to `timeout` for the
@@ -125,10 +169,7 @@ impl Client {
         loop {
             let frame = read_frame(&mut self.stream, &mut self.decoder, deadline)?;
             if frame.kind == kind::ERROR {
-                return Err(ClientError::Refused(
-                    serde_json::from_slice(&frame.payload)
-                        .unwrap_or_else(|_| ErrorBody::new("unknown", "unreadable Error frame")),
-                ));
+                return Err(ClientError::refused(&frame));
             }
             if frame.kind != kind::RESPONSE {
                 continue;
@@ -175,6 +216,7 @@ impl Client {
     }
 }
 
+/// The next frame from `stream`, by `deadline`.
 fn read_frame(
     stream: &mut UnixStream,
     decoder: &mut Decoder,

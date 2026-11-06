@@ -18,9 +18,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::{ClientError, Connection};
 use crate::proto::{
-    self, Attach, Attached, Decoder, Detached, ErrorBody, Exited, Frame, Hello, Resize,
-    RestoreMode, Welcome, kind,
+    self, Attach, Attached, Decoder, Detached, Exited, Hello, Resize, RestoreMode, kind,
 };
 use crate::sys::{self, PollFd};
 
@@ -465,39 +465,6 @@ fn take_signals(sig_r: &OwnedFd) -> Vec<i32> {
     out
 }
 
-fn read_frame(
-    stream: &mut UnixStream,
-    decoder: &mut Decoder,
-    deadline: Instant,
-) -> Result<Frame, String> {
-    let mut buf = [0u8; 4096];
-    loop {
-        if let Some(f) = decoder.next_frame().map_err(|e| e.to_string())? {
-            return Ok(f);
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err("the session did not answer in time".into());
-        }
-        // macOS refuses (EINVAL) once the peer has closed; the read then
-        // says so.
-        let _ = stream.set_read_timeout(Some(left));
-        match stream.read(&mut buf) {
-            Ok(0) => return Err("the session closed the connection".into()),
-            Ok(n) => decoder.push(&buf[..n]),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-}
-
-fn refusal(f: &Frame) -> String {
-    let e: ErrorBody = serde_json::from_slice(&f.payload)
-        .unwrap_or_else(|_| ErrorBody::new("unknown", "unreadable Error frame"));
-    format!("refused ({}): {}", e.code, e.message)
-}
-
 /// `Hello`, `Welcome`, `Attach`, then `Attached` (or `Busy`, the inner
 /// error). The stream comes back non-blocking, with any bytes already read
 /// after `Attached` left in the decoder.
@@ -507,36 +474,15 @@ fn handshake(
     if_detached: bool,
 ) -> Result<Result<Session, String>, String> {
     let deadline = Instant::now() + HANDSHAKE;
-    let mut stream = UnixStream::connect(&opts.sock)
+    let stream = UnixStream::connect(&opts.sock)
         .map_err(|e| format!("cannot connect to the session: {e}"))?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE))
+    let mut conn = Connection::handshake(stream, &Hello::attach(&opts.label), deadline, HANDSHAKE)
         .map_err(|e| e.to_string())?;
-    let mut decoder = Decoder::new();
-    stream
-        .write_all(&proto::encode_json(
-            kind::HELLO,
-            &Hello::attach(&opts.label),
-        ))
-        .map_err(|e| e.to_string())?;
-    let f = read_frame(&mut stream, &mut decoder, deadline)?;
-    match f.kind {
-        kind::WELCOME => {
-            let w: Welcome = serde_json::from_slice(&f.payload)
-                .map_err(|e| format!("protocol error: bad Welcome: {e}"))?;
-            if !w.capabilities.iter().any(|c| c == "attach") {
-                return Err(format!(
-                    "the session's supervisor (perch {}) cannot attach",
-                    w.perch
-                ));
-            }
-        }
-        kind::ERROR => return Err(refusal(&f)),
-        k => {
-            return Err(format!(
-                "protocol error: expected Welcome, got frame type {k}"
-            ));
-        }
+    if !conn.welcome.capabilities.iter().any(|c| c == "attach") {
+        return Err(format!(
+            "the session's supervisor (perch {}) cannot attach",
+            conn.welcome.perch
+        ));
     }
     let (cols, rows) = terminal_size();
     let attach = Attach {
@@ -548,23 +494,26 @@ fn handshake(
         env: opts.env.clone(),
         pid: Some(sys::getpid()),
     };
-    stream
+    conn.stream
         .write_all(&proto::encode_json(kind::ATTACH, &attach))
         .map_err(|e| e.to_string())?;
-    let f = read_frame(&mut stream, &mut decoder, deadline)?;
+    let f = conn.read_frame(deadline).map_err(|e| e.to_string())?;
     match f.kind {
         kind::ATTACHED => {
             serde_json::from_slice::<Attached>(&f.payload)
                 .map_err(|e| format!("protocol error: bad Attached: {e}"))?;
         }
         kind::BUSY => return Ok(Err("the session is attached in another terminal".into())),
-        kind::ERROR => return Err(refusal(&f)),
+        kind::ERROR => return Err(ClientError::refused(&f).to_string()),
         k => {
             return Err(format!(
                 "protocol error: expected Attached, got frame type {k}"
             ));
         }
     }
+    let Connection {
+        stream, decoder, ..
+    } = conn;
     stream.set_read_timeout(None).map_err(|e| e.to_string())?;
     stream.set_write_timeout(None).map_err(|e| e.to_string())?;
     stream.set_nonblocking(true).map_err(|e| e.to_string())?;
