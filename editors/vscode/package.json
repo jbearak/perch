@@ -237,6 +237,12 @@
     "typescript-eslint": "8.72.1"
   },
   "overrides": {
-    "serialize-javascript": "7.1.4"
+    "serialize-javascript": "7.1.4",
+    "eslint": {
+      "minimatch": "11.0.5"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.5"
+    }
   }
 }
