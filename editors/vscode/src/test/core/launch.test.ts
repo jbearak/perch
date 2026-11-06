@@ -4,6 +4,7 @@ import * as assert from 'assert';
 import {
   attachArgs,
   isSessionId,
+  linkEnvArg,
   newArgs,
   newSessionId,
   recognize,
@@ -46,6 +47,31 @@ describe('launch', () => {
     assert.ok(!newArgs(bare).some((a) => a.includes('link-env')));
     assert.ok(newArgs({ ...bare, linkEnv: [] }).includes('--no-link-env'));
     assert.ok(!newArgs({ ...bare, linkEnv: [] }).includes('--link-env'));
+  });
+
+  it('passes perch.linkedEnvironment only as far as the binary takes it', () => {
+    /** A binary that takes `--link-env` (`link`) and `--no-link-env` (`none`); records what was asked. */
+    const binary = (link: boolean, none: boolean) => {
+      const asked: string[] = [];
+      return {
+        asked,
+        supportsLinkEnv: () => (asked.push('link'), link),
+        supportsNoLinkEnv: () => (asked.push('none'), none),
+      };
+    };
+    const names = ['SSH_AUTH_SOCK'];
+    const current = binary(true, true);
+    assert.deepStrictEqual(linkEnvArg(names, current), { linkEnv: names, ignored: false });
+    assert.deepStrictEqual(linkEnvArg([], current), { linkEnv: [], ignored: false });
+    assert.deepStrictEqual(current.asked, ['link', 'none'], 'only what the choice needs');
+    // From before --no-link-env: an empty list needs no flag.
+    const older = binary(true, false);
+    assert.deepStrictEqual(linkEnvArg(names, older), { linkEnv: names, ignored: false });
+    assert.deepStrictEqual(linkEnvArg([], older), { linkEnv: undefined, ignored: false });
+    // From before --link-env: names are ignored, and the user is told.
+    const oldest = binary(false, false);
+    assert.deepStrictEqual(linkEnvArg(names, oldest), { linkEnv: undefined, ignored: true });
+    assert.deepStrictEqual(linkEnvArg([], oldest), { linkEnv: undefined, ignored: false });
   });
 
   it('builds perch attach for open and for restore', () => {

@@ -9,7 +9,17 @@ import * as os from 'os';
 import * as vscode from 'vscode';
 import { PerchCli } from '../core/cli';
 import { Launched } from '../core/api';
-import { attachArgs, newArgs, newSessionId, NewSession, recognize, Recognized, scrollbackLines, shellCommand } from '../core/launch';
+import {
+  attachArgs,
+  linkEnvArg,
+  newArgs,
+  newSessionId,
+  NewSession,
+  recognize,
+  Recognized,
+  scrollbackLines,
+  shellCommand,
+} from '../core/launch';
 import { declaredLaunchers } from '../core/launchers';
 import { commandLaunch, Launchable, literal, profileKeys, profileLaunches } from '../core/profiles';
 import { waitUntilRunning } from '../core/readiness';
@@ -126,8 +136,6 @@ export class Terminals implements vscode.Disposable {
   /** Open's guarded attaches, which ask before a takeover if they find the session busy. */
   private readonly opening = new WeakSet<vscode.Terminal>();
   private noticeShown = false;
-  private linkEnv: boolean | undefined;
-  private noLinkEnv: boolean | undefined;
   private linkEnvWarned = false;
   private readonly closedEmitter = new vscode.EventEmitter<CloseOutcome>();
   readonly onDidClose = this.closedEmitter.event;
@@ -278,6 +286,13 @@ export class Terminals implements vscode.Disposable {
   prepareLaunch(o: CreateOptions): { id: string; options: vscode.TerminalOptions } {
     const id = newSessionId();
     const settings = this.deps.settings();
+    const { linkEnv, ignored } = linkEnvArg(settings.linkedEnvironment, this.deps.cli());
+    if (ignored && !this.linkEnvWarned) {
+      this.linkEnvWarned = true;
+      const message = 'This version of perch does not support perch.linkedEnvironment yet; sessions start without linked variables.';
+      this.output(message);
+      void vscode.window.showWarningMessage(message);
+    }
     const spec: NewSession = {
       id,
       label: this.deps.label,
@@ -289,7 +304,7 @@ export class Terminals implements vscode.Disposable {
       cwd: o.cwd,
       env: o.env,
       annotations: o.annotations,
-      linkEnv: this.linkEnvArg(settings.linkedEnvironment),
+      linkEnv,
     };
     this.prepared.set(id, { name: o.name, kind: o.kind, owner: o.owner, annotations: o.annotations, cwd: o.cwd });
     return {
@@ -308,33 +323,10 @@ export class Terminals implements vscode.Disposable {
   }
 
   /**
-   * `perch.linkedEnvironment` is passed only if this binary has the flags;
-   * otherwise say once that it is ignored (when it names something).
+   * The binary or `perch.linkedEnvironment` changed: warn again if the
+   * setting is ignored. A new binary is a new PerchCli, which probes again.
    */
-  private linkEnvArg(names: readonly string[]): readonly string[] | undefined {
-    if (names.length > 0) return this.linkEnvSupported(names) ? names : undefined;
-    // Link nothing: `--no-link-env`, or no flag for a binary from before
-    // it, whose default list is empty.
-    this.noLinkEnv ??= this.deps.cli().supportsNoLinkEnv();
-    return this.noLinkEnv ? [] : undefined;
-  }
-
-  private linkEnvSupported(names: readonly string[]): boolean {
-    this.linkEnv ??= this.deps.cli().supportsLinkEnv();
-    const ok = this.linkEnv;
-    if (!ok && names.length > 0 && !this.linkEnvWarned) {
-      this.linkEnvWarned = true;
-      const message = 'This version of perch does not support perch.linkedEnvironment yet; sessions start without linked variables.';
-      this.output(message);
-      void vscode.window.showWarningMessage(message);
-    }
-    return ok;
-  }
-
-  /** The binary or the setting changed: probe `--link-env` again. */
   binaryChanged(): void {
-    this.linkEnv = undefined;
-    this.noLinkEnv = undefined;
     this.linkEnvWarned = false;
   }
 
