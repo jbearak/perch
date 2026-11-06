@@ -2,14 +2,11 @@
 
 //! `perch attach` and `perch detach`, and the attach that ends `perch new`.
 
-use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use serde_json::json;
 
 use super::{Args, fail, usage_error};
-use crate::client::Client;
 use crate::client::attach::{self, DetachKey, Options};
 use crate::proto::RestoreMode;
 use crate::runtime::{self, Entry, Housekeeping, RuntimeDir};
@@ -151,19 +148,9 @@ pub(super) fn detach(args: &[String]) -> ExitCode {
         Ok(e) => e,
         Err(e) => return fail(&e),
     };
-    let sock = e.path(&rt).join("sock");
-    match detach_session(&sock) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => fail(&format!("no terminal is attached to {}", e.meta.id)),
+    match super::session::control(&rt, &e, "detach", json!({})) {
+        Ok(r) if r["detached"] == json!(true) => ExitCode::SUCCESS,
+        Ok(_) => fail(&format!("no terminal is attached to {}", e.meta.id)),
         Err(err) => fail(&err),
     }
-}
-
-fn detach_session(sock: &Path) -> Result<bool, String> {
-    let timeout = Duration::from_secs(5);
-    let mut c = Client::connect(sock, "perch-cli", timeout).map_err(|e| e.to_string())?;
-    let r = c
-        .request("detach", json!({}), timeout)
-        .map_err(|e| e.to_string())?;
-    Ok(r["detached"] == json!(true))
 }

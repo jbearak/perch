@@ -383,7 +383,13 @@ pub(super) fn dismiss(args: &[String]) -> ExitCode {
     }
 }
 
-fn control(rt: &RuntimeDir, e: &Entry, op: &str, fields: Value) -> Result<Value, String> {
+/// Asks a live session's supervisor for `op`, if it supports it.
+pub(super) fn control(
+    rt: &RuntimeDir,
+    e: &Entry,
+    op: &str,
+    fields: Value,
+) -> Result<Value, String> {
     if !e.live {
         return Err(format!(
             "session {} has ended ({})",
