@@ -26,4 +26,16 @@ describe('PerchCli probes', () => {
     // It still takes --link-env.
     assert.strictEqual(cli.supportsLinkEnv(), true);
   });
+
+  it('probes each flag once per binary', () => {
+    const bin = fakePerch('perch: unknown option `--no-link-env`');
+    const runs = `${bin}.runs`;
+    fs.writeFileSync(bin, `#!/bin/sh\necho run >> '${runs}'\necho 'perch: unknown option \`--no-link-env\`' >&2\nexit 2\n`);
+    const cli = new PerchCli(bin);
+    for (let i = 0; i < 3; i++) {
+      assert.strictEqual(cli.supportsNoLinkEnv(), false);
+      assert.strictEqual(cli.supportsLinkEnv(), true);
+    }
+    assert.strictEqual(fs.readFileSync(runs, 'utf8'), 'run\nrun\n');
+  });
 });

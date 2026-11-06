@@ -62,6 +62,9 @@ export function runPerch(binary: string, args: readonly string[], timeoutMs: num
 
 /** The CLI operations the extension uses. */
 export class PerchCli {
+  private linkEnv: boolean | undefined;
+  private noLinkEnv: boolean | undefined;
+
   constructor(readonly binary: string) {}
 
   async list(): Promise<Session[]> {
@@ -87,8 +90,8 @@ export class PerchCli {
    * binary, because `prepareLaunch` is synchronous; it takes milliseconds.
    */
   supportsLinkEnv(): boolean {
-    const r = spawnSync(this.binary, ['new', '--link-env', 'PATH'], { encoding: 'utf8', timeout: 10_000 });
-    return !/--link-env\b.*not supported/.test(r.stderr ?? '');
+    this.linkEnv ??= !/--link-env\b.*not supported/.test(this.probe(['new', '--link-env', 'PATH']));
+    return this.linkEnv;
   }
 
   /**
@@ -96,8 +99,12 @@ export class PerchCli {
    * from before it link nothing by default, so they need no flag for that.
    */
   supportsNoLinkEnv(): boolean {
-    const r = spawnSync(this.binary, ['new', '--no-link-env'], { encoding: 'utf8', timeout: 10_000 });
-    return !/unknown option `--no-link-env`/.test(r.stderr ?? '');
+    this.noLinkEnv ??= !/unknown option `--no-link-env`/.test(this.probe(['new', '--no-link-env']));
+    return this.noLinkEnv;
+  }
+
+  private probe(args: string[]): string {
+    return spawnSync(this.binary, args, { encoding: 'utf8', timeout: 10_000 }).stderr ?? '';
   }
 
   /** Kill waits out the 5-second grace period. */

@@ -52,6 +52,29 @@ export interface NewSession {
   linkEnv?: readonly string[];
 }
 
+/** Which of the link-env flags the binary's `perch new` takes. */
+export interface LinkEnvFlags {
+  supportsLinkEnv(): boolean;
+  supportsNoLinkEnv(): boolean;
+}
+
+/**
+ * `perch.linkedEnvironment` as {@link NewSession.linkEnv}, asking `flags`
+ * only what the choice needs. Names are passed only if the binary takes
+ * `--link-env`; otherwise they are `ignored`, which the user should be
+ * told. An empty list links nothing: `--no-link-env`, or no flag for a
+ * binary from before it, whose default list is empty.
+ */
+export function linkEnvArg(
+  names: readonly string[],
+  flags: LinkEnvFlags,
+): { linkEnv: readonly string[] | undefined; ignored: boolean } {
+  if (names.length > 0) {
+    return flags.supportsLinkEnv() ? { linkEnv: names, ignored: false } : { linkEnv: undefined, ignored: true };
+  }
+  return { linkEnv: flags.supportsNoLinkEnv() ? [] : undefined, ignored: false };
+}
+
 /**
  * `perch new` for a terminal: it attaches at once, with no detach key
  * (closing the terminal detaches) and full restore when it re-attaches.
