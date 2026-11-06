@@ -171,20 +171,24 @@ export function homeRelative(p: string, home: string): string {
 export interface DescribeContext {
   now: number;
   home: string;
-  /** This window's client label, to tell "attached here" from "attached". */
-  label: string;
+  /** This window's client labels, to tell "attached here" from "attached". See {@link attachedHere}. */
+  labels: readonly string[];
 }
 
-/** Whether this window's client is the one attached. */
-export function attachedHere(s: Session, label: string): boolean {
-  return s.attached && s.clientLabel === label;
+/**
+ * Whether a session is attached by this window: by this activation's label,
+ * or by one of this window's terminals, whose label may be an earlier
+ * activation's (a terminal adopted after an extension host restart).
+ */
+export function attachedHere(s: Session, labels: readonly string[]): boolean {
+  return s.attached && s.clientLabel !== undefined && labels.includes(s.clientLabel);
 }
 
 /** The connection or end state, as the list item's last part shows it. */
-export function stateText(s: Session, label: string): string {
+export function stateText(s: Session, labels: readonly string[]): string {
   switch (s.state) {
     case 'running':
-      return attachedHere(s, label) ? 'attached here' : s.attached ? 'attached' : 'detached';
+      return attachedHere(s, labels) ? 'attached here' : s.attached ? 'attached' : 'detached';
     case 'exited':
       return `exited, ${exitText(s.exit)}`;
     case 'lost':
@@ -200,7 +204,7 @@ export function describe(s: Session, ctx: DescribeContext): string {
   if (s.cwd !== '') parts.push(homeRelative(s.cwd, ctx.home));
   parts.push(sessionAge(s, ctx.now));
   if (s.memoryBytes !== undefined) parts.push(memoryText(s.memoryBytes));
-  parts.push(stateText(s, ctx.label));
+  parts.push(stateText(s, ctx.labels));
   if (s.degraded.length > 0) parts.push(`warning: ${s.degraded.join(', ')}`);
   return parts.join(' · ');
 }
@@ -213,7 +217,7 @@ export function killConfirmation(s: Session, ctx: DescribeContext): { message: s
     `Age: ${sessionAge(s, ctx.now)}`,
     `Memory: ${s.memoryBytes !== undefined ? memoryText(s.memoryBytes) : 'unknown'}`,
   ];
-  if (s.attached) lines.push(attachedHere(s, ctx.label) ? 'Attached in this window.' : 'Attached in another window.');
+  if (s.attached) lines.push(attachedHere(s, ctx.labels) ? 'Attached in this window.' : 'Attached in another window.');
   return {
     message: `Kill ${displayName(s)}?`,
     detail: `${lines.join('\n')}\n\nThe program and everything it started in its terminal will be ended.`,

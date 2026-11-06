@@ -12,7 +12,6 @@ import {
   apiError,
   EndReporter,
   errorCode,
-  isAttachedHere,
   matchesFilter,
   PerchApiError,
   sendErrorCode,
@@ -21,7 +20,7 @@ import {
   toSessionInfo,
 } from '../core/api';
 import { PerchCli } from '../core/cli';
-import { isEnded, ListDiff, Session } from '../core/sessions';
+import { attachedHere, isEnded, ListDiff, Session } from '../core/sessions';
 import { CloseOutcome, Terminals } from './terminals';
 
 export type { SessionInfo, ApiErrorCode } from '../core/api';
@@ -170,7 +169,7 @@ export class Api implements vscode.Disposable {
   }
 
   private info(s: Session): SessionInfo {
-    return toSessionInfo(s, isAttachedHere(s, this.deps.terminals.labels()));
+    return toSessionInfo(s, attachedHere(s, this.deps.terminals.labels()));
   }
 
   /** The listed session, or what this window's launch said about one not listed yet. */

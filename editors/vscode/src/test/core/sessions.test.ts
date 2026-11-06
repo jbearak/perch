@@ -20,7 +20,9 @@ import {
 
 const now = Date.parse('2026-10-29T18:04:05Z');
 const label = '0123456789abcdef#deadbeef';
-const ctx = { now, home: '/home/me', label };
+/** A terminal this window adopted from an earlier activation keeps that activation's label. */
+const adopted = '0123456789abcdef#0badcafe';
+const ctx = { now, home: '/home/me', labels: [label, adopted] };
 
 function session(over: Partial<Session> = {}): Session {
   return {
@@ -123,8 +125,16 @@ describe('sessions', () => {
       describeSession(session({ state: 'exited', exit: { code: 1 }, degraded: ['directory-recreated'] }), ctx),
       'python · ~/thesis · 3h · exited, exit code 1 · warning: directory-recreated',
     );
-    assert.strictEqual(stateText(session({ state: 'lost' }), label), 'lost');
-    assert.strictEqual(stateText(session({ state: 'unresponsive' }), label), 'unresponsive');
+    assert.strictEqual(stateText(session({ state: 'lost' }), [label]), 'lost');
+    assert.strictEqual(stateText(session({ state: 'unresponsive' }), [label]), 'unresponsive');
+  });
+
+  it('counts a session attached by any of this window’s labels as attached here', () => {
+    const s = session({ attached: true, clientLabel: adopted });
+    assert.strictEqual(describeSession(s, ctx), 'python · ~/thesis · 3h · attached here');
+    assert.match(killConfirmation(s, ctx).detail, /Attached in this window\./);
+    assert.strictEqual(stateText(s, [label]), 'attached');
+    assert.strictEqual(stateText(session({ clientLabel: adopted }), ctx.labels), 'detached');
   });
 
   it('picks icons by kind, then by state', () => {
