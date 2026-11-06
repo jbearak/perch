@@ -32,7 +32,7 @@ use crate::input::{Input, QueueFull};
 use crate::meta::{self, Exit, Meta};
 use crate::model::feed::{Feeder, Step};
 use crate::model::{self as model_mod, Model};
-use crate::proto::{self, Decoder, ErrorBody, Hello, Welcome, kind};
+use crate::proto::{self, Decoder, DetachReason, ErrorBody, Hello, Welcome, kind};
 use crate::queries::{self, ModelState, Queries, QueryId};
 use crate::runtime::{self, RuntimeDir};
 use crate::sys::{self, Lock, PollFd};
@@ -397,8 +397,8 @@ fn build_dir(rt: &RuntimeDir) -> io::Result<(OsString, OwnedFd, UnixListener, sy
         let logf = sys::open_file_at(dir.as_fd(), OsStr::new(LOG_FILE), sys::OpenMode::Append)?;
         sys::dup2(logf.as_raw_fd(), 2)?;
         drop(logf);
-        let listener = bind_socket(rt, &name, "sock")?;
-        let sock_stat = sys::fstatat(dir.as_fd(), OsStr::new("sock"))?;
+        let listener = bind_socket(rt, &name, runtime::SOCK)?;
+        let sock_stat = sys::fstatat(dir.as_fd(), OsStr::new(runtime::SOCK))?;
         Ok((dir, listener, sock_stat))
     })();
     match built {
@@ -1191,7 +1191,7 @@ impl Supervisor {
                 let attached = self.client.is_some();
                 if attached {
                     log("detach requested");
-                    self.client_leaves(Some("detach"));
+                    self.client_leaves(Some(DetachReason::Detach));
                 }
                 proto::ok_response(&id, json!({ "detached": attached }))
             }
@@ -1571,10 +1571,10 @@ impl Supervisor {
     fn tombstone(&mut self, tail: Tail) {
         self.meta.state = meta::EXITED.into();
         self.meta.ended_at = Some(clock::rfc3339(clock::unix_now()));
-        let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new("tail.txt"), false);
+        let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new(runtime::TAIL), false);
         if let Ok(mut f) = sys::open_file_at(
             self.dir.as_fd(),
-            OsStr::new("tail.txt"),
+            OsStr::new(runtime::TAIL),
             sys::OpenMode::CreateNew,
         ) {
             let bytes = match tail {
@@ -1586,7 +1586,7 @@ impl Supervisor {
             }
         }
         self.write_meta();
-        let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new("sock"), false);
+        let _ = sys::unlink_at(self.dir.as_fd(), OsStr::new(runtime::SOCK), false);
         log(&format!(
             "session ended: {}",
             self.meta
@@ -1632,7 +1632,7 @@ impl Supervisor {
         match sys::fstatat(self.rt.fd.as_fd(), &id) {
             Ok(st) if st.same_file(&held) => {
                 self.conflict_logged = false;
-                let ours = sys::fstatat(self.dir.as_fd(), OsStr::new("sock"))
+                let ours = sys::fstatat(self.dir.as_fd(), OsStr::new(runtime::SOCK))
                     .is_ok_and(|s| s.same_file(&self.sock_stat));
                 if !ours {
                     self.rebind_socket();
@@ -1660,9 +1660,9 @@ impl Supervisor {
                 self.dir.as_fd(),
                 OsStr::new(&tmp),
                 self.dir.as_fd(),
-                OsStr::new("sock"),
+                OsStr::new(runtime::SOCK),
             )?;
-            let st = sys::fstatat(self.dir.as_fd(), OsStr::new("sock"))?;
+            let st = sys::fstatat(self.dir.as_fd(), OsStr::new(runtime::SOCK))?;
             Ok::<_, io::Error>((listener, st))
         })();
         match res {

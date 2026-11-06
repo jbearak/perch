@@ -26,7 +26,9 @@ use super::log::log;
 use super::{Conn, Phase, Supervisor, read_conn, send_error};
 use crate::flow::{self, ClientFlow, Frame};
 use crate::meta::Exit;
-use crate::proto::{self, Attach, Attached, Detached, ErrorBody, Exited, RestoreMode, kind};
+use crate::proto::{
+    self, Attach, Attached, DetachReason, Detached, ErrorBody, Exited, RestoreMode, kind,
+};
 use crate::queries::QueryId;
 use crate::restore::{self, Mode, Restore};
 use crate::transport::Transport;
@@ -141,7 +143,7 @@ impl Supervisor {
                 self.conns.push(conn);
                 return;
             }
-            self.client_leaves(Some("takeover"));
+            self.client_leaves(Some(DetachReason::Takeover));
         }
         if self.killing.is_some() || self.ending.is_some() || self.program_status.is_some() {
             send_error(&mut conn, ErrorBody::new("ending", "the session is ending"));
@@ -486,7 +488,7 @@ impl Supervisor {
                 }
                 flow::Event::TooSlow => {
                     log("the client stalled 3 times within 10 minutes: detaching it");
-                    self.client_leaves(Some("too_slow"));
+                    self.client_leaves(Some(DetachReason::TooSlow));
                     return;
                 }
                 flow::Event::ResyncDue => self.request_restore(Mode::Screen),
@@ -514,7 +516,7 @@ impl Supervisor {
     /// told why (`reason`), otherwise it has gone. What it already sent is
     /// read and passed on first; queries still outstanding are answered;
     /// later input from it is discarded.
-    pub(super) fn client_leaves(&mut self, reason: Option<&str>) {
+    pub(super) fn client_leaves(&mut self, reason: Option<DetachReason>) {
         let Some(mut c) = self.client.take() else {
             return;
         };
@@ -545,7 +547,7 @@ impl Supervisor {
         log(&format!(
             "client {} left{}",
             c.label,
-            reason.map_or_else(String::new, |r| format!(" ({r})"))
+            reason.map_or_else(String::new, |r| format!(" ({r:?})"))
         ));
         let Some(reason) = reason else {
             return;
@@ -553,18 +555,20 @@ impl Supervisor {
         if c.conn.dead || c.write_failed {
             return;
         }
+        let last = proto::encode_json(kind::DETACHED, &Detached { reason });
+        self.send_last(c, last);
+    }
+
+    /// A leaving client's last frame, after the rest of any frame partly
+    /// written; then its connection closes.
+    fn send_last(&mut self, c: Client, frame: Vec<u8>) {
         let mut conn = c.conn;
         if let Some(rest) = c.flow.started() {
             let mut out = rest.to_vec();
             out.append(&mut conn.out);
             conn.out = out;
         }
-        conn.out.extend(proto::encode_json(
-            kind::DETACHED,
-            &Detached {
-                reason: reason.to_owned(),
-            },
-        ));
+        conn.out.extend(frame);
         conn.phase = Phase::Leaving;
         conn.closing = true;
         self.conns.push(conn);
@@ -585,22 +589,14 @@ impl Supervisor {
         let Some(c) = self.client.take() else {
             return;
         };
-        let mut conn = c.conn;
-        if let Some(rest) = c.flow.started() {
-            let mut out = rest.to_vec();
-            out.append(&mut conn.out);
-            conn.out = out;
-        }
-        conn.out.extend(proto::encode_json(
+        let last = proto::encode_json(
             kind::EXITED,
             &Exited {
                 exit: exit.clone(),
                 status: exit_status(exit, start_failure),
             },
-        ));
-        conn.phase = Phase::Leaving;
-        conn.closing = true;
-        self.conns.push(conn);
+        );
+        self.send_last(c, last);
     }
 
     /// The program did not start for the attached creator: it hears why,

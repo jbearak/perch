@@ -22,6 +22,11 @@ use crate::clock;
 use crate::meta::{self, Meta};
 use crate::sys::{self, Lock};
 
+/// The supervisor's socket, in its session directory.
+pub const SOCK: &str = "sock";
+/// The program's last output, written when it exits while detached.
+pub const TAIL: &str = "tail.txt";
+
 /// A session directory younger than this is never touched by others.
 pub const YOUNG: Duration = Duration::from_secs(10);
 /// `.new-*` and `.trash-*` directories older than this are removed.
@@ -231,6 +236,11 @@ impl Entry {
     /// The session directory's path.
     pub fn path(&self, rt: &RuntimeDir) -> PathBuf {
         rt.path.join(&self.dir_name)
+    }
+
+    /// The supervisor's socket.
+    pub fn sock_path(&self, rt: &RuntimeDir) -> PathBuf {
+        self.path(rt).join(SOCK)
     }
 }
 

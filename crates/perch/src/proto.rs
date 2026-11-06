@@ -261,11 +261,25 @@ pub struct Resize {
     pub cols: u16,
 }
 
-/// Why a client is no longer attached: `takeover`, `detach` (asked for
-/// with the `detach` op) or `too_slow`.
+/// Why a client is no longer attached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detached {
-    pub reason: String,
+    pub reason: DetachReason,
+}
+
+/// A [`Detached`] reason, as the wire spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachReason {
+    /// Asked for with the `detach` op.
+    Detach,
+    /// Another client attached.
+    Takeover,
+    /// The client stalled too often.
+    TooSlow,
+    /// A reason from a newer supervisor.
+    #[serde(other)]
+    Other,
 }
 
 /// How the program ended, as in `meta.json`'s `exit`.
@@ -330,6 +344,24 @@ pub fn error_response(id: &Value, code: &str, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detach_reasons_as_the_wire_spells_them() {
+        for (reason, wire) in [
+            (DetachReason::Detach, "detach"),
+            (DetachReason::Takeover, "takeover"),
+            (DetachReason::TooSlow, "too_slow"),
+        ] {
+            let json = format!(r#"{{"reason":"{wire}"}}"#);
+            assert_eq!(serde_json::to_string(&Detached { reason }).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<Detached>(&json).unwrap().reason,
+                reason
+            );
+        }
+        let newer: Detached = serde_json::from_str(r#"{"reason":"moved"}"#).unwrap();
+        assert_eq!(newer.reason, DetachReason::Other);
+    }
 
     #[test]
     fn round_trip_in_every_split() {

@@ -279,7 +279,7 @@ fn start(o: Options) -> Result<ExitCode, String> {
         attach: !o.detached,
         links,
     };
-    let sock = rt.path.join(&id).join("sock");
+    let sock = rt.path.join(&id).join(runtime::SOCK);
     // The creator's own attach sends the values the links start with: those
     // of the session's environment, including `--env`, not only Perch's own.
     let link_values: BTreeMap<String, String> = cfg

@@ -33,7 +33,7 @@ pub(super) fn connect(
     e: &Entry,
     timeout: Duration,
 ) -> Result<Client, ClientError> {
-    Client::connect(&e.path(rt).join("sock"), LABEL, timeout)
+    Client::connect(&e.sock_path(rt), LABEL, timeout)
 }
 
 /// Asks a live supervisor for its live fields, within 500 ms in all.

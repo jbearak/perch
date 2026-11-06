@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 
 use super::{ClientError, Connection};
 use crate::proto::{
-    self, Attach, Attached, Decoder, Detached, Exited, Hello, Resize, RestoreMode, kind,
+    self, Attach, Attached, Decoder, DetachReason, Detached, Exited, Hello, Resize, RestoreMode,
+    kind,
 };
 use crate::sys::{self, PollFd};
 
@@ -558,15 +559,15 @@ fn relay(session: Session, sig_r: &OwnedFd, key: Option<DetachKey>) -> End {
                     kind::DETACHED => {
                         let reason = serde_json::from_slice::<Detached>(&f.payload)
                             .map(|d| d.reason)
-                            .unwrap_or_default();
-                        return match reason.as_str() {
-                            "takeover" => End::Offer(
+                            .unwrap_or(DetachReason::Other);
+                        return match reason {
+                            DetachReason::Takeover => End::Offer(
                                 "Opened in another window. Press Enter to take it back, or close this terminal.",
                             ),
-                            "too_slow" => End::Offer(
+                            DetachReason::TooSlow => End::Offer(
                                 "This terminal could not keep up. Press Enter to attach again, or close this terminal.",
                             ),
-                            _ => End::Detached,
+                            DetachReason::Detach | DetachReason::Other => End::Detached,
                         };
                     }
                     _ => {}
