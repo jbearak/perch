@@ -17,6 +17,7 @@ import { programLaunches } from '../core/repls';
 import {
   adopt,
   closeAction,
+  CloseOutcome,
   openStep,
   ExitReason,
   RestoreSet,
@@ -75,14 +76,7 @@ const askCommand: AskCommand = () =>
     placeHolder: 'htop',
   });
 
-/** What happened when a Perch terminal closed, for the tests. */
-export interface CloseOutcome {
-  id: string;
-  reason: ExitReason;
-  code: number | undefined;
-  /** `forget`, `keep`, `ignore`, or for code 75 `busy` or `ended`. */
-  result: string;
-}
+export type { CloseOutcome } from '../core/restore';
 
 /** A terminal attached to a session, as `onDidAttach` reports it. */
 export interface Attached {

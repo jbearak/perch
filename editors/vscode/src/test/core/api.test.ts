@@ -5,6 +5,7 @@ import {
   API_VERSIONS,
   apiError,
   EndReporter,
+  EndReporterDeps,
   errorCode,
   matchesFilter,
   PerchApiError,
@@ -14,6 +15,7 @@ import {
   toSessionInfo,
 } from '../../core/api';
 import { annotateArgs, PerchError, sendArgs } from '../../core/cli';
+import { CloseOutcome } from '../../core/restore';
 import { diffSessions, Session } from '../../core/sessions';
 
 function session(over: Partial<Session> = {}): Session {
@@ -173,8 +175,32 @@ describe('API core', () => {
   });
 
   describe('reporting ends', () => {
+    /** `perch info` calls, and a reporter whose `perch info` gives `info` (or throws, for an Error). */
+    function reporter(info: Session | undefined | Error = undefined, over: Partial<EndReporterDeps> = {}) {
+      const calls: string[] = [];
+      const r = new EndReporter({
+        info: (id) => {
+          calls.push(id);
+          return info instanceof Error ? Promise.reject(info) : Promise.resolve(info);
+        },
+        find: () => undefined,
+        now: () => 0,
+        ...over,
+      });
+      return { r, calls };
+    }
+    /** This window's terminal of the session ended with its process. */
+    const exited = (code?: number, over: Partial<CloseOutcome> = {}): CloseOutcome => ({
+      id: 'abcd1234',
+      reason: 'process',
+      code,
+      result: 'forget',
+      ...over,
+    });
+    const unreachable = new Error('perch info did not answer');
+
     it('reports each end once, with the tombstone’s exit', () => {
-      const r = new EndReporter();
+      const { r } = reporter();
       const live = session();
       const dead = session({ state: 'exited', attached: false, exit: { code: 2 } });
       const first = r.ended(diffSessions([live], [dead]).ended);
@@ -185,44 +211,61 @@ describe('API core', () => {
       assert.deepStrictEqual(r.ended(diffSessions([live], [dead]).ended), []);
     });
 
-    it('a session gone without a tombstone takes the exit this window’s terminal received', () => {
-      const r = new EndReporter();
-      r.terminalExit('abcd1234', 7);
+    it('a session gone without a tombstone takes the exit this window’s terminal received', async () => {
+      const { r } = reporter(unreachable);
+      assert.strictEqual(await r.closed(exited(7)), undefined);
       const [s] = r.ended(diffSessions([session()], []).ended);
       assert.strictEqual(s.state, 'exited');
       assert.deepStrictEqual(s.exit, { code: 7 });
     });
 
     it('and with no terminal there, its exit status is unknown', () => {
-      const r = new EndReporter();
+      const { r } = reporter();
       const [s] = r.ended(diffSessions([session()], []).ended);
       assert.strictEqual(s.exit, undefined);
     });
 
-    it('a confirmed end seen through this window’s terminal is reported once, whichever path sees it first', () => {
-      const r = new EndReporter();
-      r.terminalExit('abcd1234', 5);
+    it('a terminal closed by the user, by the extension, or by a busy attach is no end', async () => {
+      const { r, calls } = reporter();
+      r.attached(session());
+      assert.strictEqual(await r.closed(exited(undefined, { reason: 'user' })), undefined);
+      assert.strictEqual(await r.closed(exited(undefined, { reason: 'extension' })), undefined);
+      assert.strictEqual(await r.closed(exited(75, { result: 'busy' })), undefined);
+      assert.deepStrictEqual(calls, [], 'perch info is not asked');
+    });
+
+    it('a session perch info shows live (detached, or taken over) is no end', async () => {
+      const { r } = reporter(session({ clientLabel: 'fedcba9876543210#bbbbbbbb' }));
+      r.attached(session());
+      assert.strictEqual(await r.closed(exited(0)), undefined);
+      assert.deepStrictEqual(r.reconcile([]), [], 'nothing left pending');
+    });
+
+    it('a confirmed end seen through this window’s terminal is reported once, whichever path sees it first', async () => {
+      const { r } = reporter();
       // Never listed: known only from its attach.
-      const s = r.confirmedEnd(undefined, session());
+      r.attached(session());
+      const s = await r.closed(exited(5));
       assert.strictEqual(s?.state, 'exited');
       assert.strictEqual(s?.attached, false);
       assert.deepStrictEqual(s?.exit, { code: 5 });
       assert.deepStrictEqual(r.ended(diffSessions([session()], []).ended), [], 'a later listing does not repeat it');
-      assert.strictEqual(r.confirmedEnd(undefined, session()), undefined);
+      assert.strictEqual(await r.closed(exited(5)), undefined);
       // The listing first, then the terminal.
-      const r2 = new EndReporter();
+      const { r: r2 } = reporter(undefined, { find: () => session() });
       assert.strictEqual(r2.ended(diffSessions([session()], []).ended).length, 1);
-      assert.strictEqual(r2.confirmedEnd(undefined, session()), undefined);
+      assert.strictEqual(await r2.closed(exited()), undefined);
       // A tombstone's own exit wins; nothing known means nothing to report.
       const tomb = session({ state: 'exited', attached: false, exit: { signal: 'SIGKILL' } });
-      assert.deepStrictEqual(new EndReporter().confirmedEnd(tomb, undefined)?.exit, { signal: 'SIGKILL' });
-      assert.strictEqual(new EndReporter().confirmedEnd(undefined, undefined), undefined);
+      assert.deepStrictEqual((await reporter(tomb).r.closed(exited(9)))?.exit, { signal: 'SIGKILL' });
+      assert.strictEqual(await reporter().r.closed(exited()), undefined);
     });
 
-    it('an end whose confirmation failed is reported once by the next successful listing without the session', () => {
-      const r = new EndReporter();
+    it('an end whose confirmation failed is reported once by the next successful listing without the session', async () => {
+      const { r } = reporter(unreachable);
       // Created and exited between listings; `perch info` failed once.
-      r.unconfirmed('abcd1234', session());
+      r.attached(session());
+      await r.closed(exited());
       const [s, ...rest] = r.reconcile([]);
       assert.deepStrictEqual(rest, []);
       assert.strictEqual(s.id, 'abcd1234');
@@ -232,27 +275,26 @@ describe('API core', () => {
       assert.deepStrictEqual(r.ended(diffSessions([session()], []).ended), [], 'and not again by a diff');
     });
 
-    it('with the exit this window’s terminal received, or the tombstone’s', () => {
-      const r = new EndReporter();
-      r.terminalExit('abcd1234', 5);
-      r.unconfirmed('abcd1234', session());
+    it('with the exit this window’s terminal received, or the tombstone’s', async () => {
+      const { r } = reporter(unreachable, { find: () => session() });
+      await r.closed(exited(5));
       assert.deepStrictEqual(r.reconcile([])[0].exit, { code: 5 });
-      const r2 = new EndReporter();
-      r2.unconfirmed('abcd1234', session());
+      const { r: r2 } = reporter(unreachable, { find: () => session() });
+      await r2.closed(exited());
       const tomb = session({ state: 'exited', attached: false, exit: { code: 2 } });
       assert.deepStrictEqual(r2.reconcile([tomb])[0].exit, { code: 2 });
     });
 
-    it('a listing that shows it running (taken over) reports nothing and drops it', () => {
-      const r = new EndReporter();
-      r.unconfirmed('abcd1234', session());
+    it('a listing that shows it running (taken over) reports nothing and drops it', async () => {
+      const { r } = reporter(unreachable, { find: () => session() });
+      await r.closed(exited());
       assert.deepStrictEqual(r.reconcile([session({ clientLabel: 'fedcba9876543210#bbbbbbbb' })]), []);
       assert.deepStrictEqual(r.reconcile([]), [], 'dropped: its later end is a listing’s to report');
     });
 
-    it('a listing started before the end was left pending does not decide it', () => {
-      const r = new EndReporter();
-      r.unconfirmed('abcd1234', session(), 100);
+    it('a listing started before the end was left pending does not decide it', async () => {
+      const { r } = reporter(unreachable, { find: () => session(), now: () => 100 });
+      await r.closed(exited());
       // Asked for before: it may predate the session or its takeover.
       assert.deepStrictEqual(r.reconcile([], 50), []);
       assert.deepStrictEqual(r.reconcile([], 100), []);
@@ -260,15 +302,15 @@ describe('API core', () => {
       assert.strictEqual(r.reconcile([], 150).length, 1);
     });
 
-    it('an unresponsive session stays pending', () => {
-      const r = new EndReporter();
-      r.unconfirmed('abcd1234', session());
+    it('an unresponsive session stays pending', async () => {
+      const { r } = reporter(unreachable, { find: () => session() });
+      await r.closed(exited());
       assert.deepStrictEqual(r.reconcile([session({ state: 'unresponsive' })]), []);
       assert.strictEqual(r.reconcile([]).length, 1);
     });
 
     it('does not report sessions already ended at the first listing', () => {
-      const r = new EndReporter();
+      const { r } = reporter();
       assert.deepStrictEqual(r.ended(diffSessions([], [session({ state: 'lost' })]).ended), []);
     });
   });
