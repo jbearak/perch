@@ -28,7 +28,7 @@ use crate::flow::{self, ClientFlow, Frame};
 use crate::meta::Exit;
 use crate::proto::{self, Attach, Attached, Detached, ErrorBody, Exited, RestoreMode, kind};
 use crate::queries::QueryId;
-use crate::restore::{self, Mode, Nudge};
+use crate::restore::{self, Mode, Restore};
 use crate::transport::Transport;
 use crate::{clock, env_links, sys};
 
@@ -240,30 +240,24 @@ impl Supervisor {
                     rows,
                 });
             }
-            None => {
-                let r = restore::partial(rc, paste);
-                self.enqueue_restore(epoch, &r.bytes, held, (cols, rows), r.nudge);
-            }
+            None => self.enqueue_restore(epoch, restore::partial(rc, paste), held),
         }
     }
 
     /// Queues a restore ahead of live output, the held-back bytes after
-    /// it, and resizes the model and the PTY to the client's size.
-    fn enqueue_restore(
-        &mut self,
-        epoch: u64,
-        bytes: &[u8],
-        held: Vec<u8>,
-        size: (u16, u16),
-        nudge: Option<Nudge>,
-    ) {
+    /// it, and resizes the model and the PTY to the restore's size.
+    fn enqueue_restore(&mut self, epoch: u64, r: Restore, held: Vec<u8>) {
         let now = self.elapsed();
         let Some(c) = self.client.as_mut() else {
             return;
         };
-        if !c.flow.restore_enqueued(epoch, restore_frames(bytes), now) {
+        if !c
+            .flow
+            .restore_enqueued(epoch, restore_frames(&r.bytes), now)
+        {
             return;
         }
+        let Restore { size, nudge, .. } = r;
         if !c.withhold {
             push_held(&mut c.flow, &held, now);
         }
@@ -298,17 +292,9 @@ impl Supervisor {
             rows: p.rows,
             scrollback_rows: c.scrollback,
         };
-        if id.is_none() || bytes.is_empty() {
-            let paste = self.feeder.tracker().bracketed_paste();
-            let r = restore::partial(rc, paste);
-            // A failed model is not resized; a later one starts at this
-            // size.
-            self.model.resize(p.cols, p.rows);
-            self.enqueue_restore(p.epoch, &r.bytes, p.held, (p.cols, p.rows), r.nudge);
-        } else {
-            let nudge = fallback.then(|| Nudge::for_size(p.cols, p.rows));
-            self.enqueue_restore(p.epoch, &bytes, p.held, (p.cols, p.rows), nudge);
-        }
+        let paste = self.feeder.tracker().bracketed_paste();
+        let r = restore::from_model(bytes, fallback, rc, paste);
+        self.enqueue_restore(p.epoch, r, p.held);
     }
 
     /// The model failed: a restore waiting on it is built without it.

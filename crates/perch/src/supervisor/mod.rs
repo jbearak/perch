@@ -577,7 +577,7 @@ impl Supervisor {
             return self.end_start_failed(msg, delivered);
         }
         self.model.start(false);
-        self.apply_model_state();
+        self.handle_model_events();
 
         loop {
             #[cfg(feature = "test-hooks")]
@@ -897,9 +897,7 @@ impl Supervisor {
     /// Output read from the PTY: through the tracker to the model, with
     /// each query given its owner.
     fn output(&mut self, chunk: &[u8]) {
-        if self.model.restart_if_due(self.feeder.at_ground_point()) {
-            self.apply_model_state();
-        }
+        self.model.restart_if_due(self.feeder.at_ground_point());
         self.model.check_backlog();
         let base = self.feeder.tracker().fed();
         // Where the client's frames are cut: after each query it owns.
@@ -909,7 +907,8 @@ impl Supervisor {
             match step {
                 Step::Frame { n, bytes } => self.model.send_frame(n, &bytes),
                 Step::Query { id, kind, end } => {
-                    // The model may have failed on this read already.
+                    // The model's state may have changed on this read
+                    // already: `queries` must know before the query.
                     self.handle_model_events();
                     if self.queries.client_owns() {
                         cuts.push((end, id));
@@ -922,20 +921,14 @@ impl Supervisor {
                         from = Some(i);
                     }
                 }
-                Step::Reset => {
-                    if self.model.reset_seen() {
-                        self.apply_model_state();
-                    }
-                }
+                Step::Reset => self.model.reset_seen(),
                 Step::Discarded => {
                     log("a sequence over 16 MiB was not given to the model");
                 }
                 Step::Partial => {
                     log("a sequence over 16 MiB was fed to the model in pieces; it is partial");
                     self.model.released_long_sequence();
-                    if self.model.mark_partial() {
-                        self.apply_model_state();
-                    }
+                    self.model.mark_partial();
                 }
             }
         }
@@ -949,20 +942,12 @@ impl Supervisor {
             }
             None => self.client_output(chunk, base, &cuts),
         }
-        if self.model.restart_if_due(self.feeder.at_ground_point()) {
-            self.apply_model_state();
-        }
+        self.model.restart_if_due(self.feeder.at_ground_point());
         self.handle_model_events();
     }
 
     fn elapsed(&self) -> Duration {
         self.epoch.elapsed()
-    }
-
-    /// Tells `queries` the model's state.
-    fn apply_model_state(&mut self) {
-        let events = self.queries.set_model(self.model.state());
-        self.apply_queries(events);
     }
 
     fn apply_queries(&mut self, events: Vec<queries::Event>) {
@@ -987,9 +972,12 @@ impl Supervisor {
             }
             for e in events {
                 match e {
-                    model_mod::Event::Failed => {
-                        self.apply_model_state();
-                        self.model_failed_restore();
+                    model_mod::Event::State(state) => {
+                        let events = self.queries.set_model(state);
+                        self.apply_queries(events);
+                        if state == ModelState::Failed {
+                            self.model_failed_restore();
+                        }
                     }
                     model_mod::Event::Restore {
                         id,
